@@ -87,8 +87,8 @@ while ($true) {
 
                 # Check for new events
                 $cursor = $eventCursors[$tidStr] ?? 0
-                $events = Get-TaskEvents $tidStr $cursor 50
-                if ($events -and $events.Count -gt 0) {
+                $events = @(Get-TaskEvents $tidStr $cursor 50)
+                if ($events.Count -gt 0) {
                     foreach ($evt in $events) {
                         $kind = $evt.kind
                         $seq = $evt.sequence
@@ -107,7 +107,7 @@ while ($true) {
                     }
                 }
             } catch {
-                # Task might not be queryable yet
+                Write-Verbose "Task $tidStr poll failed: $($_.Exception.Message)"
             }
         }
 

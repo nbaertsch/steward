@@ -1,5 +1,7 @@
 **/bin/
 **/obj/
+**/x64/Debug/
+**/x64/Release/
 .vs/
 .vscode/
 .idea/

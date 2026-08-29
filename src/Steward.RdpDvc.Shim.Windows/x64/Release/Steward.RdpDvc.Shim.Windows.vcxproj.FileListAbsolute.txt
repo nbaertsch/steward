@@ -1,1 +1,0 @@
-C:\Users\noahbaertsch\Projects\Switchyard\src\Steward.RdpDvc.Shim.Windows\x64\Release\Steward.RdpDvc.Shim.Windows.dll
