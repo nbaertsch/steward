@@ -15,16 +15,16 @@ not deployment dependencies.
 
 | ID | Status | Required proof | Decision unlocked |
 | --- | --- | --- | --- |
-| E-01 | Open | Direct authenticated peer sessions: both dial directions, enrollment, reconnect, cursor resume, multiplexing, terminal latency, key rotation, replay/downgrade and no-route behavior. See [direct peer evidence](evidence/direct-peer-transport.md). | Transport binding and deployment prerequisites |
-| E-02 | Open | Disconnect Control during a durable multi-Task Delegation; prove generation/resource/rate/identity/deadline limits, crash recovery, exact journal replay, and no duplicate effects. | Delegation and reconciliation freeze |
-| E-03 | Open | OS-vault protection, direct-session delivery, expiry, scrub, disk theft, cross-Task denial, and no renewal while Control is unavailable. See [credential evidence](evidence/credential-delivery.md). | IdentityGrant and delivery binding |
-| E-04 | Open | Private source/package and external Workload-target credentials use only Task-bound local grants; expiry never substitutes identity. | Workload credential adapters |
+| E-01 | Narrowed | Direct authenticated peer sessions: both dial directions, enrollment, reconnect, cursor resume, multiplexing, terminal latency, key rotation, replay/downgrade and no-route behavior. Offline tests pass: `Either_role_can_dial_and_exchange_multiplexed_payloads`, `Reconnect_resumes_each_stream_from_negotiated_cursors`, `Handshake_rejects_the_wrong_enrolled_identity`, `Replayed_encrypted_record_is_rejected`, `Replayed_or_out_of_order_frame_is_rejected`. See [direct peer evidence](evidence/direct-peer-transport.md). | Transport binding and deployment prerequisites |
+| E-02 | Narrowed | Disconnect Control during a durable multi-Task Delegation; prove generation/resource/rate/identity/deadline limits, crash recovery, exact journal replay, and no duplicate effects. Offline tests pass: `Three_task_dependency_survives_disconnect_and_node_restart_then_replays_once`, `Restart_observing_accepted_command_requires_reconciliation_and_never_reexecutes`, `Completion_cancel_race_records_one_terminal_outcome`, `Node_restart_recovers_running_execution_without_duplicate_start`, `Unsupported_running_recovery_is_ambiguous_and_never_relaunches`. | Delegation and reconciliation freeze |
+| E-03 | Narrowed | OS-vault protection, direct-session delivery, expiry, scrub, disk theft, cross-Task denial, and no renewal while Control is unavailable. Offline tests pass: `Direct_delivery_enforces_every_binding_and_removes_node_handle_after_attempt`, `Grant_delivery_is_single_use_and_revocation_fails_closed`, `Missing_or_corrupt_protected_secret_fails_closed_after_restart`, `Renewal_requires_connected_Control_and_returns_explicit_offline_disposition`, `Node_processor_does_not_persist_Identity_stream_cursor_or_payload`. See [credential evidence](evidence/credential-delivery.md). | IdentityGrant and delivery binding |
+| E-04 | Narrowed | Private source/package and external Workload-target credentials use only Task-bound local grants; expiry never substitutes identity. Covered by `Task_bound_identity_is_resolved_at_execution_and_secret_is_never_serialized` and `Private_acquisition_contains_typed_identity_references_but_no_credentials`. | Workload credential adapters |
 | E-05 | Narrowed | Local Job Object spike proves retained-handle requirements. Complete SCM, upgrade, reboot, atomic launch, nested-job and supported-Host matrix. See [Windows continuity evidence](evidence/windows-job-continuity.md). | Windows service topology |
-| E-06 | Open | Disconnect filesystem peers while producing sustained output; prove spool reserve, quotas, exact replay, and nonblocking output policy. | Spool limits |
-| E-07 | Open | Interrupt filesystem write/replication boundaries; prove safe paths, atomic publication, hash verification, deduplication, receipts, corruption handling, migration races and restore. See [portable-state evidence](evidence/portable-state.md). | Portable-object binding |
+| E-06 | Narrowed | Disconnect filesystem peers while producing sustained output; prove spool reserve, quotas, exact replay, and nonblocking output policy. Offline tests pass: `Expired_authority_keeps_output_queued_locally`, `Admission_enforces_hard_limit_and_os_reserve`, `Spool_monitor_failure_records_evidence_and_fails_closed`. | Spool limits |
+| E-07 | Narrowed | Interrupt filesystem write/replication boundaries; prove safe paths, atomic publication, hash verification, deduplication, receipts, corruption handling, migration races and restore. Offline tests pass: `Immutable_conflicts_and_on_disk_corruption_are_rejected`, `Partial_chunks_survive_restart_and_resume`, `Restart_removes_interrupted_and_orphaned_staging_files`, `Direct_peer_transfer_is_bounded_and_resumes_from_chunk_receipts`, `Restart_quarantines_path_escape_and_duplicate_portable_id`. See [portable-state evidence](evidence/portable-state.md). | Portable-object binding |
 | E-08 | Narrowed | Dev Box user API/SDK supports Pool/box discovery and user lifecycle LROs. Prove live identity, capability mapping, restart reconciliation, bootstrap handoff, and the prohibited-infrastructure negative boundary. See [Dev Box evidence](evidence/dev-box-provider.md). | Optional provider release |
 | E-09 | Narrowed | Copilot public custom-agent/MCP mechanisms support the adapter but not native remote registration. Prove durable local response replay. See [Copilot evidence](evidence/copilot-cli-bridge.md). | Copilot adapter |
-| E-10 | Open | Clean-machine deployment, dependency and egress inventory, no-cloud configuration, and negative infrastructure scans. See the [deployment evidence record](evidence/no-cloud-deployment.md). | No-cloud-infrastructure release attestation |
+| E-10 | Narrowed | Clean-machine deployment, dependency and egress inventory, no-cloud configuration, and negative infrastructure scans. Static package inventory, code scan, loopback binding, and Core neutrality verified. Remaining: signed release bundle, runtime egress trace, clean-install procedure. See the [deployment evidence record](evidence/no-cloud-deployment.md). | No-cloud-infrastructure release attestation |
 | E-11 | Narrowed | Production DVC LocalServer, exact-session WTS endpoint, authenticated PING/PONG, reconnect, and secure stream mapping are offline tested. The `ms-avd:connect` protocol activation path remains disqualified (visible fullscreen). The replacement `WindowsAppIsolatedConnectionLeaseFactory` launches Windows App on an isolated Windows desktop with Job Object containment, producing zero visible UI until explicit `ShowAsync` activation. RDCore `ConnectionFactory` sets `PopupUIParentWindowHandle=0`, `SessionWindowHandle=0`, `SilentConnectionMode`, and validates all settings are retained. Prove HKCU AddIns activation, cross-session LocalSystem channel open, live isolated-desktop headless evidence, and DVC secure-peer transport over the isolated connection. See [RDP DVC transport](rdp-dvc-transport.md) and [live evidence](evidence/dev-box-rdp-live-acceptance.md). | Dev Box headless reverse-connect release |
 
 ## No-cloud deployment evidence
@@ -92,24 +92,24 @@ process/endpoint inventories, test logs, traces, failures, and reviewer signoff.
 
 ## Contract consistency checklist
 
-- [ ] Core contains no concrete transport, store, identity, provider, runtime,
+- [x] Core contains no concrete transport, store, identity, provider, runtime,
       database, eval harness, or Agent runtime dependency.
-- [ ] Local Stack bindings are explicit and validate bounded configuration.
-- [ ] Workload state is reduced from durable Task facts.
-- [ ] Task and TaskAttempt remain distinct and generation fenced.
-- [ ] StewardAgent remains a durable entity distinct from Task.
-- [ ] Host identity and Node incarnation have distinct lifetimes.
-- [ ] Delegation lists exact work, generations, dependencies, limits, grants,
+- [x] Local Stack bindings are explicit and validate bounded configuration.
+- [x] Workload state is reduced from durable Task facts.
+- [x] Task and TaskAttempt remain distinct and generation fenced.
+- [x] StewardAgent remains a durable entity distinct from Task.
+- [x] Host identity and Node incarnation have distinct lifetimes.
+- [x] Delegation lists exact work, generations, dependencies, limits, grants,
       object policy, and expiry.
-- [ ] Recovery never implies safe relaunch.
-- [ ] Portable objects use content hashes and completeness receipts.
-- [ ] Credential values never enter portable or execution contracts.
-- [ ] External API quotas remain Workload scheduling resources.
-- [ ] Terminal authority and unmanaged mutations are visible.
-- [ ] Dev Box fields contain only user endpoint/project/Pool/user/box and
+- [x] Recovery never implies safe relaunch.
+- [x] Portable objects use content hashes and completeness receipts.
+- [x] Credential values never enter portable or execution contracts.
+- [x] External API quotas remain Workload scheduling resources.
+- [x] Terminal authority and unmanaged mutations are visible.
+- [x] Dev Box fields contain only user endpoint/project/Pool/user/box and
       protected user-operation handles.
-- [ ] No Local Stack descriptor can require a Steward cloud endpoint.
-- [ ] Unknown required features reject safely.
+- [x] No Local Stack descriptor can require a Steward cloud endpoint.
+- [x] Unknown required features reject safely.
 
 ## Confirmed decisions
 

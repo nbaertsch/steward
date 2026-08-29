@@ -2,13 +2,58 @@
 
 ## Status
 
-**Open release gate (E-10).** The architecture and allowed deployment boundary
-are fixed. A signed evidence bundle from release artifacts and clean Windows
-systems is still required before a release may claim conformance.
+**Narrowed (E-10).** Static dependency analysis, package inventory, code
+scan, and loopback binding validation are complete. Remaining: signed release
+evidence bundle from clean Windows install, runtime egress trace, and reviewer
+signoff.
 
-This record distinguishes an architectural invariant from evidence. Passing
-unit tests alone does not prove the deployed process graph, network behavior,
-credential set, or absence of infrastructure provisioning.
+## Static evidence (2026-08-29)
+
+### Package inventory
+
+All NuGet package references in `src/` are classified:
+
+| Category | Packages |
+| --- | --- |
+| Data/state | Microsoft.Data.Sqlite 10.0.4, SQLitePCLRaw.bundle_e_sqlite3 |
+| Identity (WAM) | Azure.Identity 1.17.0, Azure.Identity.Broker 1.3.0, Microsoft.Identity.Client 4.77.0, Microsoft.Identity.Client.Broker 4.77.0, Microsoft.Identity.Client.Extensions.Msal 4.77.0 |
+| Dev Box user SDK | Azure.Developer.DevCenter 1.0.0 |
+| Framework | Microsoft.Extensions.Hosting, .Configuration.Binder, .DI.Abstractions, .Logging.Abstractions |
+| Crypto/ACL | System.Security.Cryptography.ProtectedData 10.0.0, System.IO.FileSystem.AccessControl 5.0.0 |
+| MCP | ModelContextProtocol.AspNetCore 2.2.0 |
+| RDCore hook | Lib.Harmony 2.4.2 |
+| Azure core (auth) | Azure.Core 1.49.0 |
+
+**Prohibited packages found: 0** — no Azure.ResourceManager, Azure.Storage,
+Azure.Messaging, Azure.SignalR, or Microsoft.Azure.Management references.
+
+### Infrastructure provisioning code
+
+**None found.** Scanned `src/` and `scripts/` for `az` CLI, ARM templates,
+Bicep, Terraform, and Azure PowerShell provisioning commands.
+
+### Local Stack port resolution
+
+| Core port | Local Stack binding |
+| --- | --- |
+| Transport | Direct WebSocket peer (`LocalDirectTransportFactory`) |
+| Portable objects | Content-addressed filesystem (`LocalStackContentAddressedObjectStore`) |
+| Credentials | DPAPI OS vault (`DpapiProtectedIdentityVault`) |
+| Durable state | SQLite WAL (`SqliteControlStore`, `NodeJournal`) |
+| Host runtime | Windows Job Objects, processes, ConPTY |
+
+### Loopback binding
+
+Control binds to `http://127.0.0.1:5112` by default with
+`LoopbackBindingValidator.Validate()` and `AllowedHosts` restricted to
+`localhost`, `127.0.0.1`, `[::1]`.
+
+### Core neutrality
+
+Domain and Contracts depend only on `System.*` — zero concrete transport,
+storage, identity, provider, or runtime dependency. Scheduling depends on
+`Steward.Domain`, `Steward.Contracts`, and `Steward.Providers.Abstractions`
+(all neutral interfaces).
 
 ## Invariant under test
 
