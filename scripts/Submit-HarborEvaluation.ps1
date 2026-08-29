@@ -52,6 +52,7 @@ param(
     [string]$InferenceEndpoint,
     [int]$MaxConcurrency = 4,
     [int]$CasesPerHost = 6,
+    [int]$ReplicaCount = 1,
     [string]$IdempotencyKey
 )
 
@@ -183,6 +184,7 @@ $submissionInput = @{
         }
         inferenceRateScope     = "inference"
         inferenceUnitsPerCase  = 1
+        replicaCount           = $ReplicaCount
     }
     harness = @{
         harnessName      = "harbor"
@@ -225,6 +227,8 @@ Write-Host ""
 Write-Host "Submitting harbor evaluation workload..."
 Write-Host "  Pool:            $PoolId"
 Write-Host "  Cases:           $($cases.Count)"
+Write-Host "  Replicas:        $ReplicaCount"
+Write-Host "  Total tasks:     $($cases.Count * $ReplicaCount)"
 Write-Host "  Max concurrency: $MaxConcurrency"
 Write-Host "  Cases per host:  $CasesPerHost"
 Write-Host "  Idempotency key: $IdempotencyKey"
@@ -236,6 +240,7 @@ $submissionJson = $submissionInput | ConvertTo-Json -Depth 20 -Compress
 $cliArgs = @(
     "run", "--project",
     (Join-Path $PSScriptRoot ".." "src" "Steward.Cli" "Steward.Cli.csproj"),
+    "--framework", "net10.0-windows",
     "--",
     "workload-submit-harbor",
     "--input", $submissionJson,

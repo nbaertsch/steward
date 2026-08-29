@@ -266,7 +266,8 @@ public sealed record EvaluationWorkloadInput(
     NormalizedHarnessInventory Inventory,
     EvaluationResourcePolicy? CaseResources = null,
     string InferenceRateScope = "inference",
-    decimal InferenceUnitsPerCase = 1)
+    decimal InferenceUnitsPerCase = 1,
+    int ReplicaCount = 1)
 {
     public void Validate()
     {
@@ -294,6 +295,11 @@ public sealed record EvaluationWorkloadInput(
             throw new ArgumentException("Identity capabilities must be unique.");
         EvaluationSource.Required(InferenceRateScope, "Inference rate scope");
         if (InferenceUnitsPerCase <= 0) throw new ArgumentOutOfRangeException(nameof(InferenceUnitsPerCase));
+        if (ReplicaCount is < 1 or > 10)
+            throw new ArgumentOutOfRangeException(nameof(ReplicaCount), "Replica count must be between 1 and 10.");
+        if ((long)Inventory.Cases.Length * ReplicaCount > EvaluationLimits.MaximumCases)
+            throw new ArgumentException(
+                $"Cases ({Inventory.Cases.Length}) × replicas ({ReplicaCount}) exceeds the {EvaluationLimits.MaximumCases} task limit.");
         _ = (CaseResources ?? new()).ToRequirements();
     }
 

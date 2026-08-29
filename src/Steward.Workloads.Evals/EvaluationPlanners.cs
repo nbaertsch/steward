@@ -132,54 +132,77 @@ public abstract class EvaluationPlannerBase
         var nodes = new List<TaskPlanNode>();
         var setupIds = AddSetupTasks(nodes, input, fingerprint);
         var pendingCases = selectedCases.Where(x => !completed.Contains(x.CaseId)).ToArray();
-        var caseIds = new List<TaskId>(pendingCases.Length);
+        var caseIds = new List<TaskId>();
         var selectedOrdinals = selectedCases.Select((item, index) => (item.CaseId, index))
             .ToDictionary(x => x.CaseId, x => x.index, StringComparer.Ordinal);
+        var replicaCount = input.ReplicaCount;
         foreach (var evaluationCase in pendingCases)
         {
-            var logicalKey = $"eval/{EscapeKey(evaluationCase.CaseId)}";
-            var taskId = Id(fingerprint, logicalKey);
-            caseIds.Add(taskId);
             var command = adapter.CreateCommandTemplate(input, evaluationCase);
-            var shard = selectedOrdinals[evaluationCase.CaseId] / input.ShardPolicy.PreferredCasesPerHost;
-            var affinity = input.ShardPolicy.PreferOneHost ? $"eval:{fingerprint}" : $"eval:{fingerprint}:shard:{shard:D6}";
-            var runnerInput = CreateInput("steward.eval.runner/1.0", new
+            var baseShard = selectedOrdinals[evaluationCase.CaseId] / input.ShardPolicy.PreferredCasesPerHost;
+            for (var replica = 0; replica < replicaCount; replica++)
             {
-                harness = adapter.HarnessName,
-                harnessVersion = adapter.HarnessVersion,
-                adapterProfileVersion = adapter.ProfileVersion,
-                caseId = evaluationCase.CaseId,
-                caseDefinition = evaluationCase.Definition,
-                inventoryHash = input.Inventory.ContentHash,
-                dataset = new { identity = input.Dataset.Identity, hash = input.Dataset.ContentHash },
-                evaluationSet = input.EvaluationSet,
-                taskFilters = input.TaskFilters.Order(StringComparer.Ordinal).ToArray(),
-                modelProfileReference = input.ModelProfileReference,
-                repositoryCommit = input.Repository.ResolvedCommit,
-                harnessCommit = input.Harness.ResolvedCommit,
-                resultLocation = input.Locations.ResultLocation,
-                outputLocation = input.Locations.OutputLocation,
-                command = new
+                var logicalKey = replicaCount == 1
+                    ? $"eval/{EscapeKey(evaluationCase.CaseId)}"
+                    : $"eval/{EscapeKey(evaluationCase.CaseId)}/r{replica}";
+                var taskId = Id(fingerprint, logicalKey);
+                caseIds.Add(taskId);
+                // Distribute replicas of the same case to different shards for node diversity
+                var shard = replicaCount == 1
+                    ? baseShard
+                    : baseShard * replicaCount + replica;
+                var affinity = input.ShardPolicy.PreferOneHost
+                    ? $"eval:{fingerprint}"
+                    : $"eval:{fingerprint}:shard:{shard:D6}";
+                var replicaResultLocation = replicaCount == 1
+                    ? input.Locations.ResultLocation
+                    : $"{input.Locations.ResultLocation}/r{replica}";
+                var replicaOutputLocation = replicaCount == 1
+                    ? input.Locations.OutputLocation
+                    : $"{input.Locations.OutputLocation}/r{replica}";
+                var runnerInput = CreateInput("steward.eval.runner/1.0", new
                 {
-                    executable = command.Executable,
-                    arguments = command.Arguments,
-                    workingDirectory = command.WorkingDirectory,
-                    environmentReferences = command.EnvironmentReferences
-                },
-                parserContract = "steward.eval.json-lines/1.0",
-                retryPolicy = "steward.eval.retry/1.0",
-                maximumWorkloadConcurrency = input.ShardPolicy.MaximumConcurrency,
-                inferenceRateScope = input.InferenceRateScope,
-                maxOutputBytes = 64 * 1024 * 1024,
-                requiredDiskReserveBytes = 256 * 1024 * 1024,
-                identityRequirements = command.EnvironmentReferences?.Select(x =>
-                    new IdentityCapabilityReference(x.Value, x.Key)).ToArray() ?? []
-            });
-            nodes.Add(new(taskId, logicalKey, "evaluation-runner", "1.0",
-                (input.CaseResources ?? new()).ToRequirements(), runnerInput, setupIds,
-                RequiredCapabilities(input), fingerprint, affinity, null, 3, InterruptionClass.Restartable,
-                [new ExternalRateRequirement(input.InferenceRateScope, input.InferenceUnitsPerCase)],
-                $"eval-case:{evaluationCase.CaseId}"));
+                    harness = adapter.HarnessName,
+                    harnessVersion = adapter.HarnessVersion,
+                    adapterProfileVersion = adapter.ProfileVersion,
+                    caseId = evaluationCase.CaseId,
+                    caseDefinition = evaluationCase.Definition,
+                    inventoryHash = input.Inventory.ContentHash,
+                    dataset = new { identity = input.Dataset.Identity, hash = input.Dataset.ContentHash },
+                    evaluationSet = input.EvaluationSet,
+                    taskFilters = input.TaskFilters.Order(StringComparer.Ordinal).ToArray(),
+                    modelProfileReference = input.ModelProfileReference,
+                    repositoryCommit = input.Repository.ResolvedCommit,
+                    harnessCommit = input.Harness.ResolvedCommit,
+                    resultLocation = replicaResultLocation,
+                    outputLocation = replicaOutputLocation,
+                    replicaIndex = replica,
+                    replicaCount = replicaCount,
+                    command = new
+                    {
+                        executable = command.Executable,
+                        arguments = command.Arguments,
+                        workingDirectory = command.WorkingDirectory,
+                        environmentReferences = command.EnvironmentReferences
+                    },
+                    parserContract = "steward.eval.json-lines/1.0",
+                    retryPolicy = "steward.eval.retry/1.0",
+                    maximumWorkloadConcurrency = input.ShardPolicy.MaximumConcurrency,
+                    inferenceRateScope = input.InferenceRateScope,
+                    maxOutputBytes = 64 * 1024 * 1024,
+                    requiredDiskReserveBytes = 256 * 1024 * 1024,
+                    identityRequirements = command.EnvironmentReferences?.Select(x =>
+                        new IdentityCapabilityReference(x.Value, x.Key)).ToArray() ?? []
+                });
+                var resultKey = replicaCount == 1
+                    ? $"eval-case:{evaluationCase.CaseId}"
+                    : $"eval-case:{evaluationCase.CaseId}:r{replica}";
+                nodes.Add(new(taskId, logicalKey, "evaluation-runner", "1.0",
+                    (input.CaseResources ?? new()).ToRequirements(), runnerInput, setupIds,
+                    RequiredCapabilities(input), fingerprint, affinity, null, 3, InterruptionClass.Restartable,
+                    [new ExternalRateRequirement(input.InferenceRateScope, input.InferenceUnitsPerCase)],
+                    resultKey));
+            }
         }
 
         AddAggregateTasks(nodes, input, fingerprint, caseIds, completedResults, selectedCases.Select(x => x.CaseId).ToArray());

@@ -863,4 +863,123 @@ public sealed class EvaluationIntegrationTests
                 return ValueTask.CompletedTask;
         }
     }
+
+    [Fact]
+    public void Three_replicas_of_36_cases_produce_108_evaluation_tasks_with_distinct_ids()
+    {
+        var cases = Enumerable.Range(0, 36)
+            .Select(i => EvaluationCase.Create($"case-{i:D2}", new { index = i }))
+            .ToArray();
+        var input = Input(cases) with { ReplicaCount = 3 };
+        var plan = HarborPlanner().Plan(new(WorkloadId.New(), PlanRevisionId.New(), input));
+        var evalTasks = plan.Tasks
+            .Where(x => x.LogicalKey.StartsWith("eval/", StringComparison.Ordinal))
+            .ToArray();
+
+        Assert.Equal(108, evalTasks.Length);
+        Assert.Equal(108, evalTasks.Select(x => x.TaskId).Distinct().Count());
+        Assert.Equal(108, evalTasks.Select(x => x.LogicalKey).Distinct().Count());
+    }
+
+    [Fact]
+    public void Replica_tasks_preserve_real_case_id_in_runner_input()
+    {
+        var input = Input([EvaluationCase.Create("ghost-gh1", new { target = "http://proxy.local" })]) with
+        {
+            ReplicaCount = 3
+        };
+        var plan = HarborPlanner().Plan(new(WorkloadId.New(), PlanRevisionId.New(), input));
+        var replicas = plan.Tasks
+            .Where(x => x.LogicalKey.StartsWith("eval/ghost-gh1/r", StringComparison.Ordinal))
+            .ToArray();
+
+        Assert.Equal(3, replicas.Length);
+        foreach (var replica in replicas)
+        {
+            using var doc = JsonDocument.Parse(replica.Input.CanonicalJson);
+            Assert.Equal("ghost-gh1", doc.RootElement.GetProperty("caseId").GetString());
+            Assert.True(doc.RootElement.TryGetProperty("replicaIndex", out var ri));
+            Assert.True(ri.TryGetInt32(out var riValue) || ri.TryGetDecimal(out var riDec) && (riValue = (int)riDec) >= 0);
+            Assert.InRange(riValue, 0, 2);
+            var rc = doc.RootElement.GetProperty("replicaCount");
+            Assert.True(rc.TryGetInt32(out var rcValue) || rc.TryGetDecimal(out var rcDec) && (rcValue = (int)rcDec) > 0);
+            Assert.Equal(3, rcValue);
+        }
+        // All three replicas have distinct replica indices
+        var indices = replicas.Select(r =>
+        {
+            using var d = JsonDocument.Parse(r.Input.CanonicalJson);
+            var prop = d.RootElement.GetProperty("replicaIndex");
+            return prop.TryGetInt32(out var v) ? v : (int)prop.GetDecimal();
+        }).OrderBy(x => x).ToArray();
+        Assert.Equal([0, 1, 2], indices);
+    }
+
+    [Fact]
+    public void Replica_tasks_have_distinct_result_locations_and_result_keys()
+    {
+        var input = Input([EvaluationCase.Create("a", new { })]) with { ReplicaCount = 3 };
+        var plan = HarborPlanner().Plan(new(WorkloadId.New(), PlanRevisionId.New(), input));
+        var replicas = plan.Tasks
+            .Where(x => x.LogicalKey.StartsWith("eval/a/r", StringComparison.Ordinal))
+            .ToArray();
+
+        var resultKeys = replicas.Select(x => x.ResultReductionKey).Distinct().ToArray();
+        Assert.Equal(3, resultKeys.Length);
+        Assert.Contains("eval-case:a:r0", resultKeys);
+        Assert.Contains("eval-case:a:r1", resultKeys);
+        Assert.Contains("eval-case:a:r2", resultKeys);
+
+        var resultLocations = replicas.Select(r =>
+        {
+            using var d = JsonDocument.Parse(r.Input.CanonicalJson);
+            return d.RootElement.GetProperty("resultLocation").GetString();
+        }).Distinct().ToArray();
+        Assert.Equal(3, resultLocations.Length);
+    }
+
+    [Fact]
+    public void Single_replica_preserves_backward_compatible_logical_keys()
+    {
+        var input = Input([EvaluationCase.Create("test-case", new { })]);
+        Assert.Equal(1, input.ReplicaCount);
+        var plan = HarborPlanner().Plan(new(WorkloadId.New(), PlanRevisionId.New(), input));
+        var evalTask = plan.Tasks.Single(x => x.LogicalKey.StartsWith("eval/", StringComparison.Ordinal));
+        Assert.Equal("eval/test-case", evalTask.LogicalKey);
+        Assert.Equal("eval-case:test-case", evalTask.ResultReductionKey);
+        using var doc = JsonDocument.Parse(evalTask.Input.CanonicalJson);
+        Assert.False(doc.RootElement.TryGetProperty("replicaIndex", out var ri) && ri.GetInt32() != 0
+            , "Single-replica should include replicaIndex=0 but not use /r0 suffix in keys");
+    }
+
+    [Fact]
+    public void Replica_affinity_distributes_same_case_replicas_to_different_shards()
+    {
+        var input = Input([EvaluationCase.Create("a", new { })]) with
+        {
+            ReplicaCount = 3,
+            ShardPolicy = new(6, 1)
+        };
+        var plan = HarborPlanner().Plan(new(WorkloadId.New(), PlanRevisionId.New(), input));
+        var replicas = plan.Tasks
+            .Where(x => x.LogicalKey.StartsWith("eval/a/r", StringComparison.Ordinal))
+            .ToArray();
+
+        var affinityKeys = replicas.Select(x => x.AffinityKey).Distinct().ToArray();
+        Assert.Equal(3, affinityKeys.Length);
+    }
+
+    [Fact]
+    public void Replica_count_validation_rejects_zero_negative_and_exceeding_limit()
+    {
+        Assert.ThrowsAny<ArgumentException>(() =>
+            (Input([EvaluationCase.Create("a", new { })]) with { ReplicaCount = 0 }).Validate());
+        Assert.ThrowsAny<ArgumentException>(() =>
+            (Input([EvaluationCase.Create("a", new { })]) with { ReplicaCount = 11 }).Validate());
+        var manyCases = Enumerable.Range(0, 3301)
+            .Select(i => EvaluationCase.Create($"c{i}", new { }));
+        Assert.ThrowsAny<ArgumentException>(() =>
+            (Input(manyCases) with { ReplicaCount = 3 }).Validate());
+    }
 }
+
