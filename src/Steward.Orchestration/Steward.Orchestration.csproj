@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" />
+    <ProjectReference Include="..\Steward.Contracts\Steward.Contracts.csproj" />
+    <ProjectReference Include="..\Steward.Domain\Steward.Domain.csproj" />
+    <ProjectReference Include="..\Steward.Node\Steward.Node.csproj" />
+    <ProjectReference Include="..\Steward.Persistence.Sqlite\Steward.Persistence.Sqlite.csproj" />
+    <ProjectReference Include="..\Steward.PortableState\Steward.PortableState.csproj" />
+    <ProjectReference Include="..\Steward.Scheduling\Steward.Scheduling.csproj" />
+    <ProjectReference Include="..\Steward.Tasks.Abstractions\Steward.Tasks.Abstractions.csproj" />
+    <ProjectReference Include="..\Steward.Terminal.Abstractions\Steward.Terminal.Abstractions.csproj" />
+    <ProjectReference Include="..\Steward.Transport\Steward.Transport.csproj" />
+    <ProjectReference Include="..\Steward.Workloads.Evals\Steward.Workloads.Evals.csproj" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Steward.Domain\Steward.Domain.csproj" />
+    <ProjectReference Include="..\Steward.Transport\Steward.Transport.csproj" />
+    <ProjectReference Include="..\Steward.Transport.Rdp.Endpoint.Windows\Steward.Transport.Rdp.Endpoint.Windows.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Steward.Transport.Rdp.Windows.Tests" />
+    <InternalsVisibleTo Include="Steward.RdpDvc.Client.Windows" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Update="Microsoft.RdpDvcSamples.LICENSE.txt"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

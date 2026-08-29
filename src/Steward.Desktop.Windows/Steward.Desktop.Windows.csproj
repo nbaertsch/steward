@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Steward.Application\Steward.Application.csproj" />
+    <ProjectReference Include="..\Steward.ConnectionHost.Windows\Steward.ConnectionHost.Windows.csproj" />
+    <ProjectReference Include="..\Steward.Control.Client\Steward.Control.Client.csproj" />
+    <ProjectReference Include="..\Steward.DevBox.Windows\Steward.DevBox.Windows.csproj" />
+    <ProjectReference Include="..\Steward.Orchestration\Steward.Orchestration.csproj" />
+    <ProjectReference Include="..\Steward.Providers.Abstractions\Steward.Providers.Abstractions.csproj" />
+    <ProjectReference Include="..\Steward.Terminal.Abstractions\Steward.Terminal.Abstractions.csproj" />
+    <ProjectReference Include="..\Steward.Transport.Rdp.Windows\Steward.Transport.Rdp.Windows.csproj" />
+  </ItemGroup>
+</Project>

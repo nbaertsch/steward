@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\Steward.Agents\Steward.Agents.csproj" />
+    <ProjectReference Include="..\Steward.Contracts\Steward.Contracts.csproj" />
+    <ProjectReference Include="..\Steward.Persistence.Sqlite\Steward.Persistence.Sqlite.csproj" />
+    <ProjectReference Include="..\Steward.Orchestration\Steward.Orchestration.csproj" />
+    <ProjectReference Include="..\Steward.Providers.Abstractions\Steward.Providers.Abstractions.csproj" />
+    <ProjectReference Include="..\Steward.Scheduling\Steward.Scheduling.csproj" />
+    <ProjectReference Include="..\Steward.Tasks.Compose\Steward.Tasks.Compose.csproj" />
+    <ProjectReference Include="..\Steward.Tasks.Agent\Steward.Tasks.Agent.csproj" />
+    <ProjectReference Include="..\Steward.Tasks.Process\Steward.Tasks.Process.csproj" />
+    <ProjectReference Include="..\Steward.Terminal.Abstractions\Steward.Terminal.Abstractions.csproj" />
+    <ProjectReference Include="..\Steward.Workloads.Evals\Steward.Workloads.Evals.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+
+</Project>

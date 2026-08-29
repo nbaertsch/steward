@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Configuration.Binder" Version="10.0.11" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.11" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.11" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.11" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" />
+    <ProjectReference Include="..\Steward.Application\Steward.Application.csproj" />
+    <ProjectReference Include="..\Steward.Contracts\Steward.Contracts.csproj" />
+    <ProjectReference Include="..\Steward.Orchestration\Steward.Orchestration.csproj" />
+    <ProjectReference Include="..\Steward.PortableState\Steward.PortableState.csproj" />
+    <ProjectReference Include="..\Steward.Providers.Abstractions\Steward.Providers.Abstractions.csproj" />
+    <ProjectReference Include="..\Steward.Providers.DevBox\Steward.Providers.DevBox.csproj" />
+    <ProjectReference Include="..\Steward.Persistence.Sqlite\Steward.Persistence.Sqlite.csproj" />
+    <ProjectReference Include="..\Steward.Transport\Steward.Transport.csproj" />
+  </ItemGroup>
+</Project>

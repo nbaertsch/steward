@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" Version="6.0.4" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+    <ProjectReference Include="..\..\src\Steward.Domain\Steward.Domain.csproj" />
+    <ProjectReference Include="..\..\src\Steward.RdpDvc.Client.Windows\Steward.RdpDvc.Client.Windows.csproj" />
+    <ProjectReference Include="..\..\src\Steward.Transport\Steward.Transport.csproj" />
+    <ProjectReference Include="..\..\src\Steward.Transport.Rdp.Endpoint.Windows\Steward.Transport.Rdp.Endpoint.Windows.csproj" />
+    <ProjectReference Include="..\..\src\Steward.Transport.Rdp.Windows\Steward.Transport.Rdp.Windows.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+</Project>

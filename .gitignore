@@ -1,0 +1,17 @@
+**/bin/
+**/obj/
+.vs/
+.vscode/
+.idea/
+.dotnet-*/
+.dotnet-*-install.ps1
+.dotnet-install.ps1
+TestResults/
+artifacts/
+*.user
+*.suo
+*.pfx
+*.key
+*.cer
+.env
+appsettings.*.local.json

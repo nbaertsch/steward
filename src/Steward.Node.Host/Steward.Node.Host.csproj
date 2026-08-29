@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk.Worker">
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.11" />
+    <ProjectReference Include="..\Steward.Node\Steward.Node.csproj" />
+    <ProjectReference Include="..\Steward.Orchestration\Steward.Orchestration.csproj" />
+    <ProjectReference Include="..\Steward.Stack.Local\Steward.Stack.Local.csproj" />
+    <ProjectReference Include="..\Steward.PortableState\Steward.PortableState.csproj" />
+    <ProjectReference Include="..\Steward.Runtime.Windows\Steward.Runtime.Windows.csproj" />
+    <ProjectReference Include="..\Steward.Tasks.Compose\Steward.Tasks.Compose.csproj" />
+    <ProjectReference Include="..\Steward.Tasks.Agent\Steward.Tasks.Agent.csproj" />
+    <ProjectReference Include="..\Steward.Tasks.Process\Steward.Tasks.Process.csproj" />
+    <ProjectReference Include="..\Steward.Terminal.Windows\Steward.Terminal.Windows.csproj" />
+    <ProjectReference Include="..\Steward.Transport\Steward.Transport.csproj" />
+    <ProjectReference Include="..\Steward.Workloads.Evals\Steward.Workloads.Evals.csproj" />
+  </ItemGroup>
+</Project>

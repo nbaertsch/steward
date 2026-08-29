@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.4" />
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.12" />
+    <ProjectReference Include="..\Steward.Domain\Steward.Domain.csproj" />
+    <ProjectReference Include="..\Steward.Contracts\Steward.Contracts.csproj" />
+    <ProjectReference Include="..\Steward.Providers.Abstractions\Steward.Providers.Abstractions.csproj" />
+  </ItemGroup>
+</Project>

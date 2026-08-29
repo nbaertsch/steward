@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <StartupObject>Steward.RdpDvc.LiveAcceptance.Program</StartupObject>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+    <ProjectReference Include="..\..\src\Steward.ConnectionHost.Windows\Steward.ConnectionHost.Windows.csproj" />
+    <ProjectReference Include="..\..\src\Steward.DevBox.Windows\Steward.DevBox.Windows.csproj" />
+    <ProjectReference Include="..\..\src\Steward.Providers.Abstractions\Steward.Providers.Abstractions.csproj" />
+    <ProjectReference Include="..\..\src\Steward.Providers.DevBox\Steward.Providers.DevBox.csproj" />
+    <ProjectReference Include="..\..\src\Steward.RdCore.Windows\Steward.RdCore.Windows.csproj" />
+    <ProjectReference Include="..\..\src\Steward.Transport\Steward.Transport.csproj" />
+    <ProjectReference Include="..\..\src\Steward.Transport.Rdp.Endpoint.Windows\Steward.Transport.Rdp.Endpoint.Windows.csproj" />
+    <ProjectReference Include="..\..\src\Steward.Transport.Rdp.Windows\Steward.Transport.Rdp.Windows.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+</Project>

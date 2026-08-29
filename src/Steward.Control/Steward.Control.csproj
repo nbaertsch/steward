@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <ItemGroup>
+    <PackageReference Include="System.IO.FileSystem.AccessControl" Version="5.0.0" />
+    <ProjectReference Include="..\Steward.Application\Steward.Application.csproj" />
+    <ProjectReference Include="..\Steward.Domain\Steward.Domain.csproj" />
+    <ProjectReference Include="..\Steward.DevBox.Windows\Steward.DevBox.Windows.csproj" />
+    <ProjectReference Include="..\Steward.Contracts\Steward.Contracts.csproj" />
+    <ProjectReference Include="..\Steward.Persistence.Sqlite\Steward.Persistence.Sqlite.csproj" />
+    <ProjectReference Include="..\Steward.Orchestration\Steward.Orchestration.csproj" />
+    <ProjectReference Include="..\Steward.Scheduling\Steward.Scheduling.csproj" />
+    <ProjectReference Include="..\Steward.Transport\Steward.Transport.csproj" />
+    <ProjectReference Include="..\Steward.Providers.Abstractions\Steward.Providers.Abstractions.csproj" />
+    <ProjectReference Include="..\Steward.Stack.Local\Steward.Stack.Local.csproj" />
+    <ProjectReference Include="..\Steward.Tasks.Abstractions\Steward.Tasks.Abstractions.csproj" />
+    <ProjectReference Include="..\Steward.Tasks.Agent\Steward.Tasks.Agent.csproj" />
+    <ProjectReference Include="..\Steward.Workloads.Evals\Steward.Workloads.Evals.csproj" />
+    <ProjectReference Include="..\Steward.Agents\Steward.Agents.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+</Project>
