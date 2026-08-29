@@ -209,6 +209,7 @@ public sealed class EvaluationIntegrationTests
     [Theory]
     [InlineData(EvaluationFailureSignal.Http429, true, true, false, false)]
     [InlineData(EvaluationFailureSignal.Infrastructure, true, false, false, false)]
+    [InlineData(EvaluationFailureSignal.ContentFilterBeforeEngagement, true, false, false, false)]
     [InlineData(EvaluationFailureSignal.DeterministicAssertion, false, false, true, false)]
     [InlineData(EvaluationFailureSignal.Setup, false, false, true, true)]
     public void Retry_classification_is_explicit(EvaluationFailureSignal signal, bool retry, bool rate,
@@ -414,6 +415,32 @@ public sealed class EvaluationIntegrationTests
         Assert.False(decision.IsCaseFailure);
         Assert.Equal("inference", sink.Scope);
         Assert.Equal(retryAfter, sink.RetryAfter);
+        Assert.Null((await taskType.ReadOutcomeAsync(execution)).TerminalReceipt);
+    }
+
+    [Fact]
+    public async Task Content_filter_before_engagement_is_retryable_infrastructure_not_valid_result()
+    {
+        var input = Input([EvaluationCase.Create("filtered", new { })]);
+        var node = HarborPlanner().Plan(new(WorkloadId.New(), PlanRevisionId.New(), input)).Tasks
+            .Single(x => x.LogicalKey == "eval/filtered");
+        var executor = new FakeProcessExecutor(JsonSerializer.Serialize(new
+        {
+            type = "failure", signal = "contentFilterBeforeEngagement"
+        }) + "\n");
+        var taskType = new EvaluationRunnerTaskType(executor, new FakeRunnerStateStore(), new FakeRateFeedbackSink());
+        using var document = JsonDocument.Parse(node.Input.CanonicalJson);
+        var context = new TaskExecutionContext(TaskAttemptId.New(), 0, Environment.CurrentDirectory,
+            document.RootElement.Clone());
+
+        var execution = await taskType.StartAsync(context, default);
+        _ = await taskType.ObserveAsync(execution, default);
+        var decision = (await taskType.ReadOutcomeAsync(execution)).Failure!;
+
+        Assert.True(decision.RetryCase);
+        Assert.False(decision.ReportRateFeedback);
+        Assert.False(decision.IsCaseFailure);
+        Assert.Equal(EvaluationFailureClassification.Infrastructure, decision.Classification);
         Assert.Null((await taskType.ReadOutcomeAsync(execution)).TerminalReceipt);
     }
 

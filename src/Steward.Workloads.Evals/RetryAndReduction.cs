@@ -8,6 +8,7 @@ public enum EvaluationFailureSignal
     Http429,
     InferenceThrottle,
     Infrastructure,
+    ContentFilterBeforeEngagement,
     DeterministicAssertion,
     Harness,
     Task,
@@ -36,6 +37,8 @@ public static class EvaluationRetryPolicy
         EvaluationFailureSignal.Http429 or EvaluationFailureSignal.InferenceThrottle =>
             new(true, true, false, false, EvaluationFailureClassification.InferenceThrottle),
         EvaluationFailureSignal.Infrastructure =>
+            new(true, false, false, false, EvaluationFailureClassification.Infrastructure),
+        EvaluationFailureSignal.ContentFilterBeforeEngagement =>
             new(true, false, false, false, EvaluationFailureClassification.Infrastructure),
         EvaluationFailureSignal.Setup =>
             new(false, false, true, true, EvaluationFailureClassification.Infrastructure),
