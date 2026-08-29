@@ -193,14 +193,71 @@ public sealed class CompositeScheduler
 
     public Task<SchedulerState> ResolveAmbiguousAbsentAsync(
         WorkloadPlan plan, TaskId taskId, int generation, DateTimeOffset retryAt, CancellationToken cancellationToken = default) =>
-        MutateTaskAsync(plan, taskId, item =>
+        MutateAsync(plan, state =>
         {
+            if (state.Tasks.All(x => x.TaskId != taskId))
+                throw new KeyNotFoundException(
+                    $"Task '{taskId}' is not in the plan.");
+            var items = state.Tasks.ToDictionary(x => x.TaskId);
+            var item = items[taskId];
             RequireGeneration(item, generation);
             if (item.State != ScheduledTaskState.Ambiguous) throw new InvalidOperationException("The attempt is not ambiguous.");
             var node = plan.Tasks.Single(x => x.TaskId == taskId);
-            return EligibleForReplacement(node, item)
-                ? item with { State = ScheduledTaskState.Ready, Placement = null, Claim = null, Backoff = new(retryAt, TimeSpan.Zero, "ambiguity resolved absent") }
-                : item with { State = ScheduledTaskState.Failed, Placement = null, Claim = null, SelectedTerminalGeneration = generation };
+            if (EligibleForReplacement(node, item))
+            {
+                items[taskId] = item with
+                {
+                    State = ScheduledTaskState.Ready,
+                    Placement = null,
+                    Claim = null,
+                    Backoff = new(
+                        retryAt,
+                        TimeSpan.Zero,
+                        "ambiguity resolved absent")
+                };
+                return state with { Tasks = items.Values.ToArray() };
+            }
+            items[taskId] = item with
+            {
+                State = ScheduledTaskState.Failed,
+                Placement = null,
+                Claim = null,
+                SelectedTerminalGeneration = generation
+            };
+            var results = state.Results.ToList();
+            if (!results.Any(x =>
+                    x.TaskId == taskId &&
+                    x.Generation == generation))
+                results.Add(new(
+                    taskId,
+                    generation,
+                    node.ResultReductionKey,
+                    $"recovery-absent:{taskId}:{generation}",
+                    false,
+                    retryAt));
+            return state with
+            {
+                Tasks = items.Values.ToArray(),
+                Results = results
+            };
+        }, cancellationToken);
+
+    public Task<SchedulerState> ResolveAmbiguousPresentAsync(
+        WorkloadPlan plan,
+        TaskId taskId,
+        int generation,
+        CancellationToken cancellationToken = default) =>
+        MutateTaskAsync(plan, taskId, item =>
+        {
+            RequireGeneration(item, generation);
+            if (item.State != ScheduledTaskState.Ambiguous)
+                throw new InvalidOperationException(
+                    "The attempt is not ambiguous.");
+            return item with
+            {
+                State = ScheduledTaskState.Running,
+                Claim = item.Claim! with { Ambiguous = false }
+            };
         }, cancellationToken);
 
     public Task<SchedulerState> CompleteAsync(

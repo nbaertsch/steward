@@ -160,6 +160,10 @@ public sealed class RdpDvcBootstrapDeploymentTests : IDisposable
             install,
             StringComparison.Ordinal);
         Assert.Contains(
+            "'--console'",
+            install,
+            StringComparison.Ordinal);
+        Assert.Contains(
             "bootstrapServer",
             install,
             StringComparison.Ordinal);

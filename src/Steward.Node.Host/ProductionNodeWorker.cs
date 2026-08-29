@@ -89,10 +89,15 @@ public sealed class ProductionNodeWorker(
             }
             catch (Exception exception)
             {
-                logger.LogWarning("Node session ended with {Code}; reconnecting.",
+                logger.LogWarning(
+                    "Node session ended with {Code} ({ExceptionType}, " +
+                    "0x{HResult:X8}): {Detail}; reconnecting.",
                     exception is TransportProtocolException protocol
                         ? protocol.Error.ToString()
-                        : "session.failure");
+                        : "session.failure",
+                    exception.GetType().Name,
+                    exception.HResult,
+                    BoundedDetail(exception.Message));
             }
             failures = Math.Min(failures + 1, 10);
             await Task.Delay(
@@ -107,6 +112,12 @@ public sealed class ProductionNodeWorker(
         new(System.Security.Cryptography.SHA256.HashData(
             System.Text.Encoding.UTF8.GetBytes(
                 $"steward-direct:{hostId}:{incarnationId}")).AsSpan(0, 16));
+
+    private static string BoundedDetail(string value)
+    {
+        var sanitized = value.Replace('\r', ' ').Replace('\n', ' ');
+        return sanitized.Length <= 512 ? sanitized : sanitized[..512];
+    }
 
     private sealed class NoopAsyncDisposable : IAsyncDisposable
     {

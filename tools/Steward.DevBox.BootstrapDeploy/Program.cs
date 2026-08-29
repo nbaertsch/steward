@@ -155,7 +155,14 @@ try
         Console.Error.WriteLine(
             $"  QUEUED GROUP: {group.Name}; status={group.Status}; " +
             $"started={group.StartTime?.ToString("O") ?? "none"}");
-    if (options.RestartStalledCustomization)
+    if (options.RestartStalledCustomization &&
+        nonterminalGroups is
+        [
+            {
+                Status: "NotStarted",
+                StartTime: null
+            }
+        ])
     {
         stage = "dispatch-recovery";
         await RecoverStalledDispatchAsync(
@@ -314,6 +321,8 @@ try
         return 0;
     }
     var deadline = DateTimeOffset.UtcNow + options.Timeout;
+    var notStartedSince = new Dictionary<string, DateTimeOffset>(
+        StringComparer.Ordinal);
     while (result.Status is
            ProviderOperationStatus.Accepted or
            ProviderOperationStatus.Running)
@@ -330,6 +339,60 @@ try
                     "Running bootstrap operation has no durable handle."),
                 cancellation.Token)
             .ConfigureAwait(false);
+        if (options.RestartStalledCustomization &&
+            result.Status is
+                ProviderOperationStatus.Accepted or
+                ProviderOperationStatus.Running)
+        {
+            var queued = (await customization.ListAsync(
+                    options.Project,
+                    options.User,
+                    options.DevBox,
+                    cancellation.Token)
+                .ConfigureAwait(false))
+                .Where(group =>
+                    !Succeeded(group.Status) &&
+                    !group.Status.Equals(
+                        "Failed",
+                        StringComparison.OrdinalIgnoreCase) &&
+                    !group.Status.Equals(
+                        "ValidationFailed",
+                        StringComparison.OrdinalIgnoreCase))
+                .ToArray();
+            if (queued is
+                [
+                    {
+                        Status: "NotStarted",
+                        StartTime: null
+                    } stalled
+                ])
+            {
+                var now = DateTimeOffset.UtcNow;
+                if (!notStartedSince.TryGetValue(
+                        stalled.Name,
+                        out var observed))
+                {
+                    notStartedSince[stalled.Name] = now;
+                }
+                else if (now - observed >= TimeSpan.FromMinutes(2))
+                {
+                    stage = "dispatch-recovery";
+                    await RecoverStalledDispatchAsync(
+                            sdkClient,
+                            planned,
+                            queued,
+                            options,
+                            cancellation.Token)
+                        .ConfigureAwait(false);
+                    notStartedSince.Remove(stalled.Name);
+                    stage = "reconcile";
+                }
+            }
+            else
+            {
+                notStartedSince.Clear();
+            }
+        }
     }
     if (result.Status != ProviderOperationStatus.Succeeded)
     {

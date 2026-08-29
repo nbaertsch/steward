@@ -1436,6 +1436,65 @@ public sealed class OrchestrationTests
     }
 
     [Fact]
+    public async Task Recovery_fact_after_terminal_completion_is_idempotent()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var plan = Plan(1);
+        await fixture.Orchestrator.RegisterAndScheduleAsync(
+            plan, [fixture.Host], fixture.Host.PoolId, fixture.Now);
+        var executeItem = (await fixture.Control.ReadOutboxAsync())
+            .Single(x => x.Kind == OrchestrationMessageKinds.ExecuteTask);
+        var execute = (ExecuteTaskMessage)OrchestrationMessageCodec.Decode(
+            Encoding.UTF8.GetBytes(executeItem.PayloadJson)).Value;
+
+        Assert.Equal(
+            FactDisposition.Applied,
+            await fixture.Orchestrator.ApplyNodeFactAsync(
+                fixture.Incarnation,
+                1,
+                OrchestrationMessageKinds.TaskAccepted,
+                new TaskAcceptedFact(execute.Identity)));
+        Assert.Equal(
+            FactDisposition.Applied,
+            await fixture.Orchestrator.ApplyNodeFactAsync(
+                fixture.Incarnation,
+                2,
+                OrchestrationMessageKinds.TaskRunning,
+                new TaskRunningFact(execute.Identity)));
+        Assert.Equal(
+            FactDisposition.Applied,
+            await fixture.Orchestrator.ApplyNodeFactAsync(
+                fixture.Incarnation,
+                3,
+                OrchestrationMessageKinds.TaskTerminal,
+                new TaskTerminalFact(
+                    execute.Identity,
+                    TaskAttemptState.Succeeded,
+                    0,
+                    "receipt",
+                    null)));
+
+        Assert.Equal(
+            FactDisposition.Recovery,
+            await fixture.Orchestrator.ApplyNodeFactAsync(
+                fixture.Incarnation,
+                4,
+                OrchestrationMessageKinds.TaskRecovery,
+                new TaskRecoveryFact(
+                    execute.Identity,
+                    "late-recovery",
+                    "late replay")));
+        Assert.Equal(
+            TaskObservedState.Succeeded,
+            (await fixture.Control.GetTaskAsync(
+                execute.Identity.TaskId))!.Payload.ObservedState);
+        Assert.Equal(
+            TaskAttemptState.Succeeded,
+            (await fixture.Control.GetTaskAttemptAsync(
+                execute.Identity.AttemptId))!.Payload.State);
+    }
+
+    [Fact]
     public async Task Completion_cancel_race_records_one_terminal_outcome()
     {
         using var fixture = await Fixture.CreateAsync();

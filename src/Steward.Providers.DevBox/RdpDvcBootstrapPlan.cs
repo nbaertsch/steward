@@ -153,7 +153,7 @@ public static class DevBoxRdpDvcBootstrapPlan
                     chunks.Length,
                     encoded.Length,
                     Convert.ToBase64String(key)),
-                        timeoutSeconds: 900)
+                        timeoutSeconds: 7_200)
                 ]));
             if (groups.Count > MaximumGroups)
                 throw new InvalidDataException(
@@ -260,7 +260,7 @@ public static class DevBoxRdpDvcBootstrapPlan
                $"$runDirectory=Join-Path $userRoot 'runs\\{operationId}';[void](New-Item -ItemType Directory -Path $runDirectory -Force);$noncePath=Join-Path $runDirectory 'nonce-sequence.json';$writeNonce=$true;" +
                $"$nodeState=Join-Path $userRoot 'nodes\\{hostId}\\{incarnationId}';$portableStateRoot=Join-Path $nodeState 'portable';$credentialVaultRoot=Join-Path $nodeState 'credentials';$workspaceRoot=Join-Path $nodeState 'workspaces';$spoolRoot=Join-Path $nodeState 'spool';$keeperPipeName='Steward.Node.{request.IncarnationId.Value:N}';foreach($directory in @($nodeState,$portableStateRoot,$credentialVaultRoot,$workspaceRoot,$spoolRoot)){{[void](New-Item -ItemType Directory -Path $directory -Force)}};$nodeHostConfigPath=Join-Path $nodeState 'node-host.json';" +
                $"$nodeHostConfig=[ordered]@{{journalPath=(Join-Path $nodeState 'node.db');executionJournalPath=(Join-Path $nodeState 'execution.db');evaluationDatabasePath=(Join-Path $nodeState 'evaluation.db');workspaceRoot=$workspaceRoot;spoolRoot=$spoolRoot;spoolHighLimitBytes=4294967296;spoolHardLimitBytes=8589934592;spoolOsReserveBytes=2147483648;keeperPipeName=$keeperPipeName;nodeIncarnationId='{incarnationId}';hostId='{hostId}';terminalJournalPath=(Join-Path $nodeState 'terminal.db');maximumTerminalSessions=32;agentsEnabled=$false;agentExecutable='';agentRuntimeProfile='process-jsonl/1.0'}}|ConvertTo-Json -Compress;$nodeHostConfigPending=$nodeHostConfigPath+'.new';[IO.File]::WriteAllText($nodeHostConfigPending,$nodeHostConfig,[Text.UTF8Encoding]::new($false));Move-Item -LiteralPath $nodeHostConfigPending -Destination $nodeHostConfigPath -Force;" +
-               "& icacls.exe $nodeState /inheritance:r /grant:r ('*'+$executorSid+':(OI)(CI)F') ('*'+$userSid+':(OI)(CI)M') /T /C|Out-Null;if($LASTEXITCODE -ne 0){throw 'RDP DVC node state ACL failed'};" +
+               "& icacls.exe $nodeState /inheritance:r /grant:r ('*'+$executorSid+':(OI)(CI)F') ('*'+$userSid+':(OI)(CI)F') /T /C|Out-Null;if($LASTEXITCODE -ne 0){throw 'RDP DVC node state ACL failed'};" +
                "if(Test-Path -LiteralPath $noncePath){try{$existingNonce=Get-Content -LiteralPath $noncePath -Raw|ConvertFrom-Json;" +
                $"$writeNonce=($existingNonce.version -ne 1 -or $existingNonce.sessionId -cne '{sessionId}' -or $existingNonce.hostId -cne '{hostId}' -or $existingNonce.nodeIncarnationId -cne '{incarnationId}' -or $existingNonce.nonces.Count -ne 2 -or $existingNonce.nonces[0] -cne '{nonce0}' -or $existingNonce.nonces[1] -cne '{nonce1}')" +
                "}catch{$writeNonce=$true}};" +
@@ -292,7 +292,7 @@ public static class DevBoxRdpDvcBootstrapPlan
                "& icacls.exe $keyPath /grant ('*'+$userSid+':R')|Out-Null;if($LASTEXITCODE -ne 0){throw 'RDP DVC key read ACL failed'};" +
                "& icacls.exe $runDirectory /grant ('*'+$userSid+':(OI)(CI)M') /T /C|Out-Null;if($LASTEXITCODE -ne 0){throw 'RDP DVC run-state ACL failed'};" +
                "$aclDiagnostic=(((& icacls.exe $server)|Out-String).Trim() -replace '[\\r\\n]+','|');Write-Output ('STEWARD_RDP_DVC_ACL:'+$aclDiagnostic);" +
-               "$keeperArgs=@('exec','--runtimeconfig',$keeperRuntimeConfig,'--depsfile',$keeperDepsFile,$keeper,'--pipe',$keeperPipeName,'--node-account',$userSid);$keeperProcessId=[StewardSessionLauncher]::Start($userSession,$dotnet,$target,$keeperArgs);if($keeperProcessId -lt 0){throw ('RDP DVC Handle Keeper failed to start '+(-$keeperProcessId))};Start-Sleep -Milliseconds 500;Write-Output ('STEWARD_RDP_DVC_KEEPER_PID:'+$keeperProcessId);" +
+               "$keeperArgs=@('exec','--runtimeconfig',$keeperRuntimeConfig,'--depsfile',$keeperDepsFile,$keeper,'--console','--pipe',$keeperPipeName,'--node-account',$userSid);$keeperProcessId=[StewardSessionLauncher]::Start($userSession,$dotnet,$target,$keeperArgs);if($keeperProcessId -lt 0){throw ('RDP DVC Handle Keeper failed to start '+(-$keeperProcessId))};Start-Sleep -Milliseconds 500;Write-Output ('STEWARD_RDP_DVC_KEEPER_PID:'+$keeperProcessId);" +
                "$launchArgs=@('exec','--runtimeconfig',$runtimeConfig,'--depsfile',$depsFile,$server,'--session-id','" + sessionId + "','--host-id','" + hostId + "','--incarnation-id','" + incarnationId + "','--auth-key-file',$keyPath,'--nonce-sequence-file',$noncePath,'--readiness-receipt-file',$readinessPath,'--node-host-config',$nodeHostConfigPath,'--portable-state-root',$portableStateRoot,'--credential-vault-root',$credentialVaultRoot" + secureArguments + ");" +
                "$launchExit=[StewardSessionLauncher]::Run($userSession,$dotnet,$target,$launchArgs);if($launchExit -ne 0){$failurePath=$readinessPath+'.failure';$failure=if(Test-Path -LiteralPath $failurePath){Get-Content -LiteralPath $failurePath -Raw}else{'unknown'};throw ('RDP DVC endpoint failed '+$launchExit+' '+$failure)};" +
                "$remote=Get-Content -LiteralPath $readinessPath -Raw|ConvertFrom-Json;" +

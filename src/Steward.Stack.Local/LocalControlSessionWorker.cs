@@ -140,11 +140,15 @@ public sealed class LocalControlSessionWorker(
             catch (Exception exception)
             {
                 logger.LogWarning(
-                    "Local direct session for Node {NodeId} ended with {Code}.",
+                    "Local direct session for Node {NodeId} ended with {Code} " +
+                    "({ExceptionType}, 0x{HResult:X8}): {Detail}",
                     endpoint.NodeIncarnationId,
                     exception is TransportProtocolException protocol
                         ? protocol.Error.ToString()
-                        : "direct-session-failure");
+                        : "direct-session-failure",
+                    exception.GetType().Name,
+                    exception.HResult,
+                    BoundedDetail(exception.Message));
             }
             failures = Math.Min(failures + 1, 10);
             await Task.Delay(
@@ -196,6 +200,12 @@ public sealed class LocalControlSessionWorker(
         $"{endpoint.Transport.Kind}|{endpoint.Transport.Version}|" +
         $"{endpoint.Transport.Data.GetRawText()}|" +
         $"{endpoint.PeerIdentity}|{endpoint.PeerPublicKeyReference}";
+
+    private static string BoundedDetail(string value)
+    {
+        var sanitized = value.Replace('\r', ' ').Replace('\n', ' ');
+        return sanitized.Length <= 512 ? sanitized : sanitized[..512];
+    }
 
     private static async Task StopAsync(LocalNodeSession session)
     {

@@ -128,6 +128,89 @@ public sealed class SchedulingTests
     }
 
     [Fact]
+    public async Task Resolving_absent_ambiguous_final_attempt_records_failure_receipt()
+    {
+        await using var store = new InMemorySchedulerStateStore();
+        var scheduler = new CompositeScheduler(store);
+        var task = Node(40) with
+        {
+            InterruptionClass = InterruptionClass.Restartable,
+            RetryCap = 0
+        };
+        var plan = Plan(
+            Id<WorkloadId>(41),
+            Id<PlanRevisionId>(42),
+            [task]);
+        await scheduler.RegisterAsync(plan);
+        await scheduler.SetHostsAsync(plan, [Host(43, 1)]);
+        await scheduler.ScheduleAsync(
+            plan,
+            DateTimeOffset.UtcNow,
+            Id<PoolId>(44));
+        await scheduler.MarkAmbiguousAsync(
+            plan,
+            task.TaskId,
+            1);
+
+        var resolved = await scheduler.ResolveAmbiguousAbsentAsync(
+            plan,
+            task.TaskId,
+            1,
+            DateTimeOffset.UtcNow);
+
+        var scheduled = Assert.Single(resolved.Tasks);
+        Assert.Equal(ScheduledTaskState.Failed, scheduled.State);
+        Assert.Equal(1, scheduled.SelectedTerminalGeneration);
+        var receipt = Assert.Single(resolved.Results);
+        Assert.Equal(task.TaskId, receipt.TaskId);
+        Assert.Equal(1, receipt.Generation);
+        Assert.False(receipt.Success);
+    }
+
+    [Fact]
+    public async Task Resolving_present_ambiguous_attempt_allows_terminal_receipt()
+    {
+        await using var store = new InMemorySchedulerStateStore();
+        var scheduler = new CompositeScheduler(store);
+        var task = Node(45) with
+        {
+            InterruptionClass = InterruptionClass.Restartable,
+            RetryCap = 0
+        };
+        var plan = Plan(
+            Id<WorkloadId>(46),
+            Id<PlanRevisionId>(47),
+            [task]);
+        await scheduler.RegisterAsync(plan);
+        await scheduler.SetHostsAsync(plan, [Host(48, 1)]);
+        await scheduler.ScheduleAsync(
+            plan,
+            DateTimeOffset.UtcNow,
+            Id<PoolId>(49));
+        await scheduler.MarkAmbiguousAsync(plan, task.TaskId, 1);
+
+        var present = await scheduler.ResolveAmbiguousPresentAsync(
+            plan,
+            task.TaskId,
+            1);
+        Assert.Equal(
+            ScheduledTaskState.Running,
+            Assert.Single(present.Tasks).State);
+
+        var completed = await scheduler.CompleteAsync(
+            plan,
+            task.TaskId,
+            1,
+            true,
+            "terminal-receipt",
+            DateTimeOffset.UtcNow);
+        Assert.Equal(
+            ScheduledTaskState.Succeeded,
+            Assert.Single(completed.Tasks).State);
+        Assert.Single(completed.Results);
+    }
+
+    [Fact]
     public async Task Host_loss_requeues_checkpointed_and_restartable_but_never_completed_tasks()
     {
         await using var store = new InMemorySchedulerStateStore();

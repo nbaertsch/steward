@@ -262,7 +262,10 @@ public sealed class ProtectedFileRdpDvcLocalCarrier(
             0,
             new HashSet<string>(StringComparer.Ordinal)
             {
-                "rdp-dvc-secure"
+                "rdp-dvc-secure",
+                "orchestration-v1",
+                "reconciliation-v1",
+                "resume-cursors-v1"
             },
             new HashSet<string>(StringComparer.Ordinal),
             new Dictionary<StreamKind, long>(),

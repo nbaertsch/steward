@@ -4,7 +4,16 @@ if (!OperatingSystem.IsWindows())
     throw new PlatformNotSupportedException("Steward.HandleKeeper is a Windows service.");
 
 var builder = Host.CreateApplicationBuilder(args);
-builder.Services.AddWindowsService(options => options.ServiceName = "Steward Handle Keeper");
+if (args.Contains("--console", StringComparer.Ordinal))
+{
+    builder.Logging.ClearProviders();
+    builder.Logging.AddConsole();
+}
+else
+{
+    builder.Services.AddWindowsService(
+        options => options.ServiceName = "Steward Handle Keeper");
+}
 builder.Services.AddSingleton(new HandleKeeperOptions(
     GetOption(args, "--pipe") ?? Environment.GetEnvironmentVariable("STEWARD_KEEPER_PIPE") ?? "steward-handle-keeper-v1",
     GetOption(args, "--node-account") ?? Environment.GetEnvironmentVariable("STEWARD_NODE_ACCOUNT")

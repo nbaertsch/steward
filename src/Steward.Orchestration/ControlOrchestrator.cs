@@ -829,6 +829,15 @@ public sealed class ControlOrchestrator
                 break;
             case TaskTerminalFact terminal:
                 var success = terminal.State == TaskAttemptState.Succeeded;
+                if (state.Tasks.Single(
+                        x => x.TaskId == identity.TaskId).State ==
+                    ScheduledTaskState.Ambiguous)
+                    state = await scheduler.ResolveAmbiguousPresentAsync(
+                            plan,
+                            identity.TaskId,
+                            identity.Generation,
+                            cancellationToken)
+                        .ConfigureAwait(false);
                 state = await scheduler.CompleteAsync(
                     plan, identity.TaskId, identity.Generation, success, terminal.Receipt,
                     timeProvider.GetUtcNow(), poison: terminal.State == TaskAttemptState.Interrupted,
@@ -845,7 +854,13 @@ public sealed class ControlOrchestrator
                 taskUpdate = task;
                 break;
             case TaskRecoveryFact:
-                if (state.Tasks.Single(x => x.TaskId == identity.TaskId).State != ScheduledTaskState.Ambiguous)
+                var scheduledTask = state.Tasks.Single(
+                    x => x.TaskId == identity.TaskId);
+                if (IsScheduledTerminal(scheduledTask.State) ||
+                    IsTerminal(attempt.Payload.State) ||
+                    IsTaskTerminal(task.Payload.ObservedState))
+                    break;
+                if (scheduledTask.State != ScheduledTaskState.Ambiguous)
                     state = await scheduler.MarkAmbiguousAsync(plan, identity.TaskId, identity.Generation, cancellationToken)
                         .ConfigureAwait(false);
                 schedulerStates[plan.WorkloadId] = state;
@@ -1000,7 +1015,13 @@ public sealed class ControlOrchestrator
         var task = await controlStore.GetTaskAsync(identity.TaskId, cancellationToken).ConfigureAwait(false);
         var attempt = await controlStore.GetTaskAttemptAsync(identity.AttemptId, cancellationToken).ConfigureAwait(false);
         var workload = await controlStore.GetWorkloadAsync(identity.WorkloadId, cancellationToken).ConfigureAwait(false);
-        if (task is not null)
+        if (task is not null &&
+            attempt is not null &&
+            IsTaskTerminal(task.Payload.ObservedState) &&
+            IsTerminal(attempt.Payload.State))
+            return;
+        if (task is not null &&
+            !IsTaskTerminal(task.Payload.ObservedState))
             await controlStore.SaveTaskAsync(
                 NextTask(task, TaskObservedState.Recovering), task.Revision, cancellationToken: cancellationToken)
                 .ConfigureAwait(false);
@@ -1126,6 +1147,10 @@ public sealed class ControlOrchestrator
     private static bool IsTerminal(TaskAttemptState state) =>
         state is TaskAttemptState.Succeeded or TaskAttemptState.Failed or TaskAttemptState.Cancelled
             or TaskAttemptState.Interrupted or TaskAttemptState.Checkpointed;
+
+    private static bool IsTaskTerminal(TaskObservedState state) =>
+        state is TaskObservedState.Succeeded or TaskObservedState.Failed or
+            TaskObservedState.Cancelled or TaskObservedState.Interrupted;
 
     private static bool IsScheduledTerminal(ScheduledTaskState state) =>
         state is ScheduledTaskState.Succeeded or ScheduledTaskState.Failed or ScheduledTaskState.Cancelled
