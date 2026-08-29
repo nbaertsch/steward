@@ -406,7 +406,8 @@ public abstract class EvaluationPlannerBase
         identityCapabilities = input.IdentityCapabilities.OrderBy(x => x.Reference, StringComparer.Ordinal)
             .ThenBy(x => x.Capability, StringComparer.Ordinal).ToArray(),
         inventoryHash = input.Inventory.ContentHash, input.CaseResources, input.InferenceRateScope,
-        input.InferenceUnitsPerCase, adapter.HarnessName, adapter.HarnessVersion,
+        input.InferenceUnitsPerCase, input.ReplicaCount,
+        adapter.HarnessName, adapter.HarnessVersion,
         adapterProfileVersion = adapter.ProfileVersion, setupProfileVersion = setupProfile.ProfileVersion
     }));
 

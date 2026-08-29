@@ -37,6 +37,19 @@ public sealed class EvaluationIntegrationTests
     }
 
     [Fact]
+    public void Different_replica_counts_produce_distinct_plan_hashes()
+    {
+        var workload = WorkloadId.New();
+        var revision = PlanRevisionId.New();
+        var input = Input([EvaluationCase.Create("a", new { })]);
+        var n1 = HarborPlanner().Plan(new(workload, revision, input));
+        var n3 = HarborPlanner().Plan(new(workload, revision, input with { ReplicaCount = 3 }));
+
+        Assert.NotEqual(n1.DeterministicHash, n3.DeterministicHash);
+        Assert.Empty(n1.Tasks.Select(x => x.TaskId).Intersect(n3.Tasks.Select(x => x.TaskId)));
+    }
+
+    [Fact]
     public void Equivalent_definition_property_order_has_same_inventory_hash_and_task_ids()
     {
         var firstInventory = NormalizedHarnessInventory.Parse("""[{"caseId":"a","definition":{"z":2,"a":1}}]""");
