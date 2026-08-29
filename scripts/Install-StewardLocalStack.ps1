@@ -97,10 +97,17 @@ $projects = @(
 foreach ($project in $projects) {
     $output = Join-Path $install $project
     New-Item -ItemType Directory -Force -Path $output | Out-Null
-    & $dotnet publish `
-        (Join-Path $repo "src\$project\$project.csproj") `
-        -c Release -r win-x64 --self-contained true `
-        --nologo --verbosity quiet -o $output
+    $publishArgs = @(
+        "publish",
+        (Join-Path $repo "src\$project\$project.csproj"),
+        "-c", "Release", "-r", "win-x64", "--self-contained", "true",
+        "--nologo", "--verbosity", "quiet", "-o", $output
+    )
+    $csproj = Get-Content (Join-Path $repo "src\$project\$project.csproj") -Raw
+    if ($csproj -match "TargetFrameworks" -and $csproj -notmatch "TargetFramework>") {
+        $publishArgs += @("-f", "net10.0-windows")
+    }
+    & $dotnet @publishArgs
     if ($LASTEXITCODE -ne 0) {
         throw "Publishing $project failed."
     }

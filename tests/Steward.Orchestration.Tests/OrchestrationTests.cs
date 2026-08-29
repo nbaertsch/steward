@@ -1165,14 +1165,14 @@ public sealed class OrchestrationTests
             response.EnsureSuccessStatusCode();
             var workloadJson = await response.Content.ReadFromJsonAsync<JsonElement>();
             var workloadId = WorkloadId.Parse(workloadJson.GetProperty("payload")
-                .GetProperty("workloadId").GetProperty("value").GetString()!);
+                .GetProperty("workloadId").GetString()!);
             var beforeReplay = (await factory.Services.GetRequiredService<SqliteControlStore>()
                 .ReadOutboxAsync()).Count;
             using var replay = await client.PostAsJsonAsync("/workloads", submit);
             replay.EnsureSuccessStatusCode();
             var replayed = await replay.Content.ReadFromJsonAsync<JsonElement>();
             Assert.Equal(workloadId, WorkloadId.Parse(replayed.GetProperty("payload")
-                .GetProperty("workloadId").GetProperty("value").GetString()!));
+                .GetProperty("workloadId").GetString()!));
             Assert.Equal(beforeReplay, (await factory.Services.GetRequiredService<SqliteControlStore>()
                 .ReadOutboxAsync()).Count);
             using var changed = await client.PostAsJsonAsync("/workloads", new
@@ -1198,7 +1198,7 @@ public sealed class OrchestrationTests
             agentResponse.EnsureSuccessStatusCode();
             var agentJson = await agentResponse.Content.ReadFromJsonAsync<JsonElement>();
             var agentId = StewardAgentId.Parse(agentJson.GetProperty("agentId")
-                .GetProperty("value").GetString()!);
+                .GetString()!);
             using var turnResponse = await client.PostAsJsonAsync(
                 $"/agents/{agentId}/turns",
                 new SubmitAgentTurnRequest("inspect workload"));

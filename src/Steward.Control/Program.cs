@@ -10,8 +10,12 @@ using Steward.Terminal.Abstractions;
 
 var builder = WebApplication.CreateBuilder(args);
 builder.Services.ConfigureHttpJsonOptions(options =>
+{
     options.SerializerOptions.Converters.Add(
-        new TerminalSessionIdJsonConverter()));
+        new TerminalSessionIdJsonConverter());
+    options.SerializerOptions.Converters.Add(
+        new StewardIdJsonConverterFactory());
+});
 if (!OperatingSystem.IsWindows())
     throw new PlatformNotSupportedException(
         "The Steward Local Stack Control host requires Windows.");
