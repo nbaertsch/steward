@@ -625,4 +625,114 @@ public sealed class SchedulingTests
 
     private static T Id<T>(int value) where T : struct =>
         (T)Activator.CreateInstance(typeof(T), new Guid(value, 0, 0, new byte[8]))!;
+
+    [Fact]
+    public async Task Harbor_108_tasks_across_three_nodes_prove_balanced_placement_and_no_fourth_replica()
+    {
+        await using var store = new InMemorySchedulerStateStore();
+        var scheduler = new CompositeScheduler(store);
+        // 36 cases × 3 replicas = 108 tasks, using distinct affinity shards per replica
+        var tasks = new List<TaskPlanNode>();
+        for (var caseIndex = 0; caseIndex < 36; caseIndex++)
+        {
+            for (var replica = 0; replica < 3; replica++)
+            {
+                var taskId = Id<TaskId>(10000 + caseIndex * 3 + replica);
+                var shard = caseIndex * 3 + replica;
+                tasks.Add(new(
+                    taskId,
+                    $"eval/case-{caseIndex:D2}/r{replica}",
+                    "evaluation-runner", "1.0",
+                    new(cpuCores: 2, memoryBytes: 4, diskBytes: 4, processCount: 1, containerCount: 1, concurrencyUnits: 1),
+                    TaskInput.Empty, [],
+                    new HashSet<string>(StringComparer.Ordinal) { "docker" },
+                    "harbor-setup",
+                    $"eval:harbor:shard:{shard:D6}",
+                    null, 3, InterruptionClass.Restartable,
+                    [],
+                    $"eval-case:case-{caseIndex:D2}:r{replica}"));
+            }
+        }
+
+        var plan = new WorkloadPlan(
+            Id<WorkloadId>(9000), Id<PlanRevisionId>(9001),
+            WorkloadPlan.CurrentSchemaVersion, "harbor-evaluation", "1.0",
+            tasks, AggregateFailurePolicy.PartialSuccess, 108);
+
+        await scheduler.RegisterAsync(plan);
+        var hosts = new[]
+        {
+            new HostCapacitySnapshot(
+                Id<HostId>(5001), Id<NodeIncarnationId>(15001), Id<PoolId>(999),
+                new(cpuCores: 80, memoryBytes: 4000, diskBytes: 4000, processCount: 320, containerCount: 80, concurrencyUnits: 108),
+                ["docker"], ["harbor-setup"], DateTimeOffset.UtcNow),
+            new HostCapacitySnapshot(
+                Id<HostId>(5002), Id<NodeIncarnationId>(15002), Id<PoolId>(999),
+                new(cpuCores: 80, memoryBytes: 4000, diskBytes: 4000, processCount: 320, containerCount: 80, concurrencyUnits: 108),
+                ["docker"], ["harbor-setup"], DateTimeOffset.UtcNow),
+            new HostCapacitySnapshot(
+                Id<HostId>(5003), Id<NodeIncarnationId>(15003), Id<PoolId>(999),
+                new(cpuCores: 80, memoryBytes: 4000, diskBytes: 4000, processCount: 320, containerCount: 80, concurrencyUnits: 108),
+                ["docker"], ["harbor-setup"], DateTimeOffset.UtcNow)
+        };
+        await scheduler.SetHostsAsync(plan, hosts);
+
+        var result = await scheduler.ScheduleAsync(plan, DateTimeOffset.UtcNow, Id<PoolId>(999));
+        var placed = result.State.Tasks.Where(x => x.Placement is not null).ToArray();
+
+        // All 108 tasks placed
+        Assert.Equal(108, placed.Length);
+        // Tasks placed on all 3 hosts
+        var hostDistribution = placed.GroupBy(x => x.Placement!.HostId).ToArray();
+        Assert.Equal(3, hostDistribution.Length);
+        // Each host has meaningful work (at least 20 tasks each for 108 total)
+        Assert.All(hostDistribution, g => Assert.InRange(g.Count(), 20, 60));
+        // Each (caseId, replica) combination is unique — no 4th replica
+        var replicaKeys = placed.Select(x =>
+        {
+            var node = plan.Tasks.Single(n => n.TaskId == x.TaskId);
+            return node.ResultReductionKey;
+        }).ToArray();
+        Assert.Equal(108, replicaKeys.Distinct(StringComparer.Ordinal).Count());
+        // Verify no task has generation > 1 (no retry happened)
+        Assert.All(placed, t => Assert.Equal(1, t.AttemptGeneration));
+    }
+
+    [Fact]
+    public async Task Retry_of_failed_replica_creates_new_generation_not_fourth_replica()
+    {
+        await using var store = new InMemorySchedulerStateStore();
+        var scheduler = new CompositeScheduler(store);
+        var tasks = Enumerable.Range(0, 3).Select(r => new TaskPlanNode(
+            Id<TaskId>(8000 + r), $"eval/case-a/r{r}", "evaluation-runner", "1.0",
+            new(memoryBytes: 1, concurrencyUnits: 1), TaskInput.Empty, [],
+            new HashSet<string>(StringComparer.Ordinal) { "test" }, null,
+            $"eval:shard:{r:D6}", null, 3, InterruptionClass.Restartable,
+            [], $"eval-case:case-a:r{r}")).ToArray();
+        var plan = Plan(Id<WorkloadId>(7999), Id<PlanRevisionId>(7998), tasks);
+        await scheduler.RegisterAsync(plan);
+        var hosts = new[] { Host(7001, 100) };
+        await scheduler.SetHostsAsync(plan, hosts);
+        var scheduled = await scheduler.ScheduleAsync(plan, DateTimeOffset.UtcNow, Id<PoolId>(999));
+
+        Assert.Equal(3, scheduled.State.Tasks.Count(x => x.Placement is not null));
+
+        // Fail replica 0 via CompleteAsync(success: false)
+        var failedTask = scheduled.State.Tasks.Single(x => x.TaskId == Id<TaskId>(8000));
+        await scheduler.CompleteAsync(plan, failedTask.TaskId,
+            failedTask.AttemptGeneration, false, "failed-receipt", DateTimeOffset.UtcNow,
+            retryDelay: TimeSpan.Zero);
+
+        // Reschedule after backoff elapsed
+        var rescheduled = await scheduler.ScheduleAsync(plan, DateTimeOffset.UtcNow.AddSeconds(1), Id<PoolId>(999));
+        var allTasks = rescheduled.State.Tasks;
+        // Still exactly 3 tasks (not 4)
+        Assert.Equal(3, allTasks.Count);
+        // The failed one now has generation 2
+        var retried = allTasks.Single(x => x.TaskId == Id<TaskId>(8000));
+        Assert.Equal(2, retried.AttemptGeneration);
+        // The other two still have generation 1
+        Assert.All(allTasks.Where(x => x.TaskId != Id<TaskId>(8000)),
+            t => Assert.Equal(1, t.AttemptGeneration));
+    }
 }
