@@ -218,28 +218,16 @@ if ($bootstrapBytes.Length -notin 294, 422, 550 -or
     controlIdentity = $ControlIdentity
 } | ConvertTo-Json | Set-Content -LiteralPath $config -Encoding utf8
 $installer = New-Object -ComObject WindowsInstaller.Installer
-$database = $installer.GetType().InvokeMember(
-    'OpenDatabase',
-    'InvokeMethod',
-    $null,
-    $installer,
-    @($msi, 0))
+$database = $installer.OpenDatabase($msi, 0)
 function Get-MsiProperty([object]$Database, [string]$Name) {
-    $propertyView = $Database.GetType().InvokeMember(
-        'OpenView',
-        'InvokeMethod',
-        $null,
-        $Database,
-        @("SELECT `Value` FROM `Property` WHERE `Property`='$Name'"))
-    $propertyView.GetType().InvokeMember(
-        'Execute', 'InvokeMethod', $null, $propertyView, $null)
-    $propertyRecord = $propertyView.GetType().InvokeMember(
-        'Fetch', 'InvokeMethod', $null, $propertyView, $null)
+    $propertyView = $Database.OpenView(
+        "SELECT `Value` FROM `Property` WHERE `Property`='$Name'")
+    $propertyView.Execute()
+    $propertyRecord = $propertyView.Fetch()
     if ($null -eq $propertyRecord) {
         throw "MSI property $Name is missing."
     }
-    return $propertyRecord.GetType().InvokeMember(
-        'StringData', 'GetProperty', $null, $propertyRecord, 1)
+    return $propertyRecord.StringData(1)
 }
 $version = Get-MsiProperty $database 'ProductVersion'
 if ($version -ne $manifest.ProductVersion) {
