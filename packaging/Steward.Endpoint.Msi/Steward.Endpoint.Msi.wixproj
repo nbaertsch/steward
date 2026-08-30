@@ -5,5 +5,6 @@
     <ProductVersion Condition="'$(ProductVersion)' == ''">1.0.0</ProductVersion>
     <PayloadDir Condition="'$(PayloadDir)' == ''">$(MSBuildThisFileDirectory)payload</PayloadDir>
     <DefineConstants>ProductVersion=$(ProductVersion);PayloadDir=$(PayloadDir)</DefineConstants>
+    <SuppressSpecificWarnings>$(SuppressSpecificWarnings);1101</SuppressSpecificWarnings>
   </PropertyGroup>
 </Project>
