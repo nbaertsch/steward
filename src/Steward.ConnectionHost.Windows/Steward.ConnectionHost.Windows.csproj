@@ -4,6 +4,9 @@
     <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <StewardNativeMSBuild Condition="Exists('$(ProgramFiles)\Microsoft Visual Studio\2022\Enterprise\MSBuild\Current\Bin\MSBuild.exe')">$(ProgramFiles)\Microsoft Visual Studio\2022\Enterprise\MSBuild\Current\Bin\MSBuild.exe</StewardNativeMSBuild>
+    <StewardNativeMSBuild Condition="'$(StewardNativeMSBuild)' == '' and Exists('$(ProgramFiles)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\MSBuild.exe')">$(ProgramFiles)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\MSBuild.exe</StewardNativeMSBuild>
+    <StewardNativeMSBuild Condition="'$(StewardNativeMSBuild)' == '' and Exists('$(MSBuildProgramFiles32)\Microsoft Visual Studio\2019\BuildTools\MSBuild\Current\Bin\MSBuild.exe')">$(MSBuildProgramFiles32)\Microsoft Visual Studio\2019\BuildTools\MSBuild\Current\Bin\MSBuild.exe</StewardNativeMSBuild>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\Steward.DevBox.Windows\Steward.DevBox.Windows.csproj" />
@@ -16,8 +19,11 @@
     <ProjectReference Include="..\Steward.RdpDvc.Client.Windows\Steward.RdpDvc.Client.Windows.csproj" />
   </ItemGroup>
   <Target Name="BuildStewardRdpDvcShim" BeforeTargets="PrepareForBuild">
+    <Error
+      Condition="'$(StewardNativeMSBuild)' == ''"
+      Text="A supported Visual Studio MSBuild installation is required for Steward.RdpDvc.Shim.Windows." />
     <Exec
-      Command="&quot;$(MSBuildProgramFiles32)\Microsoft Visual Studio\2019\BuildTools\MSBuild\Current\Bin\MSBuild.exe&quot; &quot;$(MSBuildProjectDirectory)\..\Steward.RdpDvc.Shim.Windows\Steward.RdpDvc.Shim.Windows.vcxproj&quot; /nologo /verbosity:minimal /property:Configuration=$(Configuration) /property:Platform=x64" />
+      Command="&quot;$(StewardNativeMSBuild)&quot; &quot;$(MSBuildProjectDirectory)\..\Steward.RdpDvc.Shim.Windows\Steward.RdpDvc.Shim.Windows.vcxproj&quot; /nologo /verbosity:minimal /property:Configuration=$(Configuration) /property:Platform=x64" />
     <Copy
       SourceFiles="..\Steward.RdpDvc.Shim.Windows\x64\$(Configuration)\Steward.RdpDvc.Shim.Windows.dll"
       DestinationFolder="$(OutputPath)" />

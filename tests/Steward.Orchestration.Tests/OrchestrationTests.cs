@@ -1048,8 +1048,28 @@ public sealed class OrchestrationTests
                 if (snapshot.State != TerminalSessionState.Open) await Task.Delay(25);
             } while (snapshot.State != TerminalSessionState.Open);
             var input = Encoding.UTF8.GetBytes("echo managed-input\r\n");
-            var afterInput = await app.InputAsync(authority.SessionId, new(
-                authority.SessionId, default!, "input-1", snapshot.Revision, input), cancellation.Token);
+            TerminalWireResponse? afterInput = null;
+            for (var attempt = 0; attempt < 20 && afterInput is null; attempt++)
+            {
+                try
+                {
+                    afterInput = await app.InputAsync(authority.SessionId, new(
+                        authority.SessionId, default!, "input-1",
+                        snapshot.Revision, input), cancellation.Token);
+                }
+                catch (ApplicationContractException exception)
+                    when (exception.Message.Contains(
+                        "revision does not match",
+                        StringComparison.Ordinal))
+                {
+                    var current = await app.GetAsync(
+                        authority.SessionId,
+                        cancellation.Token);
+                    snapshot = TerminalWireCodec.FromElement<
+                        TerminalSessionSnapshot>(current.Snapshot!.Value)!;
+                }
+            }
+            Assert.NotNull(afterInput);
             var inputSnapshot = TerminalWireCodec.FromElement<TerminalSessionSnapshot>(afterInput.Snapshot!.Value)!;
             TerminalWireResponse output;
             do
