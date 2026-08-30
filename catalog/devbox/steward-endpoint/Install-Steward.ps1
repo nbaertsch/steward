@@ -6,7 +6,8 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$ControlSigningPublicKeyBase64,
     [Parameter(Mandatory = $true)]
-    [string]$ControlIdentity
+    [string]$ControlIdentity,
+    [switch]$ValidateOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -31,8 +32,16 @@ $downloadRoot = Join-Path $env:ProgramData (
     'Steward\install\download-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $downloadRoot -Force | Out-Null
 try {
-& icacls.exe $downloadRoot /inheritance:r /grant:r `
-    '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
+if ($ValidateOnly) {
+    $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().
+        User.Value
+    & icacls.exe $downloadRoot /inheritance:r /grant:r `
+        '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' `
+        "*$currentSid`:(OI)(CI)F" | Out-Null
+} else {
+    & icacls.exe $downloadRoot /inheritance:r /grant:r `
+        '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
+}
 if ($LASTEXITCODE -ne 0) {
     throw 'Steward endpoint download staging ACL failed.'
 }
@@ -55,7 +64,7 @@ try {
         $ReleaseAssetUrl,
         [Net.Http.HttpCompletionOption]::ResponseHeadersRead
     ).GetAwaiter().GetResult()
-    $response.EnsureSuccessStatusCode()
+    [void]$response.EnsureSuccessStatusCode()
     if ($response.RequestMessage.RequestUri.Scheme -ne 'https' -or
         $response.RequestMessage.RequestUri.Host -ne
             'release-assets.githubusercontent.com') {
@@ -222,12 +231,12 @@ $database = $installer.OpenDatabase($msi, 0)
 function Get-MsiProperty([object]$Database, [string]$Name) {
     $propertyView = $Database.OpenView(
         "SELECT `Value` FROM `Property` WHERE `Property`='$Name'")
-    $propertyView.Execute()
+    [void]$propertyView.Execute()
     $propertyRecord = $propertyView.Fetch()
     if ($null -eq $propertyRecord) {
         throw "MSI property $Name is missing."
     }
-    return $propertyRecord.StringData(1)
+    return $propertyRecord.StringData(1).Trim()
 }
 $version = Get-MsiProperty $database 'ProductVersion'
 if ($version -ne $manifest.ProductVersion) {
@@ -237,6 +246,10 @@ $productCode = Get-MsiProperty $database 'ProductCode'
 $upgradeCode = Get-MsiProperty $database 'UpgradeCode'
 $wasCurrentInstalled = $installer.ProductState($productCode) -eq 5
 $relatedProducts = @($installer.RelatedProducts($upgradeCode))
+if ($ValidateOnly) {
+    Write-Output 'STEWARD_ENDPOINT_VALIDATION_PASSED'
+    return
+}
 $attestationDirectory = Join-Path $env:ProgramData 'Steward\install'
 $attestationData = [ordered]@{
     version = 1
@@ -581,6 +594,12 @@ Write-Output 'STEWARD_ENDPOINT_MSI_INSTALLED'
         Restore-PreMsiTasks
     }
 }
+} catch {
+    Write-Error (
+        "Steward endpoint bootstrap failed at line " +
+        "$($_.InvocationInfo.ScriptLineNumber):" +
+        "$($_.Exception.GetType().Name):$($_.Exception.Message)")
+    throw
 } finally {
     Remove-Item -LiteralPath $downloadRoot -Recurse -Force `
         -ErrorAction SilentlyContinue
