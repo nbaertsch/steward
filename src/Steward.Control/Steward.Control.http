@@ -1,0 +1,11 @@
+@Steward.Control_HostAddress = http://localhost:5112
+
+GET {{Steward.Control_HostAddress}}/health
+Accept: application/json
+
+###
+
+GET {{Steward.Control_HostAddress}}/doctor
+Accept: application/json
+
+###

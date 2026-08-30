@@ -1,0 +1,20 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <PackageReference Include="Azure.Developer.DevCenter" Version="1.0.0" />
+    <ProjectReference Include="..\Steward.Domain\Steward.Domain.csproj" />
+    <ProjectReference Include="..\Steward.Providers.Abstractions\Steward.Providers.Abstractions.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Steward.DevBox.BootstrapDeploy" />
+    <InternalsVisibleTo Include="Steward.DevBox.Tests" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,19 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\Steward.Application\Steward.Application.csproj" />
+    <ProjectReference Include="..\Steward.Control.Client\Steward.Control.Client.csproj" />
+    <ProjectReference Include="..\Steward.Contracts\Steward.Contracts.csproj" />
+    <ProjectReference Include="..\Steward.DevBox.Windows\Steward.DevBox.Windows.csproj"
+                      Condition="'$(TargetFramework)' == 'net10.0-windows'" />
+    <ProjectReference Include="..\Steward.Orchestration\Steward.Orchestration.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFrameworks>net10.0;net10.0-windows</TargetFrameworks>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>

@@ -1,0 +1,148 @@
+name: Release Steward Endpoint
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: MSI product version
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+  artifact-metadata: write
+
+jobs:
+  build-attest:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    environment: steward-endpoint-release
+
+    steps:
+      - name: Require public repository
+        shell: pwsh
+        run: |
+          if ('${{ github.event.repository.private }}' -ne 'false') {
+            throw 'Steward endpoint releases require the approved public repository.'
+          }
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          global-json-file: global.json
+          cache: true
+          cache-dependency-path: |
+            **/*.csproj
+            global.json
+
+      - name: Build and test
+        shell: pwsh
+        run: |
+          dotnet restore Steward.slnx
+          dotnet build Steward.slnx -c Release --no-restore
+          dotnet test Steward.slnx -c Release --no-build --no-restore -m:1
+
+      - name: Build endpoint catalog
+        shell: pwsh
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if ($env:VERSION -notmatch '^\d+\.\d+\.\d+$') {
+            throw 'Release version must be a three-part numeric version.'
+          }
+          if ('${{ github.ref }}' -ne 'refs/heads/main') {
+            throw 'Endpoint releases must be built from main.'
+          }
+          .\scripts\Build-StewardEndpointMsi.ps1 `
+            -Version $env:VERSION `
+            -OutputDirectory '${{ runner.temp }}\steward-endpoint' `
+            -SourceRepository '${{ github.repository }}' `
+            -SourceCommit '${{ github.sha }}' `
+            -SourceRef '${{ github.ref }}' `
+            -SignerWorkflow '${{ github.repository }}/.github/workflows/release-endpoint.yml' `
+            -SourceRunId '${{ github.run_id }}'
+
+      - name: Build attestation subject list
+        shell: pwsh
+        run: |
+          $catalog = '${{ runner.temp }}\steward-endpoint\catalog'
+          $subjects = @(
+            'Steward.Endpoint.Msi.msi',
+            'steward-endpoint.release.psd1')
+          $lines = foreach ($name in $subjects) {
+            $hash = (Get-FileHash (Join-Path $catalog $name) -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash *$name"
+          }
+          Set-Content -LiteralPath (
+            '${{ runner.temp }}\steward-endpoint\catalog.subjects.sha256') `
+            -Value $lines -Encoding ascii
+
+      - name: Attest endpoint release subjects
+        id: attest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-checksums: ${{ runner.temp }}\steward-endpoint\catalog.subjects.sha256
+
+      - name: Preserve and verify attestation
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUNDLE_PATH: ${{ steps.attest.outputs.bundle-path }}
+        run: |
+          $catalog = '${{ runner.temp }}\steward-endpoint\catalog'
+          $bundle = Join-Path $catalog 'Steward.Endpoint.Msi.sigstore.json'
+          Copy-Item -LiteralPath $env:BUNDLE_PATH -Destination $bundle
+          foreach ($name in @(
+            'Steward.Endpoint.Msi.msi',
+            'steward-endpoint.release.psd1')) {
+            gh attestation verify `
+              (Join-Path $catalog $name) `
+              --bundle $bundle `
+              --repo '${{ github.repository }}' `
+              --signer-workflow '${{ github.repository }}/.github/workflows/release-endpoint.yml' `
+              --signer-digest '${{ github.sha }}' `
+              --source-digest '${{ github.sha }}' `
+              --source-ref '${{ github.ref }}' `
+              --deny-self-hosted-runners
+            if ($LASTEXITCODE -ne 0) {
+              throw "Attestation self-verification failed for $name."
+            }
+          }
+
+      - name: Publish private GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          $version = $env:VERSION
+          if ($version -notmatch '^\d+\.\d+\.\d+$') {
+            throw 'Release version must be a three-part numeric version.'
+          }
+          $catalog = '${{ runner.temp }}\steward-endpoint\catalog'
+          $archive = Join-Path '${{ runner.temp }}\steward-endpoint' (
+            "Steward.Endpoint.Catalog.$version.zip")
+          $releaseFiles = @(
+            'Steward.Endpoint.Msi.msi',
+            'Steward.Endpoint.Msi.sigstore.json',
+            'steward-endpoint.release.psd1') |
+            ForEach-Object { Join-Path $catalog $_ }
+          Compress-Archive -LiteralPath $releaseFiles -DestinationPath $archive
+          $tag = "steward-endpoint-v$version"
+          gh release create $tag $archive `
+            --repo '${{ github.repository }}' `
+            --target '${{ github.sha }}' `
+            --title "Steward Endpoint $version" `
+            --notes "CI-attested Steward endpoint bootstrap." `
+            --latest=false
+
+      - name: Upload attested catalog archive
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: steward-endpoint-${{ inputs.version }}
+          path: ${{ runner.temp }}\steward-endpoint\Steward.Endpoint.Catalog.${{ inputs.version }}.zip
+          if-no-files-found: error
+          retention-days: 30

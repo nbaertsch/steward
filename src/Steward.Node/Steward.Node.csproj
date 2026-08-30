@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk.Worker">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Library</OutputType>
+    <EnableDefaultContentItems>false</EnableDefaultContentItems>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UserSecretsId>dotnet-Steward.Node-b9efb578-61cf-4616-b4c4-8709ef4a067e</UserSecretsId>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Remove="Program.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.11" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.4" />
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.5" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Steward.Domain\Steward.Domain.csproj" />
+    <ProjectReference Include="..\Steward.Contracts\Steward.Contracts.csproj" />
+    <ProjectReference Include="..\Steward.Transport\Steward.Transport.csproj" />
+    <ProjectReference Include="..\Steward.Runtime.Windows\Steward.Runtime.Windows.csproj" />
+    <ProjectReference Include="..\Steward.Tasks.Abstractions\Steward.Tasks.Abstractions.csproj" />
+    <ProjectReference Include="..\Steward.Tasks.Process\Steward.Tasks.Process.csproj" />
+    <ProjectReference Include="..\Steward.Tasks.Compose\Steward.Tasks.Compose.csproj" />
+    <ProjectReference Include="..\Steward.Agents\Steward.Agents.csproj" />
+  </ItemGroup>
+</Project>

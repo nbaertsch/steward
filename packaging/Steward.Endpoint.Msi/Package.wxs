@@ -1,0 +1,18 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+      Name="Steward Endpoint"
+      Manufacturer="Steward Project"
+      Version="$(var.ProductVersion)"
+      UpgradeCode="{37C34E0A-E245-48A4-B07C-78E2955A7E65}"
+      Scope="perMachine">
+    <MajorUpgrade
+        DowngradeErrorMessage="A newer Steward Endpoint is already installed."
+        Schedule="afterInstallInitialize" />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+    <StandardDirectory Id="ProgramFiles6432Folder">
+      <Directory Id="INSTALLFOLDER"       Name="Steward">
+        <Files Include="$(var.PayloadDir)\**" />
+      </Directory>
+    </StandardDirectory>
+  </Package>
+</Wix>

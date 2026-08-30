@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Steward.RdCore.Windows.Tests" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Steward.DevBox.Windows\Steward.DevBox.Windows.csproj" />
+    <ProjectReference Include="..\Steward.Transport.Rdp.Windows\Steward.Transport.Rdp.Windows.csproj" />
+  </ItemGroup>
+</Project>

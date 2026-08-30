@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+          cache: true
+          cache-dependency-path: |
+            **/*.csproj
+            global.json
+
+      - name: Restore
+        run: dotnet restore Steward.slnx
+
+      - name: Build
+        run: dotnet build Steward.slnx --configuration Release --no-restore
+
+      - name: Test
+        run: dotnet test Steward.slnx --configuration Release --no-build --no-restore
+
+      - name: Audit dependencies
+        shell: pwsh
+        run: |
+          $output = dotnet list Steward.slnx package --vulnerable --include-transitive
+          $output
+          if ($LASTEXITCODE -ne 0 -or $output -match 'has the following vulnerable packages') {
+            exit 1
+          }
