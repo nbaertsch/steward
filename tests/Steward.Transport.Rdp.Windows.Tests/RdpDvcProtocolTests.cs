@@ -314,11 +314,17 @@ public sealed class RdpDvcProtocolTests
         var dvcConnections = await Task.WhenAll(
             RdpDvcStreamHandshake.InitiateAsync(
                     new(pair.First, 42),
-                    Options(authenticationKey, 42))
+                    Options(
+                        authenticationKey,
+                        42,
+                        TimeSpan.FromMilliseconds(50)))
                 .AsTask(),
             RdpDvcStreamHandshake.RespondAsync(
                     new(pair.Second, null),
-                    Options(authenticationKey))
+                    Options(
+                        authenticationKey,
+                        operationTimeout:
+                            TimeSpan.FromMilliseconds(50)))
                 .AsTask());
         using var controlKey =
             EcdsaEndpointSigningKey.Create("control");
@@ -419,7 +425,8 @@ public sealed class RdpDvcProtocolTests
 
     private static RdpDvcAuthenticationOptions Options(
         byte[] key,
-        int? rdpSessionId = null) =>
+        int? rdpSessionId = null,
+        TimeSpan? operationTimeout = null) =>
         new(
             new(
                 SessionId,
@@ -429,7 +436,7 @@ public sealed class RdpDvcProtocolTests
             key,
             64 * 1024,
             TimeSpan.FromSeconds(2),
-            TimeSpan.FromSeconds(2));
+            operationTimeout ?? TimeSpan.FromSeconds(2));
 
     private static byte[] Key() =>
         Enumerable.Range(1, 32)
