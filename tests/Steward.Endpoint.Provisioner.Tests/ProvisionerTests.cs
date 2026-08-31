@@ -668,6 +668,10 @@ public sealed class ProvisionerTests : IDisposable
         public void GrantUser(string stateRoot, string sid)
         {
         }
+
+        public void GrantUserReadExecute(string installRoot, string sid)
+        {
+        }
     }
 
     private sealed class ThrowFirstRestoreRegistrar : IEndpointTaskRegistrar

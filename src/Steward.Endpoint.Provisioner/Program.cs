@@ -278,6 +278,7 @@ internal interface IEndpointSecurity
 {
     void Harden(string stateRoot);
     void GrantUser(string stateRoot, string sid);
+    void GrantUserReadExecute(string installRoot, string sid);
 }
 
 internal sealed class IcaclsEndpointSecurity : IEndpointSecurity
@@ -299,6 +300,15 @@ internal sealed class IcaclsEndpointSecurity : IEndpointSecurity
             stateRoot,
             "/grant",
             $"*{sid}:(OI)(CI)F",
+            "/T",
+            "/C");
+
+    public void GrantUserReadExecute(string installRoot, string sid) =>
+        EndpointProvisioner.Run(
+            "icacls.exe",
+            installRoot,
+            "/grant",
+            $"*{sid}:(OI)(CI)RX",
             "/T",
             "/C");
 }
@@ -447,6 +457,7 @@ internal sealed class EndpointProvisioner(
                 security.Harden(workingRoot);
                 var user = ResolveUser(config);
                 security.GrantUser(workingRoot, user.Sid);
+                security.GrantUserReadExecute(options.InstallRoot, user.Sid);
                 taskSnapshot ??= tasks.Capture(identity);
                 taskSnapshotIdentity ??= identity;
                 if (existing)
@@ -1338,8 +1349,9 @@ internal sealed class PowerShellTaskRegistrar : IEndpointTaskRegistrar
             $serverXml=if($null-ne$serverPrior){Export-ScheduledTask -TaskName $serverName -TaskPath '\Steward\'}else{$null}
             Stop-ScheduledTask -TaskName $keeperName -TaskPath '\Steward\' -ErrorAction SilentlyContinue
             Stop-ScheduledTask -TaskName $serverName -TaskPath '\Steward\' -ErrorAction SilentlyContinue
-            $trigger=New-ScheduledTaskTrigger -AtLogOn -User '{{Escape(userAccount)}}'
-            $principal=New-ScheduledTaskPrincipal -UserId '{{Escape(userAccount)}}' -LogonType Interactive -RunLevel Limited
+            $usersGroup=([Security.Principal.SecurityIdentifier]'S-1-5-32-545').Translate([Security.Principal.NTAccount]).Value
+            $trigger=New-ScheduledTaskTrigger -AtLogOn
+            $principal=New-ScheduledTaskPrincipal -GroupId $usersGroup -RunLevel Limited
             $settings=New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -Hidden -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
             $keeper=New-ScheduledTaskAction -Execute '{{Escape(actions.KeeperExecutable)}}' -Argument '{{Escape(actions.KeeperArguments)}}' -WorkingDirectory '{{Escape(installRoot)}}'
             $server=New-ScheduledTaskAction -Execute '{{Escape(actions.ServerExecutable)}}' -Argument '{{Escape(actions.ServerArguments)}}' -WorkingDirectory '{{Escape(installRoot)}}'
@@ -1417,6 +1429,12 @@ internal sealed class PowerShellTaskRegistrar : IEndpointTaskRegistrar
         var script = $$"""
             $a=Get-ScheduledTask -TaskPath '\Steward\' -TaskName 'HandleKeeper-{{identity.HostId:N}}' -ErrorAction SilentlyContinue
             $b=Get-ScheduledTask -TaskPath '\Steward\' -TaskName 'RdpDvcEndpoint-{{identity.HostId:N}}' -ErrorAction SilentlyContinue
+            $aGroupSid=if($null-ne$a-and![string]::IsNullOrWhiteSpace($a.Principal.GroupId)){
+              try{([Security.Principal.NTAccount]$a.Principal.GroupId).Translate([Security.Principal.SecurityIdentifier]).Value}catch{$null}
+            }else{$null}
+            $bGroupSid=if($null-ne$b-and![string]::IsNullOrWhiteSpace($b.Principal.GroupId)){
+              try{([Security.Principal.NTAccount]$b.Principal.GroupId).Translate([Security.Principal.SecurityIdentifier]).Value}catch{$null}
+            }else{$null}
             $ok=$null-ne$a-and$null-ne$b-and
               $a.Actions.Count-eq1-and$b.Actions.Count-eq1-and
               $a.Actions[0].Execute-eq'{{Escape(expected.KeeperExecutable)}}'-and
@@ -1425,17 +1443,17 @@ internal sealed class PowerShellTaskRegistrar : IEndpointTaskRegistrar
               $b.Actions[0].Execute-eq'{{Escape(expected.ServerExecutable)}}'-and
               $b.Actions[0].Arguments-eq'{{Escape(expected.ServerArguments)}}'-and
               $b.Actions[0].WorkingDirectory-eq'{{Escape(installRoot)}}'-and
-              $a.Principal.UserId-eq'{{Escape(userAccount)}}'-and
-              $b.Principal.UserId-eq'{{Escape(userAccount)}}'-and
-              $a.Principal.LogonType-eq'Interactive'-and
-              $b.Principal.LogonType-eq'Interactive'-and
+              $aGroupSid-eq'S-1-5-32-545'-and
+              $bGroupSid-eq'S-1-5-32-545'-and
+              $a.Principal.LogonType-eq'Group'-and
+              $b.Principal.LogonType-eq'Group'-and
               $a.Principal.RunLevel-eq'Limited'-and
               $b.Principal.RunLevel-eq'Limited'-and
               $a.Triggers.Count-eq1-and$b.Triggers.Count-eq1-and
               $a.Triggers[0].CimClass.CimClassName-eq'MSFT_TaskLogonTrigger'-and
               $b.Triggers[0].CimClass.CimClassName-eq'MSFT_TaskLogonTrigger'-and
-              $a.Triggers[0].UserId-eq'{{Escape(userAccount)}}'-and
-              $b.Triggers[0].UserId-eq'{{Escape(userAccount)}}'-and
+              [string]::IsNullOrEmpty($a.Triggers[0].UserId)-and
+              [string]::IsNullOrEmpty($b.Triggers[0].UserId)-and
               $a.Triggers[0].Enabled-and$b.Triggers[0].Enabled-and
               $a.Settings.Enabled-and$b.Settings.Enabled-and
               $a.Settings.Hidden-and$b.Settings.Hidden-and
