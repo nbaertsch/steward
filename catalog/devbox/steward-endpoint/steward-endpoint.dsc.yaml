@@ -1,0 +1,203 @@
+$schema: https://raw.githubusercontent.com/PowerShell/DSC/main/schemas/2023/08/config/document.json
+
+metadata:
+  winget:
+    processor:
+      identifier: dscv3
+
+resources:
+  - name: Steward endpoint
+    type: Microsoft.DSC.Transitional/RunCommandOnSet
+    properties:
+      executable: powershell.exe
+      arguments:
+        "0": -NoLogo
+        "1": -NoProfile
+        "2": -NonInteractive
+        "3": -ExecutionPolicy
+        "4": Bypass
+        "5": -Command
+        "6": |
+          & {
+            $ErrorActionPreference = 'Stop'
+            $systemSid = [Security.Principal.SecurityIdentifier]::new(
+              'S-1-5-18')
+            $administratorsSid =
+              [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+            function Protect-StewardPath {
+              param(
+                [Parameter(Mandatory = $true)]
+                [string]$Path,
+                [Parameter(Mandatory = $true)]
+                [bool]$Directory
+              )
+              $item = Get-Item -LiteralPath $Path -Force
+              if (($item.Attributes -band
+                  [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "Steward protected path is a reparse point: $Path"
+              }
+              $security = if ($Directory) {
+                [Security.AccessControl.DirectorySecurity]::new()
+              } else {
+                [Security.AccessControl.FileSecurity]::new()
+              }
+              $inheritance = if ($Directory) {
+                [Security.AccessControl.InheritanceFlags]::ContainerInherit `
+                  -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit
+              } else {
+                [Security.AccessControl.InheritanceFlags]::None
+              }
+              $security.SetAccessRuleProtection($true, $false)
+              $security.SetOwner($systemSid)
+              foreach ($sid in @($systemSid, $administratorsSid)) {
+                $security.AddAccessRule(
+                  [Security.AccessControl.FileSystemAccessRule]::new(
+                    $sid,
+                    [Security.AccessControl.FileSystemRights]::FullControl,
+                    $inheritance,
+                    [Security.AccessControl.PropagationFlags]::None,
+                    [Security.AccessControl.AccessControlType]::Allow))
+              }
+              Set-Acl -LiteralPath $Path -AclObject $security
+              $actual = Get-Acl -LiteralPath $Path
+              $ownerSid = ([Security.Principal.NTAccount]$actual.Owner).
+                Translate([Security.Principal.SecurityIdentifier])
+              $rules = @($actual.GetAccessRules(
+                $true,
+                $true,
+                [Security.Principal.SecurityIdentifier]))
+              $trusted = @($systemSid.Value, $administratorsSid.Value)
+              if (-not $actual.AreAccessRulesProtected -or
+                  $ownerSid.Value -ne $systemSid.Value -or
+                  $rules.Count -ne 2 -or
+                  $rules.Where({
+                    $_.IdentityReference.Value -notin $trusted -or
+                    $_.AccessControlType -ne
+                      [Security.AccessControl.AccessControlType]::Allow -or
+                    ($_.FileSystemRights -band
+                      [Security.AccessControl.FileSystemRights]::FullControl) -ne
+                      [Security.AccessControl.FileSystemRights]::FullControl
+                  }).Count -ne 0) {
+                throw "Steward protected path ACL verification failed: $Path"
+              }
+            }
+            $programDataItem = Get-Item -LiteralPath $env:ProgramData -Force
+            if (($programDataItem.Attributes -band
+                [IO.FileAttributes]::ReparsePoint) -ne 0) {
+              throw 'ProgramData cannot be a reparse point.'
+            }
+            $stewardRoot = Join-Path $env:ProgramData 'Steward'
+            $installRoot = 'C:\ProgramData\Steward\install'
+            Protect-StewardPath -Path $stewardRoot -Directory $true
+            Protect-StewardPath -Path $installRoot -Directory $true
+            $argumentPath = Join-Path $installRoot 'bootstrap-args.json'
+            if (-not (Test-Path -LiteralPath $argumentPath -PathType Leaf)) {
+              throw 'Steward endpoint bootstrap arguments are missing.'
+            }
+            Protect-StewardPath -Path $argumentPath -Directory $false
+            $argumentStream = [IO.File]::Open(
+              $argumentPath,
+              [IO.FileMode]::Open,
+              [IO.FileAccess]::Read,
+              [IO.FileShare]::None)
+            try {
+              $reader = [IO.StreamReader]::new(
+                $argumentStream,
+                [Text.Encoding]::UTF8,
+                $true)
+              try {
+                $argumentJson = $reader.ReadToEnd()
+              } finally {
+                $reader.Dispose()
+              }
+            } finally {
+              $argumentStream.Dispose()
+            }
+            $arguments = $argumentJson | ConvertFrom-Json
+            $required = @(
+              'releaseAssetUrl',
+              'bootstrapEncryptionPublicKeyBase64',
+              'controlSigningPublicKeyBase64',
+              'controlIdentity',
+              'nodeUserAccount',
+              'nodeUserSid'
+            )
+            foreach ($name in $required) {
+              if ([string]::IsNullOrWhiteSpace([string]$arguments.$name)) {
+                throw "Steward endpoint bootstrap argument '$name' is missing."
+              }
+            }
+            $bootstrapPath = Join-Path $installRoot (
+              'Install-Steward-' + [guid]::NewGuid().ToString('N') + '.ps1')
+            try {
+              Add-Type -AssemblyName System.Net.Http
+              $handler = [Net.Http.HttpClientHandler]::new()
+              $handler.AllowAutoRedirect = $false
+              $client = [Net.Http.HttpClient]::new($handler)
+              $client.Timeout = [TimeSpan]::FromMinutes(2)
+              try {
+                $uri = [uri]'https://raw.githubusercontent.com/nbaertsch/steward/a09c4b25689b14cd15ccd8d75ee1ae87bb318a21/catalog/devbox/steward-endpoint/Install-Steward.ps1'
+                $response = $client.GetAsync(
+                  $uri,
+                  [Net.Http.HttpCompletionOption]::ResponseHeadersRead
+                ).GetAwaiter().GetResult()
+                [void]$response.EnsureSuccessStatusCode()
+                if ($response.RequestMessage.RequestUri -ne $uri) {
+                  throw 'Steward endpoint bootstrap download redirected.'
+                }
+                $input = $response.Content.ReadAsStreamAsync().
+                  GetAwaiter().GetResult()
+                $output = [IO.File]::Open(
+                  $bootstrapPath,
+                  [IO.FileMode]::CreateNew,
+                  [IO.FileAccess]::Write,
+                  [IO.FileShare]::None)
+                try {
+                  $buffer = [byte[]]::new(65536)
+                  $total = 0L
+                  while (($read = $input.Read(
+                      $buffer, 0, $buffer.Length)) -gt 0) {
+                    $total += $read
+                    if ($total -gt 1048576) {
+                      throw 'Steward endpoint bootstrap exceeds its size bound.'
+                    }
+                    $output.Write($buffer, 0, $read)
+                  }
+                } finally {
+                  $output.Dispose()
+                  $input.Dispose()
+                }
+              } finally {
+                $client.Dispose()
+                $handler.Dispose()
+              }
+              if ((Get-FileHash -LiteralPath $bootstrapPath -Algorithm SHA256).Hash -ne
+                  '93E13064738CB2A20BCF595B095553F819729D972564EB3D41F3893324309CE6') {
+                throw 'Steward endpoint bootstrap script hash mismatch.'
+              }
+              $content = Get-Content -LiteralPath $bootstrapPath -Raw
+              $content = $content.
+                Replace('__STEWARD_APPROVED_SOURCE_REPOSITORY__', 'nbaertsch/steward').
+                Replace(
+                  '__STEWARD_APPROVED_SIGNER_WORKFLOW__',
+                  'nbaertsch/steward/.github/workflows/release-endpoint.yml')
+              Set-Content -LiteralPath $bootstrapPath -Value $content `
+                -Encoding utf8
+              & $bootstrapPath `
+                -ReleaseAssetUrl $arguments.releaseAssetUrl `
+                -BootstrapEncryptionPublicKeyBase64 `
+                  $arguments.bootstrapEncryptionPublicKeyBase64 `
+                -ControlSigningPublicKeyBase64 `
+                  $arguments.controlSigningPublicKeyBase64 `
+                -ControlIdentity $arguments.controlIdentity `
+                -NodeUserAccount $arguments.nodeUserAccount `
+                -NodeUserSid $arguments.nodeUserSid
+            } finally {
+              Remove-Item -LiteralPath $bootstrapPath -Force `
+                -ErrorAction SilentlyContinue
+            }
+          }
+        treatAsArray: true
+    metadata:
+      winget:
+        securityContext: elevated
