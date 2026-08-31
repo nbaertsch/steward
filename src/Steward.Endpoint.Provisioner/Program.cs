@@ -28,7 +28,8 @@ internal static class Program
         catch (Exception exception)
         {
             Console.Error.WriteLine(
-                $"Steward endpoint provisioning failed: {exception.GetType().Name}");
+                $"Steward endpoint provisioning failed: " +
+                $"{exception.GetType().Name}: {exception.Message}");
             return 1;
         }
     }
