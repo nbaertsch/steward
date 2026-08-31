@@ -258,6 +258,10 @@ public sealed class ProvisionerTests : IDisposable
         _ = provisioner.Provision(Options(install, config, state, "1.0.0"));
         var first = JsonDocument.Parse(
             File.ReadAllText(Path.Combine(state, "identity.json")));
+        File.WriteAllText(Path.Combine(state, "readiness.json"), "stale");
+        File.WriteAllText(
+            Path.Combine(state, "readiness.json.failure"),
+            "stale");
         config = CreateConfig("1.1.0");
         RewriteManifestVersion(install, "1.1.0");
 
@@ -274,6 +278,9 @@ public sealed class ProvisionerTests : IDisposable
         Assert.Equal(
             "1.1.0",
             second.RootElement.GetProperty("productVersion").GetString());
+        Assert.False(File.Exists(Path.Combine(state, "readiness.json")));
+        Assert.False(
+            File.Exists(Path.Combine(state, "readiness.json.failure")));
     }
 
     [Fact]

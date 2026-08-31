@@ -498,6 +498,7 @@ internal sealed class EndpointProvisioner(
                     null,
                     repairExistingChildren: false);
             }
+            DeleteRuntimeReadiness(workingRoot);
             var identityPath = Path.Combine(workingRoot, "identity.json");
             var identity = LoadOrCreateIdentity(
                 identityPath,
@@ -658,6 +659,21 @@ internal sealed class EndpointProvisioner(
             throw new InvalidDataException(
                 "Endpoint provisioning commit is not healthy.");
         return receipt;
+    }
+
+    private static void DeleteRuntimeReadiness(string stateRoot)
+    {
+        foreach (var name in new[]
+                 {
+                     "readiness.json",
+                     "readiness.json.failure",
+                     "readiness.json.new"
+                 })
+        {
+            var path = Path.Combine(stateRoot, name);
+            if (File.Exists(path))
+                File.Delete(path);
+        }
     }
 
     private EndpointMachineIdentity LoadOrCreateIdentity(
