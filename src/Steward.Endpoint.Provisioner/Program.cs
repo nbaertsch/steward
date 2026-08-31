@@ -1444,19 +1444,30 @@ internal sealed class PowerShellTaskRegistrar : IEndpointTaskRegistrar
             Stop-ScheduledTask -TaskName $keeperName -TaskPath '\Steward\' -ErrorAction SilentlyContinue
             Stop-ScheduledTask -TaskName $serverName -TaskPath '\Steward\' -ErrorAction SilentlyContinue
             $trigger=New-ScheduledTaskTrigger -AtLogOn -User '{{Escape(userAccount)}}'
-            $reconnect=New-CimInstance -Namespace 'Root/Microsoft/Windows/TaskScheduler' -ClassName 'MSFT_TaskSessionStateChangeTrigger' -ClientOnly -Property @{
-              Enabled=$true
-              StateChange=3
-              UserId='{{Escape(userAccount)}}'
-            }
-            $triggers=@($trigger,$reconnect)
             $principal=New-ScheduledTaskPrincipal -UserId '{{Escape(userAccount)}}' -LogonType Interactive -RunLevel Limited
             $settings=New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -Hidden -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
             $keeper=New-ScheduledTaskAction -Execute '{{Escape(actions.KeeperExecutable)}}' -Argument '{{Escape(actions.KeeperArguments)}}' -WorkingDirectory '{{Escape(installRoot)}}'
             $server=New-ScheduledTaskAction -Execute '{{Escape(actions.ServerExecutable)}}' -Argument '{{Escape(actions.ServerArguments)}}' -WorkingDirectory '{{Escape(installRoot)}}'
+            function Add-RemoteConnectTrigger([string]$taskName) {
+              [xml]$xml=Export-ScheduledTask -TaskName $taskName -TaskPath '\Steward\'
+              $namespace=$xml.Task.NamespaceURI
+              $reconnect=$xml.CreateElement('SessionStateChangeTrigger',$namespace)
+              foreach($entry in @(
+                @('Enabled','true'),
+                @('StateChange','RemoteConnect'),
+                @('UserId','{{Escape(userAccount)}}'))) {
+                $element=$xml.CreateElement($entry[0],$namespace)
+                $element.InnerText=$entry[1]
+                [void]$reconnect.AppendChild($element)
+              }
+              [void]$xml.Task.Triggers.AppendChild($reconnect)
+              Register-ScheduledTask -TaskName $taskName -TaskPath '\Steward\' -Xml $xml.OuterXml -Force|Out-Null
+            }
             try {
-              Register-ScheduledTask -TaskName $keeperName -TaskPath '\Steward\' -Action $keeper -Trigger $triggers -Principal $principal -Settings $settings -Force|Out-Null
-              Register-ScheduledTask -TaskName $serverName -TaskPath '\Steward\' -Action $server -Trigger $triggers -Principal $principal -Settings $settings -Force|Out-Null
+              Register-ScheduledTask -TaskName $keeperName -TaskPath '\Steward\' -Action $keeper -Trigger $trigger -Principal $principal -Settings $settings -Force|Out-Null
+              Add-RemoteConnectTrigger $keeperName
+              Register-ScheduledTask -TaskName $serverName -TaskPath '\Steward\' -Action $server -Trigger $trigger -Principal $principal -Settings $settings -Force|Out-Null
+              Add-RemoteConnectTrigger $serverName
             } catch {
               Unregister-ScheduledTask -TaskName $keeperName -TaskPath '\Steward\' -Confirm:$false -ErrorAction SilentlyContinue
               Unregister-ScheduledTask -TaskName $serverName -TaskPath '\Steward\' -Confirm:$false -ErrorAction SilentlyContinue
