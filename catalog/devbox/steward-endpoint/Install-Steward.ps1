@@ -398,12 +398,13 @@ if (-not [string]::IsNullOrWhiteSpace($AdministrativeRoot) -and
         'Legacy Steward endpoint state exists outside the durable root; ' +
         'automatic secret-bearing state migration is not permitted.')
 }
-$identityPath = Join-Path $(if (
+$selectedStateRoot = if (
     [string]::IsNullOrWhiteSpace($AdministrativeRoot)) {
-        Join-Path $env:ProgramData 'Steward\Endpoint'
-    } else {
-        $administrativeStateRoot
-    }) 'identity.json'
+    Join-Path $env:ProgramData 'Steward\Endpoint'
+} else {
+    $administrativeStateRoot
+}
+$identityPath = Join-Path $selectedStateRoot 'identity.json'
 if (Test-Path -LiteralPath $identityPath -PathType Leaf) {
     $identity = Get-Content -LiteralPath $identityPath -Raw | ConvertFrom-Json
     if ($identity.hostId -notmatch '^[0-9A-Fa-f-]{36}$') {
