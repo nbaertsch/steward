@@ -440,11 +440,6 @@ if (-not [string]::IsNullOrWhiteSpace($AdministrativeRoot)) {
 }
 if (-not [string]::IsNullOrWhiteSpace($AdministrativeRoot) -and
     (Test-Path -LiteralPath $administrativeStateRoot -PathType Container)) {
-    & (Join-Path $env:SystemRoot 'System32\takeown.exe') `
-        /F $administrativeStateRoot /A | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        throw 'Steward administrative state ownership recovery failed.'
-    }
     & (Join-Path $env:SystemRoot 'System32\icacls.exe') `
         $administrativeStateRoot /inheritance:r /grant:r `
         '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' `
@@ -455,11 +450,6 @@ if (-not [string]::IsNullOrWhiteSpace($AdministrativeRoot) -and
     $hasStateItems = @(
         Get-ChildItem -LiteralPath $administrativeStateRoot `
             -Force -ErrorAction Stop).Count -gt 0
-    & (Join-Path $env:SystemRoot 'System32\takeown.exe') `
-        /F $administrativeStateRoot /A /R /D Y /SKIPSL | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        throw 'Steward administrative state descendant ownership recovery failed.'
-    }
     if ($hasStateItems) {
         & (Join-Path $env:SystemRoot 'System32\icacls.exe') `
             (Join-Path $administrativeStateRoot '*') `

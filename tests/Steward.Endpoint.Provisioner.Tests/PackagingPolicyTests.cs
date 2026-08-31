@@ -70,7 +70,7 @@ public sealed class PackagingPolicyTests
             "/reset /T /C /L",
             script,
             StringComparison.Ordinal);
-        Assert.Contains("/SKIPSL", script, StringComparison.Ordinal);
+        Assert.DoesNotContain("takeown.exe", script, StringComparison.Ordinal);
         Assert.Contains(
             "$administrativeStateRoot /inheritance:r /grant:r",
             script,
@@ -86,11 +86,6 @@ public sealed class PackagingPolicyTests
         Assert.True(
             script.IndexOf(
                 "$administrativeStateRoot /inheritance:r /grant:r",
-                StringComparison.Ordinal) <
-            script.IndexOf("/reset /T /C", StringComparison.Ordinal));
-        Assert.True(
-            script.IndexOf(
-                "/SKIPSL",
                 StringComparison.Ordinal) <
             script.IndexOf("/reset /T /C", StringComparison.Ordinal));
         Assert.True(
