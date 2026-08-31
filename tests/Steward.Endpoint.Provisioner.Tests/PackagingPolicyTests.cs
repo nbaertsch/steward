@@ -62,12 +62,17 @@ public sealed class PackagingPolicyTests
             "Steward\\install\\Endpoint",
             script,
             StringComparison.Ordinal);
-        Assert.DoesNotContain(
+        Assert.Contains(
             "/reset /T /C",
             script,
             StringComparison.Ordinal);
         Assert.Contains(
-            "SetAccessRuleProtection",
+            "/reset /T /C /L",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains("/SKIPSL", script, StringComparison.Ordinal);
+        Assert.Contains(
+            "$administrativeStateRoot /inheritance:r /grant:r",
             script,
             StringComparison.Ordinal);
         Assert.Contains(
@@ -75,9 +80,19 @@ public sealed class PackagingPolicyTests
             script,
             StringComparison.Ordinal);
         Assert.Contains(
-            "administrative state ACL verification failed",
+            "administrative state inheritance repair failed",
             script,
             StringComparison.Ordinal);
+        Assert.True(
+            script.IndexOf(
+                "$administrativeStateRoot /inheritance:r /grant:r",
+                StringComparison.Ordinal) <
+            script.IndexOf("/reset /T /C", StringComparison.Ordinal));
+        Assert.True(
+            script.IndexOf(
+                "administrative state contains a reparse point",
+                StringComparison.Ordinal) <
+            script.IndexOf("/reset /T /C", StringComparison.Ordinal));
         Assert.Contains(
             "STEWARD_ENDPOINT_ADMINISTRATIVE_IMAGE_PROVISIONED",
             script,

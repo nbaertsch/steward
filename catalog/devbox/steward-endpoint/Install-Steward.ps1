@@ -440,50 +440,19 @@ if (-not [string]::IsNullOrWhiteSpace($AdministrativeRoot)) {
 }
 if (-not [string]::IsNullOrWhiteSpace($AdministrativeRoot) -and
     (Test-Path -LiteralPath $administrativeStateRoot -PathType Container)) {
-    $systemSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-18')
-    $administratorsSid =
-        [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
-    $nodeSid = [Security.Principal.SecurityIdentifier]::new($NodeUserSid)
-    function New-StewardAcl(
-        [bool]$Directory,
-        [bool]$IncludeNodeUser) {
-        $security = if ($Directory) {
-            [Security.AccessControl.DirectorySecurity]::new()
-        } else {
-            [Security.AccessControl.FileSecurity]::new()
-        }
-        $inheritance = if ($Directory) {
-            [Security.AccessControl.InheritanceFlags]::ContainerInherit `
-                -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit
-        } else {
-            [Security.AccessControl.InheritanceFlags]::None
-        }
-        $security.SetAccessRuleProtection($true, $false)
-        $security.SetOwner($systemSid)
-        $principals = @($systemSid, $administratorsSid)
-        if ($IncludeNodeUser) {
-            $principals += $nodeSid
-        }
-        foreach ($principal in $principals) {
-            $security.AddAccessRule(
-                [Security.AccessControl.FileSystemAccessRule]::new(
-                    $principal,
-                    [Security.AccessControl.FileSystemRights]::FullControl,
-                    $inheritance,
-                    [Security.AccessControl.PropagationFlags]::None,
-                    [Security.AccessControl.AccessControlType]::Allow))
-        }
-        return $security
-    }
     & (Join-Path $env:SystemRoot 'System32\takeown.exe') `
         /F $administrativeStateRoot /A | Out-Null
     if ($LASTEXITCODE -ne 0) {
         throw 'Steward administrative state ownership recovery failed.'
     }
-    Set-Acl -LiteralPath $administrativeStateRoot `
-        -AclObject (New-StewardAcl $true $false)
+    & (Join-Path $env:SystemRoot 'System32\icacls.exe') `
+        $administrativeStateRoot /inheritance:r /grant:r `
+        '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' `
+        "*$NodeUserSid`:(OI)(CI)F" | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Steward administrative state ACL recovery failed.'
+    }
     $stateItems = @(
-        Get-Item -LiteralPath $administrativeStateRoot -Force
         Get-ChildItem -LiteralPath $administrativeStateRoot `
             -Force -Recurse -ErrorAction Stop)
     if ($stateItems.Where({
@@ -493,48 +462,16 @@ if (-not [string]::IsNullOrWhiteSpace($AdministrativeRoot) -and
         throw 'Steward administrative state contains a reparse point.'
     }
     & (Join-Path $env:SystemRoot 'System32\takeown.exe') `
-        /F $administrativeStateRoot /A /R /D Y | Out-Null
+        /F $administrativeStateRoot /A /R /D Y /SKIPSL | Out-Null
     if ($LASTEXITCODE -ne 0) {
         throw 'Steward administrative state descendant ownership recovery failed.'
     }
-    foreach ($item in $stateItems) {
-        Set-Acl -LiteralPath $item.FullName `
-            -AclObject (New-StewardAcl $item.PSIsContainer $true)
-    }
-    foreach ($item in $stateItems) {
-        $acl = Get-Acl -LiteralPath $item.FullName
-        $ownerSid = ([Security.Principal.NTAccount]$acl.Owner).
-            Translate([Security.Principal.SecurityIdentifier])
-        $rules = @($acl.GetAccessRules(
-            $true,
-            $false,
-            [Security.Principal.SecurityIdentifier]))
-        $expectedInheritance = if ($item.PSIsContainer) {
-            [Security.AccessControl.InheritanceFlags]::ContainerInherit `
-                -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit
-        } else {
-            [Security.AccessControl.InheritanceFlags]::None
-        }
-        $exactRules = @($systemSid, $administratorsSid, $nodeSid).Where({
-            $principal = $_
-            $matches = @($rules.Where({
-                $_.IdentityReference.Value -eq $principal.Value
-            }))
-            $matches.Count -eq 1 -and
-            $matches[0].AccessControlType -eq
-                [Security.AccessControl.AccessControlType]::Allow -and
-            $matches[0].FileSystemRights -eq
-                [Security.AccessControl.FileSystemRights]::FullControl -and
-            $matches[0].InheritanceFlags -eq $expectedInheritance -and
-            $matches[0].PropagationFlags -eq
-                [Security.AccessControl.PropagationFlags]::None -and
-            -not $matches[0].IsInherited
-        })
-        if (-not $acl.AreAccessRulesProtected -or
-            $ownerSid.Value -ne $systemSid.Value -or
-            $rules.Count -ne 3 -or
-            $exactRules.Count -ne 3) {
-            throw 'Steward administrative state ACL verification failed.'
+    if ($stateItems.Count -gt 0) {
+        & (Join-Path $env:SystemRoot 'System32\icacls.exe') `
+            (Join-Path $administrativeStateRoot '*') `
+            /reset /T /C /L | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Steward administrative state inheritance repair failed.'
         }
     }
 }

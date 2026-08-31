@@ -211,26 +211,37 @@ internal sealed class PhysicalProvisionerFileSystem : IProvisionerFileSystem
     public void CopyDirectory(string source, string destination)
     {
         Directory.CreateDirectory(destination);
-        foreach (var directory in Directory.GetDirectories(
-                     source,
-                     "*",
-                     SearchOption.AllDirectories))
-            Directory.CreateDirectory(
-                Path.Combine(
-                    destination,
-                    Path.GetRelativePath(source, directory)));
-        foreach (var file in Directory.GetFiles(
-                     source,
-                     "*",
-                     SearchOption.AllDirectories))
+        var start = new ProcessStartInfo
         {
-            var target = Path.Combine(
-                destination,
-                Path.GetRelativePath(source, file));
-            Directory.CreateDirectory(
-                Path.GetDirectoryName(target)!);
-            File.Copy(file, target, overwrite: false);
-        }
+            FileName = "robocopy.exe",
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+        foreach (var argument in new[]
+                 {
+                     source,
+                     destination,
+                     "/E",
+                     "/COPY:DAT",
+                     "/DCOPY:DAT",
+                     "/R:0",
+                     "/W:0",
+                     "/XJ",
+                     "/SL",
+                     "/NFL",
+                     "/NDL",
+                     "/NJH",
+                     "/NJS",
+                     "/NP"
+                 })
+            start.ArgumentList.Add(argument);
+        using var process = Process.Start(start) ??
+            throw new InvalidOperationException(
+                "Could not start the endpoint state copy.");
+        process.WaitForExit();
+        if (process.ExitCode >= 8)
+            throw new IOException(
+                $"Endpoint state copy failed with exit code {process.ExitCode}.");
     }
     public void MoveDirectory(string source, string destination) =>
         Directory.Move(source, destination);
@@ -287,32 +298,72 @@ internal interface IEndpointTaskRegistrar
 
 internal interface IEndpointSecurity
 {
-    void Harden(string stateRoot);
-    void GrantUser(string stateRoot, string sid);
+    void PrepareStateRoot(
+        string stateRoot,
+        string? sid,
+        bool repairExistingChildren);
     void GrantUserReadExecute(string installRoot, string sid);
 }
 
 internal sealed class IcaclsEndpointSecurity : IEndpointSecurity
 {
-    public void Harden(string stateRoot) =>
-        EndpointProvisioner.Run(
+    public void PrepareStateRoot(
+        string stateRoot,
+        string? sid,
+        bool repairExistingChildren)
+    {
+        var root = Path.GetFullPath(stateRoot);
+        var rootAttributes = File.GetAttributes(root);
+        if (!rootAttributes.HasFlag(FileAttributes.Directory) ||
+            rootAttributes.HasFlag(FileAttributes.ReparsePoint))
+            throw new InvalidDataException(
+                "Endpoint state root must be a plain directory.");
+
+        var grants = new List<string>
+        {
             "icacls.exe",
-            stateRoot,
+            root,
             "/inheritance:r",
             "/grant:r",
             "*S-1-5-18:(OI)(CI)F",
-            "*S-1-5-32-544:(OI)(CI)F",
-            "/T",
-            "/C");
-
-    public void GrantUser(string stateRoot, string sid) =>
+            "*S-1-5-32-544:(OI)(CI)F"
+        };
+        if (sid is not null)
+            grants.Add($"*{sid}:(OI)(CI)F");
         EndpointProvisioner.Run(
-            "icacls.exe",
-            stateRoot,
-            "/grant",
-            $"*{sid}:(OI)(CI)F",
-            "/T",
-            "/C");
+            grants[0],
+            grants.Skip(1).ToArray());
+
+        if (!repairExistingChildren)
+            return;
+
+        var hasChildren = false;
+        foreach (var path in Directory.EnumerateFileSystemEntries(
+                     root,
+                     "*",
+                     SearchOption.AllDirectories))
+        {
+            hasChildren = true;
+            if (File.GetAttributes(path).HasFlag(FileAttributes.ReparsePoint))
+                throw new InvalidDataException(
+                    "Endpoint state cannot contain reparse points.");
+        }
+        if (hasChildren)
+            EndpointProvisioner.Run(
+                "icacls.exe",
+                Path.Combine(root, "*"),
+                "/reset",
+                "/T",
+                "/C",
+                "/L");
+        foreach (var path in Directory.EnumerateFileSystemEntries(
+                     root,
+                     "*",
+                     SearchOption.AllDirectories))
+            if (File.GetAttributes(path).HasFlag(FileAttributes.ReparsePoint))
+                throw new InvalidDataException(
+                    "Endpoint state cannot contain reparse points.");
+    }
 
     public void GrantUserReadExecute(string installRoot, string sid) =>
         EndpointProvisioner.Run(
@@ -357,12 +408,18 @@ internal sealed class EndpointProvisioner(
         ValidateArtifact(artifact);
         ValidateConfig(config, artifact, options);
         ValidatePayload(options.InstallRoot, artifact.ProductVersion);
+        var user = ResolveUser(config);
         var backupRoot = options.StateRoot + ".previous";
         if (!files.DirectoryExists(options.StateRoot) &&
             files.DirectoryExists(backupRoot))
             files.MoveDirectory(backupRoot, options.StateRoot);
-        else if (files.DirectoryExists(options.StateRoot) &&
-                 files.DirectoryExists(backupRoot))
+        if (files.DirectoryExists(options.StateRoot))
+            security.PrepareStateRoot(
+                options.StateRoot,
+                user.Sid,
+                repairExistingChildren: true);
+        if (files.DirectoryExists(options.StateRoot) &&
+            files.DirectoryExists(backupRoot))
         {
             var currentIsCommitted = false;
             try
@@ -403,6 +460,10 @@ internal sealed class EndpointProvisioner(
             {
                 files.DeleteDirectory(options.StateRoot);
                 files.MoveDirectory(backupRoot, options.StateRoot);
+                security.PrepareStateRoot(
+                    options.StateRoot,
+                    user.Sid,
+                    repairExistingChildren: true);
             }
         }
         var existing = files.DirectoryExists(options.StateRoot);
@@ -431,10 +492,21 @@ internal sealed class EndpointProvisioner(
                 taskSnapshotIdentity = previousIdentity;
                 restoreTasks = true;
                 tasks.Quiesce(previousIdentity!);
+                files.CreateDirectory(workingRoot);
+                security.PrepareStateRoot(
+                    workingRoot,
+                    null,
+                    repairExistingChildren: false);
                 files.CopyDirectory(options.StateRoot, workingRoot);
             }
             else
+            {
                 files.CreateDirectory(workingRoot);
+                security.PrepareStateRoot(
+                    workingRoot,
+                    null,
+                    repairExistingChildren: false);
+            }
             var identityPath = Path.Combine(workingRoot, "identity.json");
             var identity = LoadOrCreateIdentity(
                 identityPath,
@@ -465,9 +537,22 @@ internal sealed class EndpointProvisioner(
                     Path.Combine(workingRoot, "node-host.json"),
                     options.StateRoot,
                     identity);
-                security.Harden(workingRoot);
-                var user = ResolveUser(config);
-                security.GrantUser(workingRoot, user.Sid);
+                WriteReceipt(
+                    Path.Combine(
+                        workingRoot,
+                        "bootstrap-receipt.json"),
+                    options,
+                    config,
+                    artifact,
+                    identity,
+                    authentication,
+                    node,
+                    nodePublic,
+                    nonceState.Nonces);
+                security.PrepareStateRoot(
+                    workingRoot,
+                    user.Sid,
+                    repairExistingChildren: true);
                 security.GrantUserReadExecute(options.InstallRoot, user.Sid);
                 taskSnapshot ??= tasks.Capture(identity);
                 taskSnapshotIdentity ??= identity;
@@ -481,18 +566,6 @@ internal sealed class EndpointProvisioner(
                 try
                 {
                     restoreTasks = true;
-                    WriteReceipt(
-                        Path.Combine(
-                            options.StateRoot,
-                            "bootstrap-receipt.json"),
-                        options,
-                        config,
-                        artifact,
-                        identity,
-                        authentication,
-                        node,
-                        nodePublic,
-                        nonceState.Nonces);
                     tasks.Register(
                         options.InstallRoot,
                         options.StateRoot,
@@ -1361,7 +1434,9 @@ internal sealed class PowerShellTaskRegistrar : IEndpointTaskRegistrar
         if (!File.Exists(keeper) || !File.Exists(server))
             throw new FileNotFoundException(
                 "Self-contained endpoint executables are unavailable.");
-        var scriptPath = Path.Combine(stateRoot, "register-endpoint.ps1");
+        var scriptPath = Path.Combine(
+            installRoot,
+            $".register-endpoint-{Guid.NewGuid():N}.ps1");
         var script = $$"""
             $ErrorActionPreference='Stop'
             $keeperName='HandleKeeper-{{identity.HostId:N}}'

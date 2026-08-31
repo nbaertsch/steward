@@ -1,4 +1,6 @@
 using System.Security.Cryptography;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
 using Steward.Endpoint.Provisioner;
@@ -9,6 +11,58 @@ public sealed class ProvisionerTests : IDisposable
 {
     private readonly string root =
         Path.Combine(Path.GetTempPath(), "steward-provisioner-tests", Guid.NewGuid().ToString("N"));
+
+    [Fact]
+    public void EndpointSecurityUsesParentInheritanceAndRepairsLegacyFiles()
+    {
+        var state = Path.Combine(root, "state");
+        Directory.CreateDirectory(state);
+        var currentSid = WindowsIdentity.GetCurrent().User ??
+            throw new InvalidOperationException();
+        var security = new IcaclsEndpointSecurity();
+
+        security.PrepareStateRoot(
+            state,
+            currentSid.Value,
+            repairExistingChildren: false);
+        Directory.CreateDirectory(Path.Combine(state, "keys"));
+        var file = Path.Combine(state, "keys", "secret.bin");
+        File.WriteAllBytes(file, [1, 2, 3]);
+
+        var broken = new FileSecurity();
+        broken.SetAccessRuleProtection(true, false);
+        new FileInfo(file).SetAccessControl(broken);
+        security.PrepareStateRoot(
+            state,
+            currentSid.Value,
+            repairExistingChildren: true);
+
+        foreach (var path in new[] { state, Path.Combine(state, "keys"), file })
+        {
+            var acl = Directory.Exists(path)
+                ? (FileSystemSecurity)new DirectoryInfo(path).GetAccessControl()
+                : new FileInfo(path).GetAccessControl();
+            var rules = acl.GetAccessRules(
+                    true,
+                    true,
+                    typeof(SecurityIdentifier))
+                .Cast<FileSystemAccessRule>()
+                .ToArray();
+            Assert.Equal(path == state, acl.AreAccessRulesProtected);
+            Assert.Equal(3, rules.Length);
+            Assert.Equal(
+                new[] { "S-1-5-18", "S-1-5-32-544", currentSid.Value }
+                    .Order(StringComparer.Ordinal),
+                rules.Select(rule => rule.IdentityReference.Value)
+                    .Order(StringComparer.Ordinal));
+            Assert.All(rules, rule =>
+                Assert.Equal(FileSystemRights.FullControl, rule.FileSystemRights));
+            Assert.All(
+                rules,
+                rule => Assert.Equal(path != state, rule.IsInherited));
+        }
+        Assert.Equal(new byte[] { 1, 2, 3 }, File.ReadAllBytes(file));
+    }
 
     [Fact]
     public void RepairPreservesMachineIdentityAndSecrets()
@@ -169,7 +223,7 @@ public sealed class ProvisionerTests : IDisposable
     }
 
     [Fact]
-    public void ReceiptFailureRemovesTasksAndRollsBackFirstInstall()
+    public void ReceiptFailureDoesNotTouchTasksAndRollsBackFirstInstall()
     {
         Directory.CreateDirectory(root);
         var install = CreateInstall();
@@ -186,29 +240,7 @@ public sealed class ProvisionerTests : IDisposable
                 Options(install, config, state, "1.0.0")));
 
         Assert.Equal(0, registrar.Registrations);
-        Assert.Equal(1, registrar.Restores);
-        Assert.False(Directory.Exists(state));
-    }
-
-    [Fact]
-    public void FirstInstallRetriesTaskRestoreWithRetainedIdentity()
-    {
-        Directory.CreateDirectory(root);
-        var install = CreateInstall();
-        var config = CreateConfig();
-        var state = Path.Combine(root, "state");
-        var registrar = new ThrowFirstRestoreRegistrar();
-        var provisioner = new EndpointProvisioner(
-            new ThrowReceiptFileSystem(),
-            registrar,
-            new NoOpSecurity());
-
-        Assert.Throws<InvalidOperationException>(
-            () => provisioner.Provision(
-                Options(install, config, state, "1.0.0")));
-
-        Assert.Equal(2, registrar.Restores);
-        Assert.NotEqual(Guid.Empty, registrar.RestoredHostId);
+        Assert.Equal(0, registrar.Restores);
         Assert.False(Directory.Exists(state));
     }
 
@@ -390,6 +422,39 @@ public sealed class ProvisionerTests : IDisposable
         Assert.Equal(
             identity,
             File.ReadAllText(Path.Combine(state, "identity.json")));
+        Assert.False(Directory.Exists(state + ".previous"));
+    }
+
+    [Fact]
+    public void StartupRepairsStateRestoredFromPreviousBackup()
+    {
+        Directory.CreateDirectory(root);
+        var install = CreateInstall();
+        var config = CreateConfig();
+        var state = Path.Combine(root, "state");
+        var options = Options(install, config, state, "1.0.0");
+        var initial = new EndpointProvisioner(
+            new PhysicalProvisionerFileSystem(),
+            new RecordingRegistrar(),
+            new NoOpSecurity());
+        _ = initial.Provision(options);
+        new PhysicalProvisionerFileSystem().CopyDirectory(
+            state,
+            state + ".previous");
+        File.WriteAllText(
+            Path.Combine(state, "bootstrap-receipt.json"),
+            "{}");
+        var security = new RecordingSecurity();
+        var provisioner = new EndpointProvisioner(
+            new PhysicalProvisionerFileSystem(),
+            new RecordingRegistrar(),
+            security);
+
+        _ = provisioner.Provision(options);
+
+        Assert.True(security.PreparedRoots.Count >= 2);
+        Assert.Equal(state, security.PreparedRoots[0]);
+        Assert.Equal(state, security.PreparedRoots[1]);
         Assert.False(Directory.Exists(state + ".previous"));
     }
 
@@ -661,11 +726,10 @@ public sealed class ProvisionerTests : IDisposable
 
     private sealed class NoOpSecurity : IEndpointSecurity
     {
-        public void Harden(string stateRoot)
-        {
-        }
-
-        public void GrantUser(string stateRoot, string sid)
+        public void PrepareStateRoot(
+            string stateRoot,
+            string? sid,
+            bool repairExistingChildren)
         {
         }
 
@@ -674,44 +738,19 @@ public sealed class ProvisionerTests : IDisposable
         }
     }
 
-    private sealed class ThrowFirstRestoreRegistrar : IEndpointTaskRegistrar
+    private sealed class RecordingSecurity : IEndpointSecurity
     {
-        public int Restores { get; private set; }
-        public Guid RestoredHostId { get; private set; }
+        public List<string> PreparedRoots { get; } = [];
 
-        public ProvisionedUser ResolveUser() =>
-            new("TEST\\user", "S-1-5-21-1-2-3-1001");
-        public EndpointTaskSnapshot Capture(EndpointMachineIdentity identity) =>
-            new(null, false, null, false);
-        public void Quiesce(EndpointMachineIdentity identity)
-        {
-        }
-        public void Restore(
-            EndpointTaskSnapshot snapshot,
-            EndpointMachineIdentity identity)
-        {
-            Restores++;
-            RestoredHostId = identity.HostId;
-            if (Restores == 1)
-                throw new InvalidOperationException("first restore failed");
-        }
-        public void Register(
-            string installRoot,
+        public void PrepareStateRoot(
             string stateRoot,
-            EndpointMachineIdentity identity,
-            string userAccount,
-            string userSid,
-            string controlIdentity)
+            string? sid,
+            bool repairExistingChildren) =>
+            PreparedRoots.Add(stateRoot);
+
+        public void GrantUserReadExecute(string installRoot, string sid)
         {
         }
-        public bool IsHealthy(
-            string installRoot,
-            string stateRoot,
-            EndpointMachineIdentity identity,
-            string controlIdentity,
-            string userAccount,
-            string userSid) =>
-            true;
     }
 
     private sealed class ThrowingRegistrar : IEndpointTaskRegistrar
