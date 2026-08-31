@@ -62,6 +62,22 @@ public sealed class PackagingPolicyTests
             "Steward\\install\\Endpoint",
             script,
             StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "/reset /T /C",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "SetAccessRuleProtection",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "administrative state contains a reparse point",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "administrative state ACL verification failed",
+            script,
+            StringComparison.Ordinal);
         Assert.Contains(
             "STEWARD_ENDPOINT_ADMINISTRATIVE_IMAGE_PROVISIONED",
             script,

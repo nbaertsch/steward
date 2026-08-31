@@ -35,8 +35,25 @@ if ($BootstrapEncryptionPublicKeyBase64 -notmatch
     $NodeUserSid -notmatch '^S-1-12-1-(\d+-){2}\d+-\d+$') {
     throw 'Steward endpoint runtime trust arguments are invalid.'
 }
-$downloadRoot = Join-Path $env:ProgramData (
-    'Steward\install\download-' + [guid]::NewGuid().ToString('N'))
+function Assert-StewardDirectory([string]$Path) {
+    $item = Get-Item -LiteralPath $Path -Force
+    if (-not $item.PSIsContainer -or
+        ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'Steward endpoint directory containment is invalid.'
+    }
+}
+Assert-StewardDirectory $env:ProgramData
+$stewardInstallRoot = Join-Path $env:ProgramData 'Steward\install'
+$current = $env:ProgramData
+foreach ($segment in 'Steward', 'install') {
+    $current = Join-Path $current $segment
+    if (-not (Test-Path -LiteralPath $current)) {
+        New-Item -ItemType Directory -Path $current | Out-Null
+    }
+    Assert-StewardDirectory $current
+}
+$downloadRoot = Join-Path $stewardInstallRoot (
+    'download-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $downloadRoot -Force | Out-Null
 try {
 if ($ValidateOnly) {
@@ -399,6 +416,128 @@ if (-not [string]::IsNullOrWhiteSpace($AdministrativeRoot) -and
         'Legacy Steward endpoint state exists outside the durable root; ' +
         'automatic secret-bearing state migration is not permitted.')
 }
+if (-not [string]::IsNullOrWhiteSpace($AdministrativeRoot)) {
+    $administrativeInstallRoot = Split-Path -Parent $administrativeStateRoot
+    foreach ($path in @(
+        $env:ProgramData,
+        (Join-Path $env:ProgramData 'Steward'),
+        $administrativeInstallRoot)) {
+        $item = Get-Item -LiteralPath $path -Force
+        if (-not $item.PSIsContainer -or
+            ($item.Attributes -band
+                [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'Steward administrative state containment is invalid.'
+        }
+    }
+    if (Test-Path -LiteralPath $administrativeStateRoot) {
+        $stateRootItem = Get-Item -LiteralPath $administrativeStateRoot -Force
+        if (-not $stateRootItem.PSIsContainer -or
+            ($stateRootItem.Attributes -band
+                [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'Steward administrative state containment is invalid.'
+        }
+    }
+}
+if (-not [string]::IsNullOrWhiteSpace($AdministrativeRoot) -and
+    (Test-Path -LiteralPath $administrativeStateRoot -PathType Container)) {
+    $systemSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+    $administratorsSid =
+        [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+    $nodeSid = [Security.Principal.SecurityIdentifier]::new($NodeUserSid)
+    function New-StewardAcl(
+        [bool]$Directory,
+        [bool]$IncludeNodeUser) {
+        $security = if ($Directory) {
+            [Security.AccessControl.DirectorySecurity]::new()
+        } else {
+            [Security.AccessControl.FileSecurity]::new()
+        }
+        $inheritance = if ($Directory) {
+            [Security.AccessControl.InheritanceFlags]::ContainerInherit `
+                -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit
+        } else {
+            [Security.AccessControl.InheritanceFlags]::None
+        }
+        $security.SetAccessRuleProtection($true, $false)
+        $security.SetOwner($systemSid)
+        $principals = @($systemSid, $administratorsSid)
+        if ($IncludeNodeUser) {
+            $principals += $nodeSid
+        }
+        foreach ($principal in $principals) {
+            $security.AddAccessRule(
+                [Security.AccessControl.FileSystemAccessRule]::new(
+                    $principal,
+                    [Security.AccessControl.FileSystemRights]::FullControl,
+                    $inheritance,
+                    [Security.AccessControl.PropagationFlags]::None,
+                    [Security.AccessControl.AccessControlType]::Allow))
+        }
+        return $security
+    }
+    & (Join-Path $env:SystemRoot 'System32\takeown.exe') `
+        /F $administrativeStateRoot /A | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Steward administrative state ownership recovery failed.'
+    }
+    Set-Acl -LiteralPath $administrativeStateRoot `
+        -AclObject (New-StewardAcl $true $false)
+    $stateItems = @(
+        Get-Item -LiteralPath $administrativeStateRoot -Force
+        Get-ChildItem -LiteralPath $administrativeStateRoot `
+            -Force -Recurse -ErrorAction Stop)
+    if ($stateItems.Where({
+            ($_.Attributes -band
+                [IO.FileAttributes]::ReparsePoint) -ne 0
+        }).Count -ne 0) {
+        throw 'Steward administrative state contains a reparse point.'
+    }
+    & (Join-Path $env:SystemRoot 'System32\takeown.exe') `
+        /F $administrativeStateRoot /A /R /D Y | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Steward administrative state descendant ownership recovery failed.'
+    }
+    foreach ($item in $stateItems) {
+        Set-Acl -LiteralPath $item.FullName `
+            -AclObject (New-StewardAcl $item.PSIsContainer $true)
+    }
+    foreach ($item in $stateItems) {
+        $acl = Get-Acl -LiteralPath $item.FullName
+        $ownerSid = ([Security.Principal.NTAccount]$acl.Owner).
+            Translate([Security.Principal.SecurityIdentifier])
+        $rules = @($acl.GetAccessRules(
+            $true,
+            $false,
+            [Security.Principal.SecurityIdentifier]))
+        $expectedInheritance = if ($item.PSIsContainer) {
+            [Security.AccessControl.InheritanceFlags]::ContainerInherit `
+                -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit
+        } else {
+            [Security.AccessControl.InheritanceFlags]::None
+        }
+        $exactRules = @($systemSid, $administratorsSid, $nodeSid).Where({
+            $principal = $_
+            $matches = @($rules.Where({
+                $_.IdentityReference.Value -eq $principal.Value
+            }))
+            $matches.Count -eq 1 -and
+            $matches[0].AccessControlType -eq
+                [Security.AccessControl.AccessControlType]::Allow -and
+            $matches[0].FileSystemRights -eq
+                [Security.AccessControl.FileSystemRights]::FullControl -and
+            $matches[0].InheritanceFlags -eq $expectedInheritance -and
+            $matches[0].PropagationFlags -eq
+                [Security.AccessControl.PropagationFlags]::None -and
+            -not $matches[0].IsInherited
+        })
+        if (-not $acl.AreAccessRulesProtected -or
+            $ownerSid.Value -ne $systemSid.Value -or
+            $rules.Count -ne 3 -or
+            $exactRules.Count -ne 3) {
+            throw 'Steward administrative state ACL verification failed.'
+        }
+    }
+}
 $selectedStateRoot = if (
     [string]::IsNullOrWhiteSpace($AdministrativeRoot)) {
     Join-Path $env:ProgramData 'Steward\Endpoint'
@@ -406,6 +545,14 @@ $selectedStateRoot = if (
     $administrativeStateRoot
 }
 $identityPath = Join-Path $selectedStateRoot 'identity.json'
+if (Test-Path -LiteralPath $identityPath -PathType Leaf) {
+    $identityProbe = [IO.File]::Open(
+        $identityPath,
+        [IO.FileMode]::Open,
+        [IO.FileAccess]::Read,
+        [IO.FileShare]::Read)
+    $identityProbe.Dispose()
+}
 if (Test-Path -LiteralPath $identityPath -PathType Leaf) {
     $identity = Get-Content -LiteralPath $identityPath -Raw | ConvertFrom-Json
     if ($identity.hostId -notmatch '^[0-9A-Fa-f-]{36}$') {
