@@ -170,7 +170,7 @@ resources:
               $client = [Net.Http.HttpClient]::new($handler)
               $client.Timeout = [TimeSpan]::FromMinutes(2)
               try {
-                $uri = [uri]'https://raw.githubusercontent.com/nbaertsch/steward/2c6c25cda0463fbe4967947cc0ac046864924717/catalog/devbox/steward-endpoint/Install-Steward.ps1'
+                $uri = [uri]'https://raw.githubusercontent.com/nbaertsch/steward/a09a2ad2694fd053d64fb04131a8d7d1efc64840/catalog/devbox/steward-endpoint/Install-Steward.ps1'
                 $response = $client.GetAsync(
                   $uri,
                   [Net.Http.HttpCompletionOption]::ResponseHeadersRead
@@ -227,7 +227,7 @@ resources:
                 -NodeUserAccount $arguments.nodeUserAccount `
                 -NodeUserSid $arguments.nodeUserSid `
                 -AdministrativeRoot (
-                  Join-Path $env:ProgramData 'Steward\install\Runtime\1.0.10')
+                  Join-Path $env:ProgramData 'Steward\install\Runtime\1.0.11')
             } finally {
               Remove-Item -LiteralPath $bootstrapPath -Force `
                 -ErrorAction SilentlyContinue
