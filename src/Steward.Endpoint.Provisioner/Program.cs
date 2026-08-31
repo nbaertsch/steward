@@ -500,15 +500,6 @@ internal sealed class EndpointProvisioner(
                         user.Account,
                         user.Sid,
                         config.ControlIdentity);
-                    if (!tasks.IsHealthy(
-                            options.InstallRoot,
-                            options.StateRoot,
-                            identity,
-                            config.ControlIdentity,
-                            user.Account,
-                            user.Sid))
-                        throw new InvalidOperationException(
-                            "Endpoint scheduled tasks failed exact health validation.");
                     restoreTasks = false;
                 }
                 catch
