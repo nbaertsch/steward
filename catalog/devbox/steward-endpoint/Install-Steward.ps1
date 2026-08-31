@@ -447,10 +447,19 @@ function Restore-PreMsiTasks {
         }
     }
 }
+$provisionAttestation = Join-Path $rollbackDirectory `
+    'steward-endpoint.attestation.json'
+Write-ArtifactAttestation $provisionAttestation
 $replacementCommitted = $false
 try {
 try {
-    & $msiexec @('/i', $msi, '/qn', '/norestart', '/L*v', $log)
+    & $msiexec @(
+        '/i', $msi,
+        '/qn',
+        '/norestart',
+        '/L*v', $log,
+        "STEWARD_CONFIG=$config",
+        "STEWARD_ATTESTATION=$provisionAttestation")
     $installExitCode = $LASTEXITCODE
 } catch {
     Restore-PreMsiTasks
@@ -510,81 +519,6 @@ if ($installExitCode -notin 0, 1641, 3010) {
     }
     Remove-Item -LiteralPath $rollbackDirectory -Recurse -Force
     throw "Steward endpoint MSI failed with exit code $installExitCode."
-}
-try {
-    $provisioner = Join-Path $env:ProgramFiles 'Steward\Steward.Endpoint.Provisioner.exe'
-    $state = Join-Path $env:ProgramData 'Steward\Endpoint'
-    $provisionAttestation = Join-Path $rollbackDirectory `
-        'steward-endpoint.attestation.json'
-    Write-ArtifactAttestation $provisionAttestation
-    $provisionArguments = @(
-        '--install-root', (Split-Path -Parent $provisioner),
-        '--config', $config,
-        '--state-root', $state,
-        '--artifact-attestation', $provisionAttestation)
-    & $provisioner @provisionArguments
-    $provisionExitCode = $LASTEXITCODE
-    if ($provisionExitCode -ne 0) {
-        & $provisioner @provisionArguments '--verify-only'
-        if ($LASTEXITCODE -ne 0) {
-            throw 'Steward endpoint provisioner failed before commit.'
-        }
-    }
-} catch {
-    $originalFailure = $_.Exception.Message
-    $rollbackFailures = [Collections.Generic.List[string]]::new()
-    if (-not $wasCurrentInstalled) {
-        & $msiexec @('/x', $productCode, '/qn', '/norestart')
-        $removeExitCode = $LASTEXITCODE
-        if ($removeExitCode -notin 0, 1605, 1614, 1641, 3010) {
-            $rollbackFailures.Add(
-                "new MSI uninstall exited $removeExitCode")
-        }
-        if ($installer.ProductState($productCode) -eq 5) {
-            $rollbackFailures.Add('new MSI remains installed')
-        }
-        foreach ($previousPackage in $previousPackages) {
-            & $msiexec @(
-                '/i', $previousPackage.package, '/qn', '/norestart')
-            $restoreExitCode = $LASTEXITCODE
-            if ($restoreExitCode -notin 0, 1641, 3010) {
-                $rollbackFailures.Add(
-                    "prior MSI restore exited $restoreExitCode")
-                continue
-            }
-            if ($installer.ProductState($previousPackage.productCode) -ne 5) {
-                $rollbackFailures.Add(
-                    "prior MSI $($previousPackage.productCode) is not installed")
-                continue
-            }
-            if ($installer.ProductInfo(
-                    $previousPackage.productCode,
-                    'VersionString') -ne $previousPackage.productVersion) {
-                $rollbackFailures.Add(
-                    "prior MSI $($previousPackage.productCode) version differs")
-            }
-        }
-    } else {
-        & $msiexec @(
-            '/i', $currentPackage.package, '/qn', '/norestart')
-        $restoreExitCode = $LASTEXITCODE
-        if ($restoreExitCode -notin 0, 1641, 3010 -or
-            $installer.ProductState($productCode) -ne 5 -or
-            $installer.ProductInfo($productCode, 'VersionString') -ne
-                $currentPackage.productVersion) {
-            $rollbackFailures.Add(
-                'same-product repair rollback could not restore the current MSI')
-        }
-    }
-    Restore-PreMsiTasks
-    if ($rollbackFailures.Count -gt 0) {
-        throw (
-            'Steward endpoint provisioning failed: ' + $originalFailure +
-            '; rollback could not restore the previous MSI: ' +
-            ($rollbackFailures -join '; '))
-    }
-    Remove-Item -LiteralPath $rollbackDirectory -Recurse -Force
-    throw $originalFailure
 }
 $replacementCommitted = $true
 Remove-Item -LiteralPath $rollbackDirectory -Recurse -Force

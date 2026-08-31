@@ -215,7 +215,14 @@ public sealed class PackagingPolicyTests
         Assert.Contains("ProgramFiles6432Folder", source, StringComparison.Ordinal);
         Assert.Contains("MajorUpgrade", source, StringComparison.Ordinal);
         Assert.DoesNotContain("ProgramData", source, StringComparison.Ordinal);
-        Assert.DoesNotContain("CustomAction", source, StringComparison.Ordinal);
+        Assert.Contains(
+            "Id=\"ProvisionStewardEndpoint\"",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains("Execute=\"deferred\"", source, StringComparison.Ordinal);
+        Assert.Contains("Impersonate=\"no\"", source, StringComparison.Ordinal);
+        Assert.Contains("STEWARD_CONFIG", source, StringComparison.Ordinal);
+        Assert.Contains("STEWARD_ATTESTATION", source, StringComparison.Ordinal);
     }
 
     [Fact]

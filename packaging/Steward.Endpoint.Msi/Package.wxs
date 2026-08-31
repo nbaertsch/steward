@@ -8,18 +8,39 @@
     <MajorUpgrade
         DowngradeErrorMessage="A newer Steward Endpoint is already installed."
         Schedule="afterInstallInitialize" />
+    <Property Id="STEWARD_CONFIG" Secure="yes" />
+    <Property Id="STEWARD_ATTESTATION" Secure="yes" />
     <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
     <StandardDirectory Id="ProgramFiles6432Folder">
       <Directory Id="INSTALLFOLDER"       Name="Steward">
         <Files Include="$(var.PayloadDir)\**">
           <Exclude Files="$(var.PayloadDir)\e_sqlite3.dll" />
+          <Exclude Files="$(var.PayloadDir)\Steward.Endpoint.Provisioner.exe" />
         </Files>
         <Component>
           <File
               Source="$(var.PayloadDir)\e_sqlite3.dll"
               DefaultLanguage="0" />
         </Component>
+        <Component>
+          <File
+              Id="EndpointProvisionerExe"
+              Source="$(var.PayloadDir)\Steward.Endpoint.Provisioner.exe" />
+        </Component>
       </Directory>
     </StandardDirectory>
+    <CustomAction
+        Id="ProvisionStewardEndpoint"
+        FileRef="EndpointProvisionerExe"
+        ExeCommand="--install-root &quot;[INSTALLFOLDER]&quot; --config &quot;[STEWARD_CONFIG]&quot; --state-root &quot;[CommonAppDataFolder]Steward\Endpoint&quot; --artifact-attestation &quot;[STEWARD_ATTESTATION]&quot;"
+        Execute="deferred"
+        Impersonate="no"
+        Return="check" />
+    <InstallExecuteSequence>
+      <Custom
+          Action="ProvisionStewardEndpoint"
+          After="InstallFiles"
+          Condition="NOT REMOVE~=&quot;ALL&quot;" />
+    </InstallExecuteSequence>
   </Package>
 </Wix>
