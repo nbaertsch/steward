@@ -380,7 +380,13 @@ foreach ($related in $relatedProducts) {
 }
 $preMsiTaskSnapshot = $null
 $msiexec = Join-Path $env:SystemRoot 'System32\msiexec.exe'
-$log = Join-Path $env:ProgramData 'Steward\install\steward-endpoint-msi.log'
+$log = Join-Path $env:ProgramData (
+    if ([string]::IsNullOrWhiteSpace($AdministrativeRoot)) {
+        'Steward\install\steward-endpoint-msi.log'
+    } else {
+        'Steward\install\steward-endpoint-admin-' +
+        [guid]::NewGuid().ToString('N') + '.log'
+    })
 New-Item -ItemType Directory -Path (Split-Path -Parent $log) -Force | Out-Null
 $administrativeStateRoot = Join-Path $env:ProgramData `
     'Steward\install\Endpoint'
@@ -544,6 +550,9 @@ try {
             '.staging-' + [guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Path $administrativeStaging | Out-Null
         Protect-AdministrativeDirectory $administrativeStaging
+        $expectedAdministrativeProvisioner = Join-Path `
+            $administrativeStaging `
+            'PFiles64\Steward\Steward.Endpoint.Provisioner.exe'
         $installArguments = @(
             '/a', $msi, "TARGETDIR=$administrativeStaging") +
             $installArguments
@@ -610,10 +619,30 @@ if ($installExitCode -notin 0, 1641, 3010) {
     throw "Steward endpoint MSI failed with exit code $installExitCode."
 }
 if (-not [string]::IsNullOrWhiteSpace($AdministrativeRoot)) {
+    $administrativeDeadline = [DateTime]::UtcNow.AddMinutes(2)
+    do {
+        $administrativeLogComplete =
+            (Test-Path -LiteralPath $log -PathType Leaf) -and
+            (Select-String -LiteralPath $log `
+                -SimpleMatch 'Installation completed successfully.' `
+                -Quiet)
+        if (-not $administrativeLogComplete -or
+            -not (Test-Path -LiteralPath `
+                $expectedAdministrativeProvisioner -PathType Leaf)) {
+            Start-Sleep -Milliseconds 250
+        }
+    } until (($administrativeLogComplete -and
+        (Test-Path -LiteralPath $expectedAdministrativeProvisioner `
+            -PathType Leaf)) -or
+        [DateTime]::UtcNow -ge $administrativeDeadline)
+    if (-not $administrativeLogComplete -or
+        -not (Test-Path -LiteralPath $expectedAdministrativeProvisioner `
+            -PathType Leaf)) {
+        throw 'Steward administrative image did not finish materializing.'
+    }
     $relativeProvisioner = Join-Path 'PFiles64\Steward' `
         'Steward.Endpoint.Provisioner.exe'
-    $stagedProvisioner = Join-Path $administrativeStaging `
-        $relativeProvisioner
+    $stagedProvisioner = $expectedAdministrativeProvisioner
     if (-not (Test-Path -LiteralPath $stagedProvisioner -PathType Leaf)) {
         throw 'Steward administrative image has an invalid provisioner layout.'
     }
