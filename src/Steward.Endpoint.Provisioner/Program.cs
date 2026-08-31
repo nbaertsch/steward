@@ -1561,11 +1561,12 @@ internal sealed class PowerShellTaskRegistrar : IEndpointTaskRegistrar
             ?? throw new InvalidOperationException(
                 "Unable to start Windows PowerShell.");
         var output = process.StandardOutput.ReadToEnd();
-        _ = process.StandardError.ReadToEnd();
+        var error = process.StandardError.ReadToEnd();
         process.WaitForExit();
         if (process.ExitCode != 0)
             throw new InvalidOperationException(
-                "Endpoint task registration failed.");
+                "Endpoint task registration failed: " +
+                error.Trim()[..Math.Min(error.Trim().Length, 2_000)]);
         return output.Trim();
     }
 }
