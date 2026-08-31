@@ -44,22 +44,45 @@ internal static class Program
             stage = "nonce-state";
             var nonces = new DvcConnectionNonceSequenceStore(
                 options.NonceSequenceFile);
-            var readiness = new DvcEndpointReadinessStore(
-                options.ReadinessReceiptFile,
-                options.SessionId,
-                options.HostId,
-                options.NodeIncarnationId);
             var sequence = await nonces.InspectAsync(
                     options.SessionId,
                     options.HostId,
                     options.NodeIncarnationId,
                     cancellation.Token)
                 .ConfigureAwait(false);
+            var readiness = new DvcEndpointReadinessStore(
+                options.ReadinessReceiptFile,
+                options.SessionId,
+                options.HostId,
+                options.NodeIncarnationId,
+                sequence.Nonces);
             stage = "readiness-state";
             var previous = await readiness.LoadAsync(cancellation.Token)
                 .ConfigureAwait(false);
             var authenticated = previous?.AuthenticatedGenerations.ToList()
                 ?? [];
+            if (authenticated.Count == sequence.NextIndex + 1)
+            {
+                var interrupted = authenticated[^1];
+                if (interrupted.Index != sequence.NextIndex ||
+                    interrupted.Nonce !=
+                        sequence.Nonces[sequence.NextIndex])
+                    throw new InvalidDataException(
+                        "Interrupted DVC nonce commit cannot be reconciled.");
+                await nonces.CommitAsync(
+                        options.SessionId,
+                        options.HostId,
+                        options.NodeIncarnationId,
+                        new(interrupted.Index, interrupted.Nonce),
+                        cancellation.Token)
+                    .ConfigureAwait(false);
+                sequence = await nonces.InspectAsync(
+                        options.SessionId,
+                        options.HostId,
+                        options.NodeIncarnationId,
+                        cancellation.Token)
+                    .ConfigureAwait(false);
+            }
             if (authenticated.Count != sequence.NextIndex)
             {
                 await readiness.WriteAsync(
@@ -71,20 +94,22 @@ internal static class Program
                 return 0;
             }
 
-            if (authenticated.Count == 2)
+            if (authenticated.Count == sequence.Nonces.Count)
             {
                 await readiness.WriteAsync(
                         DvcEndpointReadinessState.Completed,
                         authenticated,
-                        2,
+                        sequence.Nonces.Count,
                         cancellation.Token)
                     .ConfigureAwait(false);
                 return 0;
             }
             await readiness.WriteAsync(
-                    DvcEndpointReadinessState.WaitingForActiveRdpSession,
-                    [],
-                    nextGeneration: 0,
+                    authenticated.Count == 0
+                        ? DvcEndpointReadinessState.WaitingForActiveRdpSession
+                        : DvcEndpointReadinessState.WaitingForReconnect,
+                    authenticated,
+                    nextGeneration: authenticated.Count,
                     cancellation.Token)
                 .ConfigureAwait(false);
 
@@ -108,7 +133,7 @@ internal static class Program
             try
             {
             while (!cancellation.IsCancellationRequested &&
-                   authenticated.Count < 2)
+                   authenticated.Count < sequence.Nonces.Count)
             {
                 await readiness.WriteAsync(
                         authenticated.Count == 0
@@ -123,7 +148,7 @@ internal static class Program
                         cancellation.Token)
                     .ConfigureAwait(false);
                 stage = "handshake";
-                var generation = await nonces.ConsumeNextAsync(
+                var generation = await nonces.PeekNextAsync(
                         options.SessionId,
                         options.HostId,
                         options.NodeIncarnationId,
@@ -230,12 +255,19 @@ internal static class Program
                     connected.Handshake.Sequence,
                     DateTimeOffset.UtcNow));
                 await readiness.WriteAsync(
-                        authenticated.Count == 2
+                        authenticated.Count == sequence.Nonces.Count
                             ? DvcEndpointReadinessState.Completed
                             : DvcEndpointReadinessState
                                 .AuthenticatedGeneration,
                         authenticated,
                         authenticated.Count,
+                        cancellation.Token)
+                    .ConfigureAwait(false);
+                await nonces.CommitAsync(
+                        options.SessionId,
+                        options.HostId,
+                        options.NodeIncarnationId,
+                        generation,
                         cancellation.Token)
                     .ConfigureAwait(false);
                 if (options.Once)

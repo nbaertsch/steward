@@ -380,6 +380,7 @@ internal sealed class EndpointProvisioner(
     IEndpointTaskRegistrar tasks,
     IEndpointSecurity security)
 {
+    private const int OperationalNonceCount = 32;
     private static readonly JsonSerializerOptions Json =
         new(JsonSerializerDefaults.Web) { WriteIndented = true };
 
@@ -882,7 +883,9 @@ internal sealed class EndpointProvisioner(
             identity.SessionId,
             identity.HostId,
             identity.IncarnationId,
-            [Guid.NewGuid(), Guid.NewGuid()],
+            Enumerable.Range(0, OperationalNonceCount)
+                .Select(_ => Guid.NewGuid())
+                .ToArray(),
             0);
         files.WriteAtomic(
             path,
@@ -1237,9 +1240,11 @@ internal sealed class EndpointProvisioner(
             body.HostId != identity.HostId ||
             body.IncarnationId != identity.IncarnationId ||
             body.NodeIdentity != identity.NodeIdentity ||
-            body.ConnectionNonces is not { Count: 2 } ||
+            body.ConnectionNonces is not
+                { Count: OperationalNonceCount } ||
             body.ConnectionNonces.Any(value => value == Guid.Empty) ||
-            body.ConnectionNonces.Distinct().Count() != 2)
+            body.ConnectionNonces.Distinct().Count() !=
+                OperationalNonceCount)
             throw new InvalidDataException(
                 "Existing endpoint receipt does not match current state.");
         var noncePath = Path.Combine(stateRoot, "nonce-sequence.json");
@@ -1252,8 +1257,9 @@ internal sealed class EndpointProvisioner(
             nonceState.SessionId != identity.SessionId ||
             nonceState.HostId != identity.HostId ||
             nonceState.NodeIncarnationId != identity.IncarnationId ||
-            nonceState.NextIndex != 0 ||
-            nonceState.Nonces.Count != 2 ||
+            nonceState.NextIndex < 0 ||
+            nonceState.NextIndex > OperationalNonceCount ||
+            nonceState.Nonces.Count != OperationalNonceCount ||
             !nonceState.Nonces.SequenceEqual(body.ConnectionNonces))
             throw new InvalidDataException(
                 "Existing endpoint nonce state does not match the receipt.");
@@ -1438,13 +1444,19 @@ internal sealed class PowerShellTaskRegistrar : IEndpointTaskRegistrar
             Stop-ScheduledTask -TaskName $keeperName -TaskPath '\Steward\' -ErrorAction SilentlyContinue
             Stop-ScheduledTask -TaskName $serverName -TaskPath '\Steward\' -ErrorAction SilentlyContinue
             $trigger=New-ScheduledTaskTrigger -AtLogOn -User '{{Escape(userAccount)}}'
+            $reconnect=New-CimInstance -Namespace 'Root/Microsoft/Windows/TaskScheduler' -ClassName 'MSFT_TaskSessionStateChangeTrigger' -ClientOnly -Property @{
+              Enabled=$true
+              StateChange=3
+              UserId='{{Escape(userAccount)}}'
+            }
+            $triggers=@($trigger,$reconnect)
             $principal=New-ScheduledTaskPrincipal -UserId '{{Escape(userAccount)}}' -LogonType Interactive -RunLevel Limited
             $settings=New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -Hidden -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
             $keeper=New-ScheduledTaskAction -Execute '{{Escape(actions.KeeperExecutable)}}' -Argument '{{Escape(actions.KeeperArguments)}}' -WorkingDirectory '{{Escape(installRoot)}}'
             $server=New-ScheduledTaskAction -Execute '{{Escape(actions.ServerExecutable)}}' -Argument '{{Escape(actions.ServerArguments)}}' -WorkingDirectory '{{Escape(installRoot)}}'
             try {
-              Register-ScheduledTask -TaskName $keeperName -TaskPath '\Steward\' -Action $keeper -Trigger $trigger -Principal $principal -Settings $settings -Force|Out-Null
-              Register-ScheduledTask -TaskName $serverName -TaskPath '\Steward\' -Action $server -Trigger $trigger -Principal $principal -Settings $settings -Force|Out-Null
+              Register-ScheduledTask -TaskName $keeperName -TaskPath '\Steward\' -Action $keeper -Trigger $triggers -Principal $principal -Settings $settings -Force|Out-Null
+              Register-ScheduledTask -TaskName $serverName -TaskPath '\Steward\' -Action $server -Trigger $triggers -Principal $principal -Settings $settings -Force|Out-Null
             } catch {
               Unregister-ScheduledTask -TaskName $keeperName -TaskPath '\Steward\' -Confirm:$false -ErrorAction SilentlyContinue
               Unregister-ScheduledTask -TaskName $serverName -TaskPath '\Steward\' -Confirm:$false -ErrorAction SilentlyContinue
@@ -1501,21 +1513,11 @@ internal sealed class PowerShellTaskRegistrar : IEndpointTaskRegistrar
               try{([Security.Principal.NTAccount]$b.Principal.UserId).Translate([Security.Principal.SecurityIdentifier]).Value}catch{$null}
             }else{$null}
             $canonical=@($a,$b).Where({
-              if($null-eq$_-or$_.Triggers.Count-ne1-or
-                $null-eq$_.Triggers[0]-or$null-eq$_.Settings-or
-                $null-eq$_.Triggers[0].Repetition-or
+              if($null-eq$_-or$_.Triggers.Count-ne2-or
+                $null-eq$_.Settings-or
                 $null-eq$_.Settings.IdleSettings-or
                 $null-eq$_.Settings.NetworkSettings){return $false}
-              $trigger=$_.Triggers[0]
               $settings=$_.Settings
-              [string]::IsNullOrEmpty($trigger.Delay)-and
-              [string]::IsNullOrEmpty($trigger.EndBoundary)-and
-              [string]::IsNullOrEmpty($trigger.ExecutionTimeLimit)-and
-              [string]::IsNullOrEmpty($trigger.Id)-and
-              [string]::IsNullOrEmpty($trigger.StartBoundary)-and
-              [string]::IsNullOrEmpty($trigger.Repetition.Duration)-and
-              [string]::IsNullOrEmpty($trigger.Repetition.Interval)-and
-              !$trigger.Repetition.StopAtDurationEnd-and
               $settings.AllowDemandStart-and
               $settings.AllowHardTerminate-and
               $settings.Compatibility-eq'Win7'-and
@@ -1537,8 +1539,35 @@ internal sealed class PowerShellTaskRegistrar : IEndpointTaskRegistrar
               [string]::IsNullOrEmpty($settings.NetworkSettings.Name)-and
               $null-eq$settings.MaintenanceSettings
             }).Count-eq2
+            $aTriggers=if($null-ne$a){@($a.Triggers)}else{@()}
+            $bTriggers=if($null-ne$b){@($b.Triggers)}else{@()}
+            $aLogon=@($aTriggers.Where({
+              $_.CimClass.CimClassName-eq'MSFT_TaskLogonTrigger'
+            }))
+            $bLogon=@($bTriggers.Where({
+              $_.CimClass.CimClassName-eq'MSFT_TaskLogonTrigger'
+            }))
+            $aReconnect=@($aTriggers.Where({
+              $_.CimClass.CimClassName-eq'MSFT_TaskSessionStateChangeTrigger'
+            }))
+            $bReconnect=@($bTriggers.Where({
+              $_.CimClass.CimClassName-eq'MSFT_TaskSessionStateChangeTrigger'
+            }))
+            $triggerDefaults=@(
+              $aLogon+$bLogon+$aReconnect+$bReconnect
+            ).Where({
+              [string]::IsNullOrEmpty($_.Delay)-and
+              [string]::IsNullOrEmpty($_.EndBoundary)-and
+              [string]::IsNullOrEmpty($_.ExecutionTimeLimit)-and
+              [string]::IsNullOrEmpty($_.Id)-and
+              [string]::IsNullOrEmpty($_.StartBoundary)-and
+              ($null-eq$_.Repetition-or(
+                [string]::IsNullOrEmpty($_.Repetition.Duration)-and
+                [string]::IsNullOrEmpty($_.Repetition.Interval)-and
+                !$_.Repetition.StopAtDurationEnd))
+            }).Count-eq4
             $ok=$null-ne$a-and$null-ne$b-and
-              $canonical-and
+              $canonical-and$triggerDefaults-and
               $a.Actions.Count-eq1-and$b.Actions.Count-eq1-and
               $a.Actions[0].Execute-eq'{{Escape(expected.KeeperExecutable)}}'-and
               $a.Actions[0].Arguments-eq'{{Escape(expected.KeeperArguments)}}'-and
@@ -1560,12 +1589,16 @@ internal sealed class PowerShellTaskRegistrar : IEndpointTaskRegistrar
               [string]::IsNullOrEmpty($b.Principal.DisplayName)-and
               $a.Principal.Id-eq'Author'-and
               $b.Principal.Id-eq'Author'-and
-              $a.Triggers.Count-eq1-and$b.Triggers.Count-eq1-and
-              $a.Triggers[0].CimClass.CimClassName-eq'MSFT_TaskLogonTrigger'-and
-              $b.Triggers[0].CimClass.CimClassName-eq'MSFT_TaskLogonTrigger'-and
-              $a.Triggers[0].UserId-eq'{{Escape(userAccount)}}'-and
-              $b.Triggers[0].UserId-eq'{{Escape(userAccount)}}'-and
-              $a.Triggers[0].Enabled-and$b.Triggers[0].Enabled-and
+              $aLogon.Count-eq1-and$bLogon.Count-eq1-and
+              $aReconnect.Count-eq1-and$bReconnect.Count-eq1-and
+              $aLogon[0].UserId-eq'{{Escape(userAccount)}}'-and
+              $bLogon[0].UserId-eq'{{Escape(userAccount)}}'-and
+              $aLogon[0].Enabled-and$bLogon[0].Enabled-and
+              $aReconnect[0].UserId-eq'{{Escape(userAccount)}}'-and
+              $bReconnect[0].UserId-eq'{{Escape(userAccount)}}'-and
+              $aReconnect[0].StateChange-eq3-and
+              $bReconnect[0].StateChange-eq3-and
+              $aReconnect[0].Enabled-and$bReconnect[0].Enabled-and
               $a.Settings.Enabled-and$b.Settings.Enabled-and
               $a.Settings.Hidden-and$b.Settings.Hidden-and
               $a.Settings.StartWhenAvailable-and

@@ -147,6 +147,28 @@ public sealed class ProductionIntegrationTests
     }
 
     [Fact]
+    public async Task External_process_lease_is_not_confirmed_by_invalid_evidence()
+    {
+        var source = new FakeEvidenceSource(
+            CompleteExternalEvidence(),
+            mismatchedConnection: true);
+        var lease = new FakeExternallyProvenLease(
+            () => throw new InvalidOperationException(
+                "Invalid evidence must not confirm the lease."));
+        await using var runtime = new ProductionRdCoreConnectionRuntime(
+            new FakeLeaseFactory(lease),
+            source,
+            TimeSpan.FromSeconds(2));
+
+        await Assert.ThrowsAsync<InvalidDataException>(
+            () => runtime.ConnectAsync(
+                StartRequest(),
+                CancellationToken.None));
+
+        Assert.False(lease.Confirmed);
+    }
+
+    [Fact]
     public async Task Production_runtime_registers_ticket_before_rdcore_connect()
     {
         var source = new FakeEvidenceSource(

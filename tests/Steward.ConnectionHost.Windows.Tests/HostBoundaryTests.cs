@@ -11,6 +11,33 @@ namespace Steward.ConnectionHost.Windows.Tests;
 public sealed class HostBoundaryTests
 {
     [Fact]
+    public async Task Windows_app_startup_lock_honors_cancellation()
+    {
+        var directory = TestDirectory();
+        try
+        {
+            var path = Path.Combine(directory, "startup.lock");
+            await using var held = new FileStream(
+                path,
+                FileMode.OpenOrCreate,
+                FileAccess.ReadWrite,
+                FileShare.None);
+            using var cancellation = new CancellationTokenSource(
+                TimeSpan.FromMilliseconds(100));
+
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(
+                () => Task.Run(
+                    () => WindowsAppOutOfProcOverride.AcquireLock(
+                        path,
+                        cancellation.Token)));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task Metadata_uses_current_user_acl_and_no_fixed_temp_file()
     {
         var directory = TestDirectory();

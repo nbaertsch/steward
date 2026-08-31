@@ -432,7 +432,6 @@ public sealed class ProductionRdCoreConnectionRuntime :
                     await externallyProven.ConnectionFailure
                         .ConfigureAwait(false);
                 external = await evidenceTask.ConfigureAwait(false);
-                externallyProven.ConfirmConnected();
             }
             else
             {
@@ -445,8 +444,6 @@ public sealed class ProductionRdCoreConnectionRuntime :
                         timeout.Token)
                     .ConfigureAwait(false);
             }
-            lock (runtimeEvents)
-                ValidateRuntimeEvents(runtimeEvents);
             ValidateExternalEvidence(
                 request.ConnectionId,
                 runtimeId,
@@ -460,6 +457,11 @@ public sealed class ProductionRdCoreConnectionRuntime :
             };
             evidence.AddRange(external.Evidence);
             ValidateCompleteEvidence(request.Registration, generation, evidence);
+            if (lease is IExternallyProvenRdCoreConnectionLeaseHandle
+                externallyValidated)
+                externallyValidated.ConfirmConnected();
+            lock (runtimeEvents)
+                ValidateRuntimeEvents(runtimeEvents);
             await evidenceSource.CancelAsync(ticket).ConfigureAwait(false);
             ticketReleased = true;
             var result = new RdCoreConnectionRuntimeResult(

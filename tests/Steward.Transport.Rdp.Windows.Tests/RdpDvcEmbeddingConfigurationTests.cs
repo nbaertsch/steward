@@ -42,6 +42,23 @@ public sealed class RdpDvcEmbeddingConfigurationTests : IDisposable
         Assert.True(File.Exists(configuration));
     }
 
+    [Fact]
+    public void Missing_configured_path_fails_instead_of_sharing_state()
+    {
+        Environment.SetEnvironmentVariable(
+            RdpDvcEmbeddingConfigurationStore
+                .ConfigurationPathEnvironmentVariable,
+            null);
+
+        var exception = Assert.Throws<InvalidOperationException>(
+            () => _ = RdpDvcEmbeddingConfigurationStore.CurrentPath);
+
+        Assert.Contains(
+            "configuration path is required",
+            exception.Message,
+            StringComparison.Ordinal);
+    }
+
     public void Dispose()
     {
         Environment.SetEnvironmentVariable(

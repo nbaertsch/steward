@@ -146,7 +146,7 @@ internal sealed class WindowsAppIsolatedConnectionLease(
                     "The isolated Windows App lease was already started.");
             try
             {
-                Start();
+                Start(cancellationToken);
             }
             catch (Exception startupFailure)
             {
@@ -171,6 +171,7 @@ internal sealed class WindowsAppIsolatedConnectionLease(
     {
         if (containmentFailure.Task.IsCompleted)
             containmentFailure.Task.GetAwaiter().GetResult();
+        WindowsAppOutOfProcOverride? startupOverride;
         lock (sync)
         {
             ObjectDisposedException.ThrowIf(disposed, this);
@@ -180,7 +181,10 @@ internal sealed class WindowsAppIsolatedConnectionLease(
             Volatile.Write(
                 ref state,
                 (int)RdCoreConnectionState.Connected);
+            startupOverride = outOfProcOverride;
+            outOfProcOverride = null;
         }
+        startupOverride?.Dispose();
         Connected?.Invoke(this, EventArgs.Empty);
         WtsPluginsLoaded?.Invoke(this, EventArgs.Empty);
     }
@@ -324,9 +328,11 @@ internal sealed class WindowsAppIsolatedConnectionLease(
         }
     }
 
-    private void Start()
+    private void Start(CancellationToken cancellationToken)
     {
-        outOfProcOverride = WindowsAppOutOfProcOverride.Disable();
+        outOfProcOverride =
+            WindowsAppOutOfProcOverride.Disable(cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
         var executable = Path.GetFullPath(
             Path.Combine(
                 artifacts.PackageRoot,
@@ -385,6 +391,7 @@ internal sealed class WindowsAppIsolatedConnectionLease(
             processId = created.ProcessId;
             try
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 var packageFullName = Native.GetPackageFullName(process);
                 if (!string.Equals(
                         packageFullName,
@@ -434,8 +441,6 @@ internal sealed class WindowsAppIsolatedConnectionLease(
         containmentMonitor = MonitorContainmentAsync(
             desktopName,
             containmentStop.Token);
-        outOfProcOverride.Dispose();
-        outOfProcOverride = null;
     }
 
     private void CleanupFailedStart()

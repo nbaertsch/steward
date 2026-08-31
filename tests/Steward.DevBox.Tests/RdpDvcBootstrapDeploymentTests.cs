@@ -738,12 +738,23 @@ public sealed class RdpDvcBootstrapDeploymentTests : IDisposable
                 new JsonSerializerOptions(JsonSerializerDefaults.Web)));
         var store = new DvcConnectionNonceSequenceStore(path);
 
-        var first = await store.ConsumeNextAsync(
+        var first = await store.PeekNextAsync(
             request.SessionId,
             request.HostId.Value,
             request.IncarnationId.Value,
             default);
-        var second = await store.ConsumeNextAsync(
+        var repeated = await store.PeekNextAsync(
+            request.SessionId,
+            request.HostId.Value,
+            request.IncarnationId.Value,
+            default);
+        await store.CommitAsync(
+            request.SessionId,
+            request.HostId.Value,
+            request.IncarnationId.Value,
+            first,
+            default);
+        var second = await store.PeekNextAsync(
             request.SessionId,
             request.HostId.Value,
             request.IncarnationId.Value,
@@ -751,10 +762,17 @@ public sealed class RdpDvcBootstrapDeploymentTests : IDisposable
 
         Assert.Equal(0, first.Index);
         Assert.Equal(request.ConnectionNonces[0], first.Nonce);
+        Assert.Equal(first, repeated);
         Assert.Equal(1, second.Index);
         Assert.Equal(request.ConnectionNonces[1], second.Nonce);
+        await store.CommitAsync(
+            request.SessionId,
+            request.HostId.Value,
+            request.IncarnationId.Value,
+            second,
+            default);
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            store.ConsumeNextAsync(
+            store.PeekNextAsync(
                 request.SessionId,
                 request.HostId.Value,
                 request.IncarnationId.Value,

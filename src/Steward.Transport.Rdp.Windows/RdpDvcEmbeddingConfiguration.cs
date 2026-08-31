@@ -14,13 +14,6 @@ public static class RdpDvcEmbeddingConfigurationStore
     public const string ConfigurationPathEnvironmentVariable =
         "STEWARD_RDP_DVC_EMBEDDING_CONFIGURATION_FILE";
 
-    public static string DefaultPath => Path.Combine(
-        Environment.GetFolderPath(
-            Environment.SpecialFolder.LocalApplicationData),
-        "Steward",
-        "rdp-dvc-client",
-        "embedding.v1.json");
-
     public static string CurrentPath
     {
         get
@@ -28,7 +21,8 @@ public static class RdpDvcEmbeddingConfigurationStore
             var configured = Environment.GetEnvironmentVariable(
                 ConfigurationPathEnvironmentVariable);
             if (string.IsNullOrWhiteSpace(configured))
-                return DefaultPath;
+                throw new InvalidOperationException(
+                    "The DVC embedding configuration path is required.");
             if (!Path.IsPathFullyQualified(configured))
                 throw new InvalidDataException(
                     "The DVC embedding configuration path must be absolute.");

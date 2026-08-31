@@ -32,7 +32,7 @@ public sealed class DvcConnectionNonceSequenceStore(string path)
         return sequence;
     }
 
-    public async Task<DvcConnectionNonce> ConsumeNextAsync(
+    public async Task<DvcConnectionNonce> PeekNextAsync(
         Guid sessionId,
         Guid hostId,
         Guid incarnationId,
@@ -50,11 +50,31 @@ public sealed class DvcConnectionNonceSequenceStore(string path)
         var result = new DvcConnectionNonce(
             sequence.NextIndex,
             sequence.Nonces[sequence.NextIndex]);
+        return result;
+    }
+
+    public async Task CommitAsync(
+        Guid sessionId,
+        Guid hostId,
+        Guid incarnationId,
+        DvcConnectionNonce expected,
+        CancellationToken cancellationToken)
+    {
+        await using var lockStream = await AcquireLockAsync(
+                cancellationToken)
+            .ConfigureAwait(false);
+        var sequence = await ReadAsync(cancellationToken)
+            .ConfigureAwait(false);
+        Validate(sequence, sessionId, hostId, incarnationId);
+        if (sequence.NextIndex != expected.Index ||
+            sequence.NextIndex >= sequence.Nonces.Count ||
+            sequence.Nonces[sequence.NextIndex] != expected.Nonce)
+            throw new InvalidOperationException(
+                "The DVC nonce generation changed before commit.");
         await WriteAtomicAsync(
                 sequence with { NextIndex = sequence.NextIndex + 1 },
                 cancellationToken)
             .ConfigureAwait(false);
-        return result;
     }
 
     private async Task<DvcConnectionNonceSequence> ReadAsync(
@@ -83,10 +103,11 @@ public sealed class DvcConnectionNonceSequenceStore(string path)
             sequence.SessionId != sessionId ||
             sequence.HostId != hostId ||
             sequence.NodeIncarnationId != incarnationId ||
-            sequence.Nonces.Count != 2 ||
+            sequence.Nonces.Count is < 2 or > 256 ||
             sequence.Nonces.Any(nonce => nonce == Guid.Empty) ||
-            sequence.Nonces.Distinct().Count() != 2 ||
-            sequence.NextIndex is < 0 or > 2)
+            sequence.Nonces.Distinct().Count() != sequence.Nonces.Count ||
+            sequence.NextIndex < 0 ||
+            sequence.NextIndex > sequence.Nonces.Count)
             throw new InvalidDataException(
                 "The DVC nonce sequence is invalid or belongs to another endpoint.");
     }
