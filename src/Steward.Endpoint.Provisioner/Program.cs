@@ -1,5 +1,7 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -1387,38 +1389,6 @@ internal sealed class PowerShellTaskRegistrar : IEndpointTaskRegistrar
             try {
               Register-ScheduledTask -TaskName $keeperName -TaskPath '\Steward\' -Action $keeper -Trigger $trigger -Principal $principal -Settings $settings -Force|Out-Null
               Register-ScheduledTask -TaskName $serverName -TaskPath '\Steward\' -Action $server -Trigger $trigger -Principal $principal -Settings $settings -Force|Out-Null
-              $hasProfile=@(Get-CimInstance Win32_UserProfile|Where-Object{
-                $_.SID-eq'{{Escape(userSid)}}'-and$_.Loaded
-              }).Count-eq1
-              if(!$hasProfile){return}
-              Start-ScheduledTask -TaskName $keeperName -TaskPath '\Steward\'
-              Start-Sleep -Milliseconds 500
-              Remove-Item -LiteralPath '{{Escape(Path.Combine(stateRoot, "readiness.json"))}}' -Force -ErrorAction SilentlyContinue
-              $launchBoundary=[DateTime]::UtcNow
-              Start-ScheduledTask -TaskName $serverName -TaskPath '\Steward\'
-              $deadline=[DateTime]::UtcNow.AddSeconds(30)
-              do {
-                Start-Sleep -Milliseconds 250
-                $a=Get-ScheduledTask -TaskName $keeperName -TaskPath '\Steward\'
-                $b=Get-ScheduledTask -TaskName $serverName -TaskPath '\Steward\'
-                $ready=$null
-                if(Test-Path -LiteralPath '{{Escape(Path.Combine(stateRoot, "readiness.json"))}}'){
-                  try{$ready=Get-Content -LiteralPath '{{Escape(Path.Combine(stateRoot, "readiness.json"))}}' -Raw|ConvertFrom-Json}catch{$ready=$null}
-                }
-                $endpoint=if($null-ne$ready){Get-CimInstance Win32_Process -Filter "ProcessId=$($ready.processId)" -ErrorAction SilentlyContinue}else{$null}
-                $healthy=$a.State-eq'Running'-and$b.State-eq'Running'-and
-                  $null-ne$ready-and$ready.version-eq1-and
-                  $ready.sessionId-eq'{{identity.SessionId:D}}'-and
-                  $ready.hostId-eq'{{identity.HostId:D}}'-and
-                  $ready.nodeIncarnationId-eq'{{identity.IncarnationId:D}}'-and
-                  $ready.state-in @('waitingForActiveRdpSession','handshaking','authenticatedGeneration','waitingForReconnect','completed')-and
-                  ([DateTime]::UtcNow-[DateTimeOffset]::Parse($ready.updatedAtUtc).UtcDateTime).TotalSeconds-lt60-and
-                  $null-ne$endpoint-and
-                  $endpoint.ExecutablePath-eq'{{Escape(actions.ServerExecutable)}}'-and
-                  $endpoint.CreationDate.ToUniversalTime()-ge$launchBoundary-and
-                  $endpoint.CommandLine.EndsWith('{{Escape(actions.ServerArguments)}}',[StringComparison]::Ordinal)
-              } until($healthy-or[DateTime]::UtcNow-ge$deadline)
-              if(!$healthy){throw 'Endpoint tasks did not reach matching live readiness.'}
             } catch {
               Unregister-ScheduledTask -TaskName $keeperName -TaskPath '\Steward\' -Confirm:$false -ErrorAction SilentlyContinue
               Unregister-ScheduledTask -TaskName $serverName -TaskPath '\Steward\' -Confirm:$false -ErrorAction SilentlyContinue
@@ -1434,6 +1404,16 @@ internal sealed class PowerShellTaskRegistrar : IEndpointTaskRegistrar
         try
         {
             RunPowerShellFile(scriptPath);
+            if (HasActiveRemoteSession(userSid))
+            {
+                RunPowerShell(
+                    $$"""
+                    $ErrorActionPreference='Stop'
+                    Start-ScheduledTask -TaskName 'HandleKeeper-{{identity.HostId:N}}' -TaskPath '\Steward\'
+                    Start-Sleep -Milliseconds 500
+                    Start-ScheduledTask -TaskName 'RdpDvcEndpoint-{{identity.HostId:N}}' -TaskPath '\Steward\'
+                    """);
+            }
         }
         finally
         {
@@ -1464,7 +1444,45 @@ internal sealed class PowerShellTaskRegistrar : IEndpointTaskRegistrar
             $bUserSid=if($null-ne$b-and![string]::IsNullOrWhiteSpace($b.Principal.UserId)){
               try{([Security.Principal.NTAccount]$b.Principal.UserId).Translate([Security.Principal.SecurityIdentifier]).Value}catch{$null}
             }else{$null}
+            $canonical=@($a,$b).Where({
+              if($null-eq$_-or$_.Triggers.Count-ne1-or
+                $null-eq$_.Triggers[0]-or$null-eq$_.Settings-or
+                $null-eq$_.Triggers[0].Repetition-or
+                $null-eq$_.Settings.IdleSettings-or
+                $null-eq$_.Settings.NetworkSettings){return $false}
+              $trigger=$_.Triggers[0]
+              $settings=$_.Settings
+              [string]::IsNullOrEmpty($trigger.Delay)-and
+              [string]::IsNullOrEmpty($trigger.EndBoundary)-and
+              [string]::IsNullOrEmpty($trigger.ExecutionTimeLimit)-and
+              [string]::IsNullOrEmpty($trigger.Id)-and
+              [string]::IsNullOrEmpty($trigger.StartBoundary)-and
+              [string]::IsNullOrEmpty($trigger.Repetition.Duration)-and
+              [string]::IsNullOrEmpty($trigger.Repetition.Interval)-and
+              !$trigger.Repetition.StopAtDurationEnd-and
+              $settings.AllowDemandStart-and
+              $settings.AllowHardTerminate-and
+              $settings.Compatibility-eq'Win7'-and
+              [string]::IsNullOrEmpty($settings.DeleteExpiredTaskAfter)-and
+              $settings.Priority-eq7-and
+              $settings.RestartCount-eq0-and
+              [string]::IsNullOrEmpty($settings.RestartInterval)-and
+              !$settings.RunOnlyIfIdle-and
+              !$settings.RunOnlyIfNetworkAvailable-and
+              !$settings.WakeToRun-and
+              !$settings.DisallowStartOnRemoteAppSession-and
+              $settings.UseUnifiedSchedulingEngine-and
+              !$settings.Volatile-and
+              $settings.IdleSettings.IdleDuration-eq'PT10M'-and
+              !$settings.IdleSettings.RestartOnIdle-and
+              $settings.IdleSettings.StopOnIdleEnd-and
+              $settings.IdleSettings.WaitTimeout-eq'PT1H'-and
+              [string]::IsNullOrEmpty($settings.NetworkSettings.Id)-and
+              [string]::IsNullOrEmpty($settings.NetworkSettings.Name)-and
+              $null-eq$settings.MaintenanceSettings
+            }).Count-eq2
             $ok=$null-ne$a-and$null-ne$b-and
+              $canonical-and
               $a.Actions.Count-eq1-and$b.Actions.Count-eq1-and
               $a.Actions[0].Execute-eq'{{Escape(expected.KeeperExecutable)}}'-and
               $a.Actions[0].Arguments-eq'{{Escape(expected.KeeperArguments)}}'-and
@@ -1478,6 +1496,14 @@ internal sealed class PowerShellTaskRegistrar : IEndpointTaskRegistrar
               $b.Principal.LogonType-eq'Interactive'-and
               $a.Principal.RunLevel-eq'Limited'-and
               $b.Principal.RunLevel-eq'Limited'-and
+              $a.Principal.ProcessTokenSidType-eq'Default'-and
+              $b.Principal.ProcessTokenSidType-eq'Default'-and
+              [string]::IsNullOrEmpty(($a.Principal.RequiredPrivilege-join''))-and
+              [string]::IsNullOrEmpty(($b.Principal.RequiredPrivilege-join''))-and
+              [string]::IsNullOrEmpty($a.Principal.DisplayName)-and
+              [string]::IsNullOrEmpty($b.Principal.DisplayName)-and
+              $a.Principal.Id-eq'Author'-and
+              $b.Principal.Id-eq'Author'-and
               $a.Triggers.Count-eq1-and$b.Triggers.Count-eq1-and
               $a.Triggers[0].CimClass.CimClassName-eq'MSFT_TaskLogonTrigger'-and
               $b.Triggers[0].CimClass.CimClassName-eq'MSFT_TaskLogonTrigger'-and
@@ -1496,30 +1522,8 @@ internal sealed class PowerShellTaskRegistrar : IEndpointTaskRegistrar
               $b.Settings.ExecutionTimeLimit-eq'PT0S'-and
               $a.Settings.MultipleInstances-eq'IgnoreNew'-and
               $b.Settings.MultipleInstances-eq'IgnoreNew'
-            $hasProfile=@(Get-CimInstance Win32_UserProfile|Where-Object{
-              $_.SID-eq'{{Escape(userSid)}}'-and$_.Loaded
-            }).Count-eq1
-            if(!$hasProfile){
-              $ok=$ok-and$a.State-in@('Ready','Running')-and
-                $b.State-in@('Ready','Running')
-              if($ok){'true'}else{'false'}
-              return
-            }
-            $ok=$ok-and$a.State-eq'Running'-and$b.State-eq'Running'
-            $ready=$null
-            if(Test-Path -LiteralPath '{{Escape(Path.Combine(stateRoot, "readiness.json"))}}'){
-              try{$ready=Get-Content -LiteralPath '{{Escape(Path.Combine(stateRoot, "readiness.json"))}}' -Raw|ConvertFrom-Json}catch{$ready=$null}
-            }
-            $endpoint=if($null-ne$ready){Get-CimInstance Win32_Process -Filter "ProcessId=$($ready.processId)" -ErrorAction SilentlyContinue}else{$null}
-            $ok=$ok-and$null-ne$ready-and$ready.version-eq1-and
-              $ready.sessionId-eq'{{identity.SessionId:D}}'-and
-              $ready.hostId-eq'{{identity.HostId:D}}'-and
-              $ready.nodeIncarnationId-eq'{{identity.IncarnationId:D}}'-and
-              $ready.state-in @('waitingForActiveRdpSession','handshaking','authenticatedGeneration','waitingForReconnect','completed')-and
-              ([DateTime]::UtcNow-[DateTimeOffset]::Parse($ready.updatedAtUtc).UtcDateTime).TotalSeconds-lt60-and
-              $null-ne$endpoint-and
-              $endpoint.ExecutablePath-eq'{{Escape(expected.ServerExecutable)}}'-and
-              $endpoint.CommandLine.EndsWith('{{Escape(expected.ServerArguments)}}',[StringComparison]::Ordinal)
+            $ok=$ok-and$a.State-in@('Ready','Running')-and
+              $b.State-in@('Ready','Running')
             if($ok){'true'}else{'false'}
             """;
         return bool.TryParse(RunPowerShell(script), out var healthy) &&
@@ -1553,6 +1557,135 @@ internal sealed class PowerShellTaskRegistrar : IEndpointTaskRegistrar
             $"--node-identity \"{identity.NodeIdentity}\" " +
             $"--control-signing-key-file \"{Path.Combine(keys, "control-signing.spki")}\" " +
             $"--control-identity \"{controlIdentity}\"");
+    }
+
+    private static bool HasActiveRemoteSession(string userSid)
+    {
+        if (!Native.WTSEnumerateSessions(
+                IntPtr.Zero,
+                0,
+                1,
+                out var sessions,
+                out var count))
+            throw new InvalidOperationException(
+                "Active RDP session enumeration failed.");
+        try
+        {
+            var size = Marshal.SizeOf<Native.WtsSessionInfo>();
+            for (var index = 0; index < count; index++)
+            {
+                var session = Marshal.PtrToStructure<Native.WtsSessionInfo>(
+                    IntPtr.Add(sessions, index * size));
+                if (session.SessionId == 0 ||
+                    session.State != Native.WtsConnectState.Active ||
+                    QueryProtocol(session.SessionId) != 2 ||
+                    !Native.WTSQueryUserToken(
+                        (uint)session.SessionId,
+                        out var token))
+                    continue;
+                try
+                {
+                    using var identity = new WindowsIdentity(token);
+                    if (string.Equals(
+                            identity.User?.Value,
+                            userSid,
+                            StringComparison.Ordinal))
+                        return true;
+                }
+                finally
+                {
+                    Native.CloseHandle(token);
+                }
+            }
+            return false;
+        }
+        finally
+        {
+            Native.WTSFreeMemory(sessions);
+        }
+    }
+
+    private static ushort QueryProtocol(int sessionId)
+    {
+        if (!Native.WTSQuerySessionInformation(
+                IntPtr.Zero,
+                (uint)sessionId,
+                Native.WtsInfoClass.ClientProtocolType,
+                out var buffer,
+                out var bytes))
+            throw new InvalidOperationException(
+                "Active RDP session protocol query failed.");
+        try
+        {
+            if (bytes < sizeof(ushort))
+                throw new InvalidDataException(
+                    "Active RDP session protocol is invalid.");
+            return unchecked((ushort)Marshal.ReadInt16(buffer));
+        }
+        finally
+        {
+            Native.WTSFreeMemory(buffer);
+        }
+    }
+
+    private static class Native
+    {
+        internal enum WtsConnectState
+        {
+            Active = 0
+        }
+
+        internal enum WtsInfoClass
+        {
+            ClientProtocolType = 16
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        internal struct WtsSessionInfo
+        {
+            internal int SessionId;
+            internal nint StationName;
+            internal WtsConnectState State;
+        }
+
+        [DllImport(
+            "Wtsapi32.dll",
+            EntryPoint = "WTSEnumerateSessionsW",
+            SetLastError = true,
+            CharSet = CharSet.Unicode)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool WTSEnumerateSessions(
+            nint server,
+            int reserved,
+            int version,
+            out nint sessionInfo,
+            out int count);
+
+        [DllImport(
+            "Wtsapi32.dll",
+            EntryPoint = "WTSQuerySessionInformationW",
+            SetLastError = true,
+            CharSet = CharSet.Unicode)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool WTSQuerySessionInformation(
+            nint server,
+            uint sessionId,
+            WtsInfoClass infoClass,
+            out nint buffer,
+            out uint bytesReturned);
+
+        [DllImport("Wtsapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool WTSQueryUserToken(
+            uint sessionId,
+            out nint token);
+
+        [DllImport("Wtsapi32.dll")]
+        internal static extern void WTSFreeMemory(nint memory);
+
+        [DllImport("Kernel32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool CloseHandle(nint handle);
     }
 
     private static string Escape(string value) =>
