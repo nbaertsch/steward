@@ -380,13 +380,14 @@ foreach ($related in $relatedProducts) {
 }
 $preMsiTaskSnapshot = $null
 $msiexec = Join-Path $env:SystemRoot 'System32\msiexec.exe'
-$log = Join-Path $env:ProgramData (
-    if ([string]::IsNullOrWhiteSpace($AdministrativeRoot)) {
-        'Steward\install\steward-endpoint-msi.log'
-    } else {
-        'Steward\install\steward-endpoint-admin-' +
-        [guid]::NewGuid().ToString('N') + '.log'
-    })
+$logRelativePath = if (
+    [string]::IsNullOrWhiteSpace($AdministrativeRoot)) {
+    'Steward\install\steward-endpoint-msi.log'
+} else {
+    'Steward\install\steward-endpoint-admin-' +
+    [guid]::NewGuid().ToString('N') + '.log'
+}
+$log = Join-Path $env:ProgramData $logRelativePath
 New-Item -ItemType Directory -Path (Split-Path -Parent $log) -Force | Out-Null
 $administrativeStateRoot = Join-Path $env:ProgramData `
     'Steward\install\Endpoint'
@@ -687,11 +688,12 @@ if (-not [string]::IsNullOrWhiteSpace($AdministrativeRoot)) {
 }
 $replacementCommitted = $true
 Remove-Item -LiteralPath $rollbackDirectory -Recurse -Force
-Write-Output $(if ([string]::IsNullOrWhiteSpace($AdministrativeRoot)) {
+$successMessage = if ([string]::IsNullOrWhiteSpace($AdministrativeRoot)) {
     'STEWARD_ENDPOINT_MSI_INSTALLED'
 } else {
     'STEWARD_ENDPOINT_ADMINISTRATIVE_IMAGE_PROVISIONED'
-})
+}
+Write-Output $successMessage
 } finally {
     $rollbackFailures = [Collections.Generic.List[string]]::new()
     if (-not $administrativeCommitted) {
