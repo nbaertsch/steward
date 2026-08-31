@@ -206,7 +206,7 @@ resources:
                 $handler.Dispose()
               }
               if ((Get-FileHash -LiteralPath $bootstrapPath -Algorithm SHA256).Hash -ne
-                  'ECAF033B1CC60F5134F85F5DE24B53F99EA8BF128B9C8E3F09D6A8174FCC9CA9') {
+                  '030DF6C7D903FE2F16C6606E9BE352E79BB007834089D22CCBB8E908CA793CA1') {
                 throw 'Steward endpoint bootstrap script hash mismatch.'
               }
               $content = Get-Content -LiteralPath $bootstrapPath -Raw
