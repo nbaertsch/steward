@@ -1,9 +1,4 @@
-$schema: https://raw.githubusercontent.com/PowerShell/DSC/main/schemas/2023/08/config/document.json
-
-metadata:
-  winget:
-    processor:
-      identifier: dscv3
+$schema: https://aka.ms/dsc/schemas/v3/bundled/config/document.json
 
 resources:
   - name: Steward endpoint
@@ -11,13 +6,13 @@ resources:
     properties:
       executable: powershell.exe
       arguments:
-        "0": -NoLogo
-        "1": -NoProfile
-        "2": -NonInteractive
-        "3": -ExecutionPolicy
-        "4": Bypass
-        "5": -Command
-        "6": |
+        - -NoLogo
+        - -NoProfile
+        - -NonInteractive
+        - -ExecutionPolicy
+        - Bypass
+        - -Command
+        - |
           & {
             $ErrorActionPreference = 'Stop'
             $systemSid = [Security.Principal.SecurityIdentifier]::new(
@@ -81,20 +76,57 @@ resources:
                 throw "Steward protected path ACL verification failed: $Path"
               }
             }
+            function Assert-StewardPath {
+              param(
+                [Parameter(Mandatory = $true)]
+                [string]$Path
+              )
+              $item = Get-Item -LiteralPath $Path -Force
+              if (($item.Attributes -band
+                  [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "Steward trusted path is a reparse point: $Path"
+              }
+              $actual = Get-Acl -LiteralPath $Path
+              $ownerSid = ([Security.Principal.NTAccount]$actual.Owner).
+                Translate([Security.Principal.SecurityIdentifier])
+              $rules = @($actual.GetAccessRules(
+                $true,
+                $true,
+                [Security.Principal.SecurityIdentifier]))
+              $trusted = @($systemSid.Value, $administratorsSid.Value)
+              if (-not $actual.AreAccessRulesProtected -or
+                  $ownerSid.Value -ne $systemSid.Value -or
+                  $rules.Count -ne 2 -or
+                  $rules.Where({
+                    $_.IdentityReference.Value -notin $trusted -or
+                    $_.AccessControlType -ne
+                      [Security.AccessControl.AccessControlType]::Allow -or
+                    ($_.FileSystemRights -band
+                      [Security.AccessControl.FileSystemRights]::FullControl) -ne
+                      [Security.AccessControl.FileSystemRights]::FullControl
+                  }).Count -ne 0) {
+                throw "Steward trusted path ACL verification failed: $Path"
+              }
+            }
             $programDataItem = Get-Item -LiteralPath $env:ProgramData -Force
             if (($programDataItem.Attributes -band
                 [IO.FileAttributes]::ReparsePoint) -ne 0) {
               throw 'ProgramData cannot be a reparse point.'
             }
             $stewardRoot = Join-Path $env:ProgramData 'Steward'
-            $installRoot = 'C:\ProgramData\Steward\install'
+            $installRoot = Join-Path $stewardRoot 'install'
             Protect-StewardPath -Path $stewardRoot -Directory $true
             Protect-StewardPath -Path $installRoot -Directory $true
             $argumentPath = Join-Path $installRoot 'bootstrap-args.json'
             if (-not (Test-Path -LiteralPath $argumentPath -PathType Leaf)) {
               throw 'Steward endpoint bootstrap arguments are missing.'
             }
-            Protect-StewardPath -Path $argumentPath -Directory $false
+            Assert-StewardPath -Path $argumentPath
+            if (([DateTime]::UtcNow -
+                (Get-Item -LiteralPath $argumentPath).LastWriteTimeUtc) -gt
+                [TimeSpan]::FromMinutes(10)) {
+              throw 'Steward endpoint bootstrap arguments are stale.'
+            }
             $argumentStream = [IO.File]::Open(
               $argumentPath,
               [IO.FileMode]::Open,
@@ -197,7 +229,3 @@ resources:
                 -ErrorAction SilentlyContinue
             }
           }
-        treatAsArray: true
-    metadata:
-      winget:
-        securityContext: elevated
