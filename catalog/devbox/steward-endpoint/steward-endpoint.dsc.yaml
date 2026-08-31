@@ -115,9 +115,11 @@ resources:
             }
             $stewardRoot = Join-Path $env:ProgramData 'Steward'
             $installRoot = Join-Path $stewardRoot 'install'
+            $handoffRoot = Join-Path $stewardRoot 'handoff'
             Protect-StewardPath -Path $stewardRoot -Directory $true
             Protect-StewardPath -Path $installRoot -Directory $true
-            $argumentPath = Join-Path $installRoot 'bootstrap-args.json'
+            Protect-StewardPath -Path $handoffRoot -Directory $true
+            $argumentPath = Join-Path $handoffRoot 'bootstrap-args.json'
             if (-not (Test-Path -LiteralPath $argumentPath -PathType Leaf)) {
               throw 'Steward endpoint bootstrap arguments are missing.'
             }
