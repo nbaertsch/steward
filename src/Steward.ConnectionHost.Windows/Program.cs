@@ -15,7 +15,14 @@ var options = new ConnectionHostOptions
         StringComparison.OrdinalIgnoreCase),
     PipeName = Environment.GetEnvironmentVariable(
         "STEWARD_CONNECTION_HOST_PIPE_NAME") ??
-        "Steward.ConnectionHost.v1"
+        "Steward.ConnectionHost.v1",
+    DiagnosticSink = string.Equals(
+        Environment.GetEnvironmentVariable(
+            "STEWARD_CONNECTION_HOST_DIAGNOSTICS"),
+        "true",
+        StringComparison.OrdinalIgnoreCase)
+        ? Console.Error.WriteLine
+        : null
 };
 var rdCoreEnabled = string.Equals(
     Environment.GetEnvironmentVariable(
@@ -108,6 +115,12 @@ try
         var binding = await identity.GetBindingAsync(
                 CancellationToken.None)
             .ConfigureAwait(false);
+        var report = new RdCoreCompatibilityProbe().Inspect();
+        var artifacts = report.Artifacts
+            ?? throw new InvalidOperationException(
+                "Compatible Windows App artifacts are unavailable.");
+        var brokerUserAgent =
+            "win365.nxt/" + artifacts.PackageVersion;
         var rdCoreOptions = new RdCoreIntegrationOptions
         {
             Enabled = true,
@@ -121,19 +134,38 @@ try
                 DevBoxConnectionIdentityConstants.WindowsAppClientId,
             ClaimsRedirectUri =
                 DevBoxConnectionIdentityConstants
-                    .WindowsAppBrokerRedirectUri
+                    .WindowsAppBrokerRedirectUri,
+            OperationTimeout = TimeSpan.FromSeconds(
+                ParseBoundedSeconds(
+                    "STEWARD_RDCORE_OPERATION_TIMEOUT_SECONDS",
+                    15,
+                    60)),
+            DiagnosticSink = options.DiagnosticSink is null
+                ? null
+                : value => options.DiagnosticSink(
+                    FilterRdCoreDiagnostic(value))
         };
-        var report = new RdCoreCompatibilityProbe().Inspect();
-        var artifacts = report.Artifacts
-            ?? throw new InvalidOperationException(
-                "Compatible Windows App artifacts are unavailable.");
         compatibility = new RdCoreCompatibilityInspector(report);
-        var catalog = new RdCoreAvdResourceCatalog(
-            report,
-            rdCoreOptions);
         http = new HttpDevBoxBrokerHttpTransport(identity);
+        var catalog = new HttpDevBoxAvdResourceCatalog(
+            rdCoreOptions.AvdFeedUri ??
+                throw new InvalidOperationException(
+                    "The production AVD feed URI is unavailable."),
+            http,
+            brokerUserAgent);
         resolver = new DevBoxConnectionResolver(
-            new DevBoxBrokerFeedResolver(identity, catalog, http));
+            new DevBoxBrokerFeedResolver(
+                identity,
+                catalog,
+                http,
+                new()
+                {
+                    CatalogTimeout = rdCoreOptions.OperationTimeout,
+                    RdpTimeout = rdCoreOptions.OperationTimeout,
+                    MaximumResources = 1024,
+                    AllowSetCookieResponse = true,
+                    UserAgent = brokerUserAgent
+                }));
         runtime = new ProductionRdCoreConnectionRuntime(
             new WindowsAppIsolatedConnectionLeaseFactory(
                 report,
@@ -252,6 +284,42 @@ static Uri? ParseUri(string? value) =>
     Uri.TryCreate(value, UriKind.Absolute, out var uri)
         ? uri
         : null;
+
+static int ParseBoundedSeconds(
+    string name,
+    int fallback,
+    int maximum) =>
+    Environment.GetEnvironmentVariable(name) is { Length: > 0 } value
+        ? int.TryParse(value, out var seconds) &&
+          seconds > 0 &&
+          seconds <= maximum
+            ? seconds
+            : throw new InvalidOperationException(
+                $"Production setting '{name}' is invalid.")
+        : fallback;
+
+static string FilterRdCoreDiagnostic(string value)
+{
+    var failed = System.Text.RegularExpressions.Regex.Match(
+        value,
+        @"^(catalog-[a-z-]+-failed-[A-Za-z0-9_.]+-0x[0-9A-Fa-f]{8})");
+    if (failed.Success)
+        return failed.Groups[1].Value.Length <= 128
+            ? failed.Groups[1].Value
+            : "catalog-diagnostic-redacted";
+    if (value.Contains("-failed-", StringComparison.Ordinal) ||
+        value.Contains("-reason-", StringComparison.Ordinal) ||
+        value.Contains("-detail-", StringComparison.Ordinal))
+        return "catalog-diagnostic-redacted";
+    return value.Length <= 128 &&
+           (value.StartsWith("catalog-", StringComparison.Ordinal) ||
+            value.StartsWith("workspace-", StringComparison.Ordinal)) &&
+           value.All(character =>
+               char.IsAsciiLetterOrDigit(character) ||
+               character is '-' or '_')
+        ? value
+        : "catalog-diagnostic-redacted";
+}
 
 static string RequireSetting(string name) =>
     Environment.GetEnvironmentVariable(name) is { Length: > 0 } value
