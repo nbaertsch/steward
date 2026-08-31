@@ -396,10 +396,9 @@ internal sealed class DirectWebSocketConnection : ITransportConnection
             while (_socket.State == WebSocketState.Open)
             {
                 ThrowIfExpired();
-                var record = await DirectWebSocketSession.RunWithTimeoutAsync(
-                    token => DirectWebSocketSession.ReceiveRecordAsync(
-                        _socket, _options.MaximumWireFrameBytes, token),
-                    _options.WireOperationTimeout,
+                var record = await DirectWebSocketSession.ReceiveRecordAsync(
+                    _socket,
+                    _options.MaximumWireFrameBytes,
                     cancellationToken);
                 var recordSequence = checked(++_receiveRecord);
                 if (recordSequence > _options.RekeyAfterFrames)

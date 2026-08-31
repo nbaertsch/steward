@@ -335,13 +335,15 @@ public sealed class RdpDvcProtocolTests
             new(
                 TransportEndpointRole.Control,
                 controlKey,
-                controlExpected));
+                controlExpected,
+                OperationTimeout: TimeSpan.FromMilliseconds(50)));
         var nodeAcceptor = new SecureStreamConnectionAcceptor(
             new OneStreamAcceptor(dvcConnections[0].Stream),
             new(
                 TransportEndpointRole.Node,
                 nodeKey,
-                nodeExpected));
+                nodeExpected,
+                OperationTimeout: TimeSpan.FromMilliseconds(50)));
         var hello = Hello();
         var established = await Task.WhenAll(
             controlCarrier.ConnectAsync(hello).AsTask(),
@@ -356,12 +358,20 @@ public sealed class RdpDvcProtocolTests
             1,
             new byte[] { 4, 5, 6 });
 
-        await control.SendAsync(frame);
-        await foreach (var received in node.ReceiveAsync())
-        {
-            Assert.Equal(frame.Payload.ToArray(), received.Payload.ToArray());
-            break;
-        }
+        using var timeout = new CancellationTokenSource(
+            TimeSpan.FromSeconds(2));
+        await using var received = node
+            .ReceiveAsync(timeout.Token)
+            .GetAsyncEnumerator();
+        var waiting = received.MoveNextAsync().AsTask();
+        await Task.Delay(200, timeout.Token);
+
+        await control.SendAsync(frame, timeout.Token);
+
+        Assert.True(await waiting);
+        Assert.Equal(
+            frame.Payload.ToArray(),
+            received.Current.Payload.ToArray());
     }
 
     private static SessionHello Hello() =>
