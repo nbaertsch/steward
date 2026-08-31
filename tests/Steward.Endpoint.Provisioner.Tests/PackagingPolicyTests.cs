@@ -85,6 +85,8 @@ public sealed class PackagingPolicyTests
             task,
             StringComparison.Ordinal);
         Assert.Contains("controlIdentity:", task, StringComparison.Ordinal);
+        Assert.Contains("nodeUserAccount:", task, StringComparison.Ordinal);
+        Assert.Contains("nodeUserSid:", task, StringComparison.Ordinal);
         Assert.Contains(
             "release-assets\\\\.githubusercontent\\\\.com",
             task,

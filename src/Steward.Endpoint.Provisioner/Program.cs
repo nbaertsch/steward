@@ -105,7 +105,9 @@ internal sealed record EndpointProvisioningConfig(
     string ProductVersion,
     string BootstrapEncryptionPublicKey,
     string ControlSigningPublicKey,
-    string ControlIdentity);
+    string ControlIdentity,
+    string? ProvisionedUserAccount = null,
+    string? ProvisionedUserSid = null);
 
 internal sealed record EndpointArtifactAttestation(
     int Version,
@@ -266,7 +268,9 @@ internal interface IEndpointTaskRegistrar
         string installRoot,
         string stateRoot,
         EndpointMachineIdentity identity,
-        string controlIdentity);
+        string controlIdentity,
+        string userAccount,
+        string userSid);
 }
 
 internal interface IEndpointSecurity
@@ -440,7 +444,7 @@ internal sealed class EndpointProvisioner(
                     options.StateRoot,
                     identity);
                 security.Harden(workingRoot);
-                var user = tasks.ResolveUser();
+                var user = ResolveUser(config);
                 security.GrantUser(workingRoot, user.Sid);
                 taskSnapshot ??= tasks.Capture(identity);
                 taskSnapshotIdentity ??= identity;
@@ -465,7 +469,9 @@ internal sealed class EndpointProvisioner(
                             options.InstallRoot,
                             options.StateRoot,
                             identity,
-                            config.ControlIdentity))
+                            config.ControlIdentity,
+                            user.Account,
+                            user.Sid))
                         throw new InvalidOperationException(
                             "Endpoint scheduled tasks failed exact health validation.");
                     WriteReceipt(
@@ -627,6 +633,13 @@ internal sealed class EndpointProvisioner(
             JsonSerializer.SerializeToUtf8Bytes(identity, Json));
         return identity;
     }
+
+    private ProvisionedUser ResolveUser(
+        EndpointProvisioningConfig config) =>
+        config.ProvisionedUserAccount is { Length: > 0 } account &&
+        config.ProvisionedUserSid is { Length: > 0 } sid
+            ? new(account, sid)
+            : tasks.ResolveUser();
 
     private EndpointMachineIdentity LoadIdentity(string path)
     {
@@ -842,6 +855,13 @@ internal sealed class EndpointProvisioner(
             string.IsNullOrWhiteSpace(config.BootstrapEncryptionPublicKey) ||
             string.IsNullOrWhiteSpace(config.ControlSigningPublicKey) ||
             string.IsNullOrWhiteSpace(config.ControlIdentity) ||
+            (string.IsNullOrWhiteSpace(config.ProvisionedUserAccount) !=
+             string.IsNullOrWhiteSpace(config.ProvisionedUserSid)) ||
+            (config.ProvisionedUserAccount is { Length: > 0 } account &&
+             (account.Length > 256 || account.Any(char.IsControl))) ||
+            (config.ProvisionedUserSid is { Length: > 0 } sid &&
+             (!sid.StartsWith("S-1-", StringComparison.Ordinal) ||
+              sid.Length > 184)) ||
             !File.Exists(Path.Combine(
                 options.InstallRoot,
                 "Steward.RdpDvc.Server.Windows.dll")) ||
@@ -1025,11 +1045,14 @@ internal sealed class EndpointProvisioner(
                 StringComparison.Ordinal) ||
             !RequiredStateFiles(options.StateRoot).All(files.FileExists))
             return false;
+        var user = ResolveUser(config);
         if (!tasks.IsHealthy(
             options.InstallRoot,
             options.StateRoot,
             identity,
-            config.ControlIdentity))
+            config.ControlIdentity,
+            user.Account,
+            user.Sid))
             return false;
         try
         {
@@ -1322,6 +1345,10 @@ internal sealed class PowerShellTaskRegistrar : IEndpointTaskRegistrar
             try {
               Register-ScheduledTask -TaskName $keeperName -TaskPath '\Steward\' -Action $keeper -Trigger $trigger -Principal $principal -Settings $settings -Force|Out-Null
               Register-ScheduledTask -TaskName $serverName -TaskPath '\Steward\' -Action $server -Trigger $trigger -Principal $principal -Settings $settings -Force|Out-Null
+              $hasProfile=@(Get-CimInstance Win32_UserProfile|Where-Object{
+                $_.SID-eq'{{Escape(userSid)}}'-and$_.Loaded
+              }).Count-eq1
+              if(!$hasProfile){return}
               Start-ScheduledTask -TaskName $keeperName -TaskPath '\Steward\'
               Start-Sleep -Milliseconds 500
               Remove-Item -LiteralPath '{{Escape(Path.Combine(stateRoot, "readiness.json"))}}' -Force -ErrorAction SilentlyContinue
@@ -1376,14 +1403,15 @@ internal sealed class PowerShellTaskRegistrar : IEndpointTaskRegistrar
         string installRoot,
         string stateRoot,
         EndpointMachineIdentity identity,
-        string controlIdentity)
+        string controlIdentity,
+        string userAccount,
+        string userSid)
     {
-        var user = ResolveUser();
         var expected = BuildActions(
             installRoot,
             stateRoot,
             identity,
-            user.Account,
+            userAccount,
             controlIdentity);
         var script = $$"""
             $a=Get-ScheduledTask -TaskPath '\Steward\' -TaskName 'HandleKeeper-{{identity.HostId:N}}' -ErrorAction SilentlyContinue
@@ -1396,8 +1424,8 @@ internal sealed class PowerShellTaskRegistrar : IEndpointTaskRegistrar
               $b.Actions[0].Execute-eq'{{Escape(expected.ServerExecutable)}}'-and
               $b.Actions[0].Arguments-eq'{{Escape(expected.ServerArguments)}}'-and
               $b.Actions[0].WorkingDirectory-eq'{{Escape(installRoot)}}'-and
-              $a.Principal.UserId-eq'{{Escape(user.Account)}}'-and
-              $b.Principal.UserId-eq'{{Escape(user.Account)}}'-and
+              $a.Principal.UserId-eq'{{Escape(userAccount)}}'-and
+              $b.Principal.UserId-eq'{{Escape(userAccount)}}'-and
               $a.Principal.LogonType-eq'Interactive'-and
               $b.Principal.LogonType-eq'Interactive'-and
               $a.Principal.RunLevel-eq'Limited'-and
@@ -1405,8 +1433,8 @@ internal sealed class PowerShellTaskRegistrar : IEndpointTaskRegistrar
               $a.Triggers.Count-eq1-and$b.Triggers.Count-eq1-and
               $a.Triggers[0].CimClass.CimClassName-eq'MSFT_TaskLogonTrigger'-and
               $b.Triggers[0].CimClass.CimClassName-eq'MSFT_TaskLogonTrigger'-and
-              $a.Triggers[0].UserId-eq'{{Escape(user.Account)}}'-and
-              $b.Triggers[0].UserId-eq'{{Escape(user.Account)}}'-and
+              $a.Triggers[0].UserId-eq'{{Escape(userAccount)}}'-and
+              $b.Triggers[0].UserId-eq'{{Escape(userAccount)}}'-and
               $a.Triggers[0].Enabled-and$b.Triggers[0].Enabled-and
               $a.Settings.Enabled-and$b.Settings.Enabled-and
               $a.Settings.Hidden-and$b.Settings.Hidden-and
@@ -1419,8 +1447,17 @@ internal sealed class PowerShellTaskRegistrar : IEndpointTaskRegistrar
               $a.Settings.ExecutionTimeLimit-eq'PT0S'-and
               $b.Settings.ExecutionTimeLimit-eq'PT0S'-and
               $a.Settings.MultipleInstances-eq'IgnoreNew'-and
-              $b.Settings.MultipleInstances-eq'IgnoreNew'-and
-              $a.State-eq'Running'-and$b.State-eq'Running'
+              $b.Settings.MultipleInstances-eq'IgnoreNew'
+            $hasProfile=@(Get-CimInstance Win32_UserProfile|Where-Object{
+              $_.SID-eq'{{Escape(userSid)}}'-and$_.Loaded
+            }).Count-eq1
+            if(!$hasProfile){
+              $ok=$ok-and$a.State-in@('Ready','Running')-and
+                $b.State-in@('Ready','Running')
+              if($ok){'true'}else{'false'}
+              return
+            }
+            $ok=$ok-and$a.State-eq'Running'-and$b.State-eq'Running'
             $ready=$null
             if(Test-Path -LiteralPath '{{Escape(Path.Combine(stateRoot, "readiness.json"))}}'){
               try{$ready=Get-Content -LiteralPath '{{Escape(Path.Combine(stateRoot, "readiness.json"))}}' -Raw|ConvertFrom-Json}catch{$ready=$null}

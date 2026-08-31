@@ -5,6 +5,8 @@ param(
     [string]$BootstrapEncryptionPublicKeyBase64,
     [string]$ControlSigningPublicKeyBase64,
     [string]$ControlIdentity = 'control',
+    [string]$NodeUserAccount,
+    [string]$NodeUserSid,
     [switch]$Machine
 )
 
@@ -89,6 +91,10 @@ try {
             [string]::IsNullOrWhiteSpace($ControlSigningPublicKeyBase64)) {
             throw 'Machine install tests require runtime trust public keys.'
         }
+        if ([string]::IsNullOrWhiteSpace($NodeUserAccount) -or
+            [string]::IsNullOrWhiteSpace($NodeUserSid)) {
+            throw 'Machine install tests require assigned user identity.'
+        }
         $principal = New-Object Security.Principal.WindowsPrincipal(
             [Security.Principal.WindowsIdentity]::GetCurrent())
         if (-not $principal.IsInRole(
@@ -100,7 +106,9 @@ try {
             -BootstrapEncryptionPublicKeyBase64 `
                 $BootstrapEncryptionPublicKeyBase64 `
             -ControlSigningPublicKeyBase64 $ControlSigningPublicKeyBase64 `
-            -ControlIdentity $ControlIdentity
+            -ControlIdentity $ControlIdentity `
+            -NodeUserAccount $NodeUserAccount `
+            -NodeUserSid $NodeUserSid
         $state = Join-Path $env:ProgramData 'Steward\Endpoint'
         $identityPath = Join-Path $state 'identity.json'
         $first = Get-Content $identityPath -Raw
@@ -109,7 +117,9 @@ try {
             -BootstrapEncryptionPublicKeyBase64 `
                 $BootstrapEncryptionPublicKeyBase64 `
             -ControlSigningPublicKeyBase64 $ControlSigningPublicKeyBase64 `
-            -ControlIdentity $ControlIdentity
+            -ControlIdentity $ControlIdentity `
+            -NodeUserAccount $NodeUserAccount `
+            -NodeUserSid $NodeUserSid
         $second = Get-Content $identityPath -Raw
         if ($first -ne $second) {
             throw 'MSI repair changed the machine identity.'

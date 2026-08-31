@@ -7,6 +7,10 @@ param(
     [string]$ControlSigningPublicKeyBase64,
     [Parameter(Mandatory = $true)]
     [string]$ControlIdentity,
+    [Parameter(Mandatory = $true)]
+    [string]$NodeUserAccount,
+    [Parameter(Mandatory = $true)]
+    [string]$NodeUserSid,
     [switch]$ValidateOnly
 )
 
@@ -25,7 +29,9 @@ if ($BootstrapEncryptionPublicKeyBase64 -notmatch
         '^[A-Za-z0-9+/]{300,1600}={0,2}$' -or
     $ControlSigningPublicKeyBase64 -notmatch
         '^[A-Za-z0-9+/]{80,1600}={0,2}$' -or
-    $ControlIdentity -notmatch '^[A-Za-z0-9._:@/-]{1,200}$') {
+    $ControlIdentity -notmatch '^[A-Za-z0-9._:@/-]{1,200}$' -or
+    $NodeUserAccount -notmatch '^[A-Za-z0-9._@\\/-]{3,256}$' -or
+    $NodeUserSid -notmatch '^S-1-12-1-(\d+-){2}\d+-\d+$') {
     throw 'Steward endpoint runtime trust arguments are invalid.'
 }
 $downloadRoot = Join-Path $env:ProgramData (
@@ -225,6 +231,8 @@ if ($bootstrapBytes.Length -notin 294, 422, 550 -or
     bootstrapEncryptionPublicKey = 'bootstrap-envelope.spki'
     controlSigningPublicKey = 'control-signing.spki'
     controlIdentity = $ControlIdentity
+    provisionedUserAccount = $NodeUserAccount
+    provisionedUserSid = $NodeUserSid
 } | ConvertTo-Json | Set-Content -LiteralPath $config -Encoding utf8
 $installer = New-Object -ComObject WindowsInstaller.Installer
 $database = $installer.OpenDatabase($msi, 0)

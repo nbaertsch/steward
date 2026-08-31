@@ -593,7 +593,9 @@ public sealed class ProvisionerTests : IDisposable
             string installRoot,
             string stateRoot,
             EndpointMachineIdentity identity,
-            string controlIdentity) =>
+            string controlIdentity,
+            string userAccount,
+            string userSid) =>
             Registrations > 0;
     }
 
@@ -702,7 +704,9 @@ public sealed class ProvisionerTests : IDisposable
             string installRoot,
             string stateRoot,
             EndpointMachineIdentity identity,
-            string controlIdentity) =>
+            string controlIdentity,
+            string userAccount,
+            string userSid) =>
             true;
     }
 
@@ -734,7 +738,9 @@ public sealed class ProvisionerTests : IDisposable
             string installRoot,
             string stateRoot,
             EndpointMachineIdentity identity,
-            string controlIdentity) =>
+            string controlIdentity,
+            string userAccount,
+            string userSid) =>
             false;
     }
 
@@ -774,7 +780,9 @@ public sealed class ProvisionerTests : IDisposable
             string installRoot,
             string stateRoot,
             EndpointMachineIdentity identity,
-            string controlIdentity) =>
+            string controlIdentity,
+            string userAccount,
+            string userSid) =>
             Registrations > 0;
     }
 }
