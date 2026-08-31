@@ -170,7 +170,7 @@ resources:
               $client = [Net.Http.HttpClient]::new($handler)
               $client.Timeout = [TimeSpan]::FromMinutes(2)
               try {
-                $uri = [uri]'https://raw.githubusercontent.com/nbaertsch/steward/5a86851e43949eada5b4d126217379509fea21a4/catalog/devbox/steward-endpoint/Install-Steward.ps1'
+                $uri = [uri]'https://raw.githubusercontent.com/nbaertsch/steward/8d33bf42fdd4a87f4face56dbdf0af472dd378f1/catalog/devbox/steward-endpoint/Install-Steward.ps1'
                 $response = $client.GetAsync(
                   $uri,
                   [Net.Http.HttpCompletionOption]::ResponseHeadersRead
@@ -206,7 +206,7 @@ resources:
                 $handler.Dispose()
               }
               if ((Get-FileHash -LiteralPath $bootstrapPath -Algorithm SHA256).Hash -ne
-                  '0E11616601CA0C3831ACB820434A1D74ABCE9E6BB4E195F4949197571874C8C9') {
+                  'C07BFE96AA88492C94EBCA1614885E3081AE2CB0944FE670000C23FB838DF68A') {
                 throw 'Steward endpoint bootstrap script hash mismatch.'
               }
               $content = Get-Content -LiteralPath $bootstrapPath -Raw
@@ -227,7 +227,7 @@ resources:
                 -NodeUserAccount $arguments.nodeUserAccount `
                 -NodeUserSid $arguments.nodeUserSid `
                 -AdministrativeRoot (
-                  Join-Path $env:ProgramData 'Steward\install\Runtime\1.0.20')
+                  Join-Path $env:ProgramData 'Steward\install\Runtime\1.0.21')
             } finally {
               Remove-Item -LiteralPath $bootstrapPath -Force `
                 -ErrorAction SilentlyContinue
