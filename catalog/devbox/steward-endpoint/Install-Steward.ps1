@@ -610,18 +610,17 @@ if ($installExitCode -notin 0, 1641, 3010) {
     throw "Steward endpoint MSI failed with exit code $installExitCode."
 }
 if (-not [string]::IsNullOrWhiteSpace($AdministrativeRoot)) {
-    $provisioners = @(Get-ChildItem -LiteralPath $administrativeStaging `
-        -Filter 'Steward.Endpoint.Provisioner.exe' -File -Recurse)
-    if ($provisioners.Count -ne 1) {
+    $relativeProvisioner = Join-Path 'PFiles64\Steward' `
+        'Steward.Endpoint.Provisioner.exe'
+    $stagedProvisioner = Join-Path $administrativeStaging `
+        $relativeProvisioner
+    if (-not (Test-Path -LiteralPath $stagedProvisioner -PathType Leaf)) {
         throw 'Steward administrative image has an invalid provisioner layout.'
     }
-    if (($provisioners[0].Attributes -band
+    if (((Get-Item -LiteralPath $stagedProvisioner).Attributes -band
             [IO.FileAttributes]::ReparsePoint) -ne 0) {
         throw 'Steward administrative provisioner cannot be a reparse point.'
     }
-    $relativeProvisioner = $provisioners[0].FullName.Substring(
-        $administrativeStaging.Length).TrimStart(
-            [IO.Path]::DirectorySeparatorChar)
     if (Test-Path -LiteralPath $administrativeRootFull) {
         $administrativeBackup = Join-Path $allowedRoot (
             '.backup-' + [guid]::NewGuid().ToString('N'))
