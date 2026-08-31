@@ -452,6 +452,22 @@ if (-not [string]::IsNullOrWhiteSpace($AdministrativeRoot) -and
     if ($LASTEXITCODE -ne 0) {
         throw 'Steward administrative state ACL recovery failed.'
     }
+    $hasStateItems = @(
+        Get-ChildItem -LiteralPath $administrativeStateRoot `
+            -Force -ErrorAction Stop).Count -gt 0
+    & (Join-Path $env:SystemRoot 'System32\takeown.exe') `
+        /F $administrativeStateRoot /A /R /D Y /SKIPSL | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Steward administrative state descendant ownership recovery failed.'
+    }
+    if ($hasStateItems) {
+        & (Join-Path $env:SystemRoot 'System32\icacls.exe') `
+            (Join-Path $administrativeStateRoot '*') `
+            /reset /T /C /L | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Steward administrative state inheritance repair failed.'
+        }
+    }
     $stateItems = @(
         Get-ChildItem -LiteralPath $administrativeStateRoot `
             -Force -Recurse -ErrorAction Stop)
@@ -460,19 +476,6 @@ if (-not [string]::IsNullOrWhiteSpace($AdministrativeRoot) -and
                 [IO.FileAttributes]::ReparsePoint) -ne 0
         }).Count -ne 0) {
         throw 'Steward administrative state contains a reparse point.'
-    }
-    & (Join-Path $env:SystemRoot 'System32\takeown.exe') `
-        /F $administrativeStateRoot /A /R /D Y /SKIPSL | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        throw 'Steward administrative state descendant ownership recovery failed.'
-    }
-    if ($stateItems.Count -gt 0) {
-        & (Join-Path $env:SystemRoot 'System32\icacls.exe') `
-            (Join-Path $administrativeStateRoot '*') `
-            /reset /T /C /L | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            throw 'Steward administrative state inheritance repair failed.'
-        }
     }
 }
 $selectedStateRoot = if (

@@ -337,17 +337,7 @@ internal sealed class IcaclsEndpointSecurity : IEndpointSecurity
         if (!repairExistingChildren)
             return;
 
-        var hasChildren = false;
-        foreach (var path in Directory.EnumerateFileSystemEntries(
-                     root,
-                     "*",
-                     SearchOption.AllDirectories))
-        {
-            hasChildren = true;
-            if (File.GetAttributes(path).HasFlag(FileAttributes.ReparsePoint))
-                throw new InvalidDataException(
-                    "Endpoint state cannot contain reparse points.");
-        }
+        var hasChildren = Directory.EnumerateFileSystemEntries(root).Any();
         if (hasChildren)
             EndpointProvisioner.Run(
                 "icacls.exe",

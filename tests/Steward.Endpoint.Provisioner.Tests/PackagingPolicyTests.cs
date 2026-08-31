@@ -90,9 +90,14 @@ public sealed class PackagingPolicyTests
             script.IndexOf("/reset /T /C", StringComparison.Ordinal));
         Assert.True(
             script.IndexOf(
-                "administrative state contains a reparse point",
+                "/SKIPSL",
                 StringComparison.Ordinal) <
             script.IndexOf("/reset /T /C", StringComparison.Ordinal));
+        Assert.True(
+            script.IndexOf("/reset /T /C", StringComparison.Ordinal) <
+            script.IndexOf(
+                "administrative state contains a reparse point",
+                StringComparison.Ordinal));
         Assert.Contains(
             "STEWARD_ENDPOINT_ADMINISTRATIVE_IMAGE_PROVISIONED",
             script,
