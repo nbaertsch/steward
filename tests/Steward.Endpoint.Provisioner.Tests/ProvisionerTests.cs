@@ -185,7 +185,7 @@ public sealed class ProvisionerTests : IDisposable
             () => provisioner.Provision(
                 Options(install, config, state, "1.0.0")));
 
-        Assert.Equal(1, registrar.Registrations);
+        Assert.Equal(0, registrar.Registrations);
         Assert.Equal(1, registrar.Restores);
         Assert.False(Directory.Exists(state));
     }

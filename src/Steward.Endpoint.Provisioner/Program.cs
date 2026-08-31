@@ -157,7 +157,16 @@ internal sealed record EndpointProvisioningReceiptBody(
     string NodeIdentity,
     string Ciphertext,
     string NodeSigningPublicKey,
+    IReadOnlyList<Guid> ConnectionNonces,
     DateTimeOffset ProvisionedAtUtc);
+
+internal sealed record EndpointNonceState(
+    int Version,
+    Guid SessionId,
+    Guid HostId,
+    Guid NodeIncarnationId,
+    IReadOnlyList<Guid> Nonces,
+    int NextIndex);
 
 internal sealed record EndpointProvisioningReceipt(
     EndpointProvisioningReceiptBody Body,
@@ -447,7 +456,7 @@ internal sealed class EndpointProvisioner(
                 ValidateControlPublicKey(controlBytes);
                 files.WriteAtomic(controlPublicPath, controlBytes);
                 CryptographicOperations.ZeroMemory(controlBytes);
-                WriteNonceState(
+                var nonceState = WriteNonceState(
                     Path.Combine(workingRoot, "nonce-sequence.json"),
                     identity);
                 WriteNodeConfig(
@@ -470,6 +479,18 @@ internal sealed class EndpointProvisioner(
                 try
                 {
                     restoreTasks = true;
+                    WriteReceipt(
+                        Path.Combine(
+                            options.StateRoot,
+                            "bootstrap-receipt.json"),
+                        options,
+                        config,
+                        artifact,
+                        identity,
+                        authentication,
+                        node,
+                        nodePublic,
+                        nonceState.Nonces);
                     tasks.Register(
                         options.InstallRoot,
                         options.StateRoot,
@@ -486,17 +507,6 @@ internal sealed class EndpointProvisioner(
                             user.Sid))
                         throw new InvalidOperationException(
                             "Endpoint scheduled tasks failed exact health validation.");
-                    WriteReceipt(
-                        Path.Combine(
-                            options.StateRoot,
-                            "bootstrap-receipt.json"),
-                        options,
-                        config,
-                        artifact,
-                        identity,
-                        authentication,
-                        node,
-                        nodePublic);
                     restoreTasks = false;
                 }
                 catch
@@ -646,12 +656,16 @@ internal sealed class EndpointProvisioner(
         return identity;
     }
 
-    private ProvisionedUser ResolveUser(
-        EndpointProvisioningConfig config) =>
-        config.ProvisionedUserAccount is { Length: > 0 } account &&
-        config.ProvisionedUserSid is { Length: > 0 } sid
-            ? new(account, sid)
-            : tasks.ResolveUser();
+    private ProvisionedUser ResolveUser(EndpointProvisioningConfig config)
+    {
+        if (config.ProvisionedUserAccount is not { Length: > 0 } account ||
+            config.ProvisionedUserSid is not { Length: > 0 } sid)
+            return tasks.ResolveUser();
+        account = new System.Security.Principal.SecurityIdentifier(sid)
+            .Translate(typeof(System.Security.Principal.NTAccount))
+            .Value;
+        return new(account, sid);
+    }
 
     private EndpointMachineIdentity LoadIdentity(string path)
     {
@@ -729,7 +743,8 @@ internal sealed class EndpointProvisioner(
         EndpointMachineIdentity identity,
         byte[] authentication,
         ECDsa node,
-        byte[] nodePublic)
+        byte[] nodePublic,
+        IReadOnlyList<Guid> connectionNonces)
     {
         using var rsa = RSA.Create();
         var envelopePath = ResolveConfigFile(
@@ -759,7 +774,7 @@ internal sealed class EndpointProvisioner(
         try
         {
             var body = new EndpointProvisioningReceiptBody(
-                1,
+                2,
                 artifact.ProductVersion,
                 artifact.MsiSha256,
                 artifact.SourceRepository,
@@ -779,6 +794,7 @@ internal sealed class EndpointProvisioner(
                 identity.NodeIdentity,
                 Convert.ToBase64String(ciphertext),
                 Convert.ToBase64String(nodePublic),
+                connectionNonces,
                 DateTimeOffset.UtcNow);
             var canonical = JsonSerializer.SerializeToUtf8Bytes(body);
             var signature = node.SignData(
@@ -801,25 +817,21 @@ internal sealed class EndpointProvisioner(
         }
     }
 
-    private void WriteNonceState(
+    private EndpointNonceState WriteNonceState(
         string path,
         EndpointMachineIdentity identity)
     {
-        if (files.FileExists(path))
-            return;
-        files.WriteNew(
+        var state = new EndpointNonceState(
+            1,
+            identity.SessionId,
+            identity.HostId,
+            identity.IncarnationId,
+            [Guid.NewGuid(), Guid.NewGuid()],
+            0);
+        files.WriteAtomic(
             path,
-            JsonSerializer.SerializeToUtf8Bytes(
-                new
-                {
-                    version = 1,
-                    sessionId = identity.SessionId,
-                    hostId = identity.HostId,
-                    nodeIncarnationId = identity.IncarnationId,
-                    nonces = new[] { Guid.NewGuid(), Guid.NewGuid() },
-                    nextIndex = 0
-                },
-                Json));
+            JsonSerializer.SerializeToUtf8Bytes(state, Json));
+        return state;
     }
 
     private void WriteNodeConfig(
@@ -1161,16 +1173,34 @@ internal sealed class EndpointProvisioner(
             throw new InvalidDataException(
                 "Existing endpoint receipt is incomplete.");
         var body = receipt.Body;
-        if (body.Version != 1 ||
+        if (body.Version != 2 ||
             string.IsNullOrWhiteSpace(body.ProductVersion) ||
             body.ControlIdentity != identity.ControlIdentity ||
             body.BootstrapOperationId != identity.BootstrapOperationId ||
             body.SessionId != identity.SessionId ||
             body.HostId != identity.HostId ||
             body.IncarnationId != identity.IncarnationId ||
-            body.NodeIdentity != identity.NodeIdentity)
+            body.NodeIdentity != identity.NodeIdentity ||
+            body.ConnectionNonces is not { Count: 2 } ||
+            body.ConnectionNonces.Any(value => value == Guid.Empty) ||
+            body.ConnectionNonces.Distinct().Count() != 2)
             throw new InvalidDataException(
                 "Existing endpoint receipt does not match current state.");
+        var noncePath = Path.Combine(stateRoot, "nonce-sequence.json");
+        var nonceState = JsonSerializer.Deserialize<EndpointNonceState>(
+                             files.ReadAllText(noncePath),
+                             Json)
+                         ?? throw new InvalidDataException(
+                             "Existing endpoint nonce state is invalid.");
+        if (nonceState.Version != 1 ||
+            nonceState.SessionId != identity.SessionId ||
+            nonceState.HostId != identity.HostId ||
+            nonceState.NodeIncarnationId != identity.IncarnationId ||
+            nonceState.NextIndex != 0 ||
+            nonceState.Nonces.Count != 2 ||
+            !nonceState.Nonces.SequenceEqual(body.ConnectionNonces))
+            throw new InvalidDataException(
+                "Existing endpoint nonce state does not match the receipt.");
         var privateBytes = files.ReadAllBytes(
             Path.Combine(stateRoot, "keys", "node-signing.pk8"));
         try
@@ -1349,9 +1379,8 @@ internal sealed class PowerShellTaskRegistrar : IEndpointTaskRegistrar
             $serverXml=if($null-ne$serverPrior){Export-ScheduledTask -TaskName $serverName -TaskPath '\Steward\'}else{$null}
             Stop-ScheduledTask -TaskName $keeperName -TaskPath '\Steward\' -ErrorAction SilentlyContinue
             Stop-ScheduledTask -TaskName $serverName -TaskPath '\Steward\' -ErrorAction SilentlyContinue
-            $usersGroup=([Security.Principal.SecurityIdentifier]'S-1-5-32-545').Translate([Security.Principal.NTAccount]).Value
-            $trigger=New-ScheduledTaskTrigger -AtLogOn
-            $principal=New-ScheduledTaskPrincipal -GroupId $usersGroup -RunLevel Limited
+            $trigger=New-ScheduledTaskTrigger -AtLogOn -User '{{Escape(userAccount)}}'
+            $principal=New-ScheduledTaskPrincipal -UserId '{{Escape(userAccount)}}' -LogonType Interactive -RunLevel Limited
             $settings=New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -Hidden -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
             $keeper=New-ScheduledTaskAction -Execute '{{Escape(actions.KeeperExecutable)}}' -Argument '{{Escape(actions.KeeperArguments)}}' -WorkingDirectory '{{Escape(installRoot)}}'
             $server=New-ScheduledTaskAction -Execute '{{Escape(actions.ServerExecutable)}}' -Argument '{{Escape(actions.ServerArguments)}}' -WorkingDirectory '{{Escape(installRoot)}}'
@@ -1429,11 +1458,11 @@ internal sealed class PowerShellTaskRegistrar : IEndpointTaskRegistrar
         var script = $$"""
             $a=Get-ScheduledTask -TaskPath '\Steward\' -TaskName 'HandleKeeper-{{identity.HostId:N}}' -ErrorAction SilentlyContinue
             $b=Get-ScheduledTask -TaskPath '\Steward\' -TaskName 'RdpDvcEndpoint-{{identity.HostId:N}}' -ErrorAction SilentlyContinue
-            $aGroupSid=if($null-ne$a-and![string]::IsNullOrWhiteSpace($a.Principal.GroupId)){
-              try{([Security.Principal.NTAccount]$a.Principal.GroupId).Translate([Security.Principal.SecurityIdentifier]).Value}catch{$null}
+            $aUserSid=if($null-ne$a-and![string]::IsNullOrWhiteSpace($a.Principal.UserId)){
+              try{([Security.Principal.NTAccount]$a.Principal.UserId).Translate([Security.Principal.SecurityIdentifier]).Value}catch{$null}
             }else{$null}
-            $bGroupSid=if($null-ne$b-and![string]::IsNullOrWhiteSpace($b.Principal.GroupId)){
-              try{([Security.Principal.NTAccount]$b.Principal.GroupId).Translate([Security.Principal.SecurityIdentifier]).Value}catch{$null}
+            $bUserSid=if($null-ne$b-and![string]::IsNullOrWhiteSpace($b.Principal.UserId)){
+              try{([Security.Principal.NTAccount]$b.Principal.UserId).Translate([Security.Principal.SecurityIdentifier]).Value}catch{$null}
             }else{$null}
             $ok=$null-ne$a-and$null-ne$b-and
               $a.Actions.Count-eq1-and$b.Actions.Count-eq1-and
@@ -1443,17 +1472,17 @@ internal sealed class PowerShellTaskRegistrar : IEndpointTaskRegistrar
               $b.Actions[0].Execute-eq'{{Escape(expected.ServerExecutable)}}'-and
               $b.Actions[0].Arguments-eq'{{Escape(expected.ServerArguments)}}'-and
               $b.Actions[0].WorkingDirectory-eq'{{Escape(installRoot)}}'-and
-              $aGroupSid-eq'S-1-5-32-545'-and
-              $bGroupSid-eq'S-1-5-32-545'-and
-              $a.Principal.LogonType-eq'Group'-and
-              $b.Principal.LogonType-eq'Group'-and
+              $aUserSid-eq'{{Escape(userSid)}}'-and
+              $bUserSid-eq'{{Escape(userSid)}}'-and
+              $a.Principal.LogonType-eq'Interactive'-and
+              $b.Principal.LogonType-eq'Interactive'-and
               $a.Principal.RunLevel-eq'Limited'-and
               $b.Principal.RunLevel-eq'Limited'-and
               $a.Triggers.Count-eq1-and$b.Triggers.Count-eq1-and
               $a.Triggers[0].CimClass.CimClassName-eq'MSFT_TaskLogonTrigger'-and
               $b.Triggers[0].CimClass.CimClassName-eq'MSFT_TaskLogonTrigger'-and
-              [string]::IsNullOrEmpty($a.Triggers[0].UserId)-and
-              [string]::IsNullOrEmpty($b.Triggers[0].UserId)-and
+              $a.Triggers[0].UserId-eq'{{Escape(userAccount)}}'-and
+              $b.Triggers[0].UserId-eq'{{Escape(userAccount)}}'-and
               $a.Triggers[0].Enabled-and$b.Triggers[0].Enabled-and
               $a.Settings.Enabled-and$b.Settings.Enabled-and
               $a.Settings.Hidden-and$b.Settings.Hidden-and
