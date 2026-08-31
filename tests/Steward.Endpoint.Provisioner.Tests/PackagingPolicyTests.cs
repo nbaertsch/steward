@@ -50,6 +50,14 @@ public sealed class PackagingPolicyTests
         Assert.Contains("LocalPackage", script, StringComparison.Ordinal);
         Assert.Contains("rollback could not restore", script, StringComparison.Ordinal);
         Assert.Contains("STEWARD_ENDPOINT_MSI_HEALTHY_NOOP", script, StringComparison.Ordinal);
+        Assert.Contains("AdministrativeRoot", script, StringComparison.Ordinal);
+        Assert.Contains("'/a'", script, StringComparison.Ordinal);
+        Assert.Contains(".staging-", script, StringComparison.Ordinal);
+        Assert.Contains(".backup-", script, StringComparison.Ordinal);
+        Assert.Contains(
+            "STEWARD_ENDPOINT_ADMINISTRATIVE_IMAGE_PROVISIONED",
+            script,
+            StringComparison.Ordinal);
         Assert.Contains(
             "A different Steward MSI with the same version is installed",
             script,
@@ -225,6 +233,10 @@ public sealed class PackagingPolicyTests
         Assert.Contains("Impersonate=\"no\"", source, StringComparison.Ordinal);
         Assert.Contains("STEWARD_CONFIG", source, StringComparison.Ordinal);
         Assert.Contains("STEWARD_ATTESTATION", source, StringComparison.Ordinal);
+        Assert.Contains(
+            "ACTION &lt;&gt; &quot;ADMIN&quot;",
+            source,
+            StringComparison.Ordinal);
     }
 
     [Fact]

@@ -11,6 +11,7 @@ param(
     [string]$NodeUserAccount,
     [Parameter(Mandatory = $true)]
     [string]$NodeUserSid,
+    [string]$AdministrativeRoot,
     [switch]$ValidateOnly
 )
 
@@ -286,7 +287,8 @@ function Write-ArtifactAttestation([string]$Path) {
         throw 'Steward endpoint artifact attestation ACL failed.'
     }
 }
-if ($wasCurrentInstalled) {
+if ($wasCurrentInstalled -and
+    [string]::IsNullOrWhiteSpace($AdministrativeRoot)) {
     $state = Join-Path $env:ProgramData 'Steward\Endpoint'
     $receiptPath = Join-Path $state 'bootstrap-receipt.json'
     if (-not (Test-Path -LiteralPath $receiptPath -PathType Leaf)) {
@@ -458,16 +460,80 @@ function Restore-PreMsiTasks {
 $provisionAttestation = Join-Path $rollbackDirectory `
     'steward-endpoint.attestation.json'
 Write-ArtifactAttestation $provisionAttestation
+$administrativeRootFull = $null
+$administrativeStaging = $null
+$administrativeBackup = $null
+$administrativePromoted = $false
+$administrativeCommitted = $false
 $replacementCommitted = $false
 try {
 try {
-    & $msiexec @(
-        '/i', $msi,
+    $installArguments = @(
         '/qn',
         '/norestart',
         '/L*v', $log,
         "STEWARD_CONFIG=$config",
         "STEWARD_ATTESTATION=$provisionAttestation")
+    if ([string]::IsNullOrWhiteSpace($AdministrativeRoot)) {
+        $installArguments = @('/i', $msi) + $installArguments
+    } else {
+        $administrativeRootFull = [IO.Path]::GetFullPath(
+            $AdministrativeRoot)
+        $allowedRoot = [IO.Path]::GetFullPath(
+            (Join-Path $env:ProgramData 'Steward\Runtime'))
+        if (-not [string]::Equals(
+                [IO.Path]::GetDirectoryName($administrativeRootFull),
+                $allowedRoot,
+                [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Steward administrative root is outside the runtime root.'
+        }
+        New-Item -ItemType Directory -Path $allowedRoot -Force | Out-Null
+        $runtimeItem = Get-Item -LiteralPath $allowedRoot -Force
+        if (($runtimeItem.Attributes -band
+                [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'Steward runtime root cannot be a reparse point.'
+        }
+        $systemSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+        $administratorsSid =
+            [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+        function Protect-AdministrativeDirectory([string]$Path) {
+            $item = Get-Item -LiteralPath $Path -Force
+            if (($item.Attributes -band
+                    [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw 'Steward administrative directory cannot be a reparse point.'
+            }
+            $security = [Security.AccessControl.DirectorySecurity]::new()
+            $security.SetAccessRuleProtection($true, $false)
+            $security.SetOwner($systemSid)
+            foreach ($sid in @($systemSid, $administratorsSid)) {
+                $security.AddAccessRule(
+                    [Security.AccessControl.FileSystemAccessRule]::new(
+                        $sid,
+                        [Security.AccessControl.FileSystemRights]::FullControl,
+                        [Security.AccessControl.InheritanceFlags]::ContainerInherit `
+                            -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit,
+                        [Security.AccessControl.PropagationFlags]::None,
+                        [Security.AccessControl.AccessControlType]::Allow))
+            }
+            Set-Acl -LiteralPath $Path -AclObject $security
+        }
+        Protect-AdministrativeDirectory $allowedRoot
+        if (Test-Path -LiteralPath $administrativeRootFull) {
+            $existingItem = Get-Item -LiteralPath $administrativeRootFull -Force
+            if (($existingItem.Attributes -band
+                    [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw 'Steward administrative image cannot be a reparse point.'
+            }
+        }
+        $administrativeStaging = Join-Path $allowedRoot (
+            '.staging-' + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $administrativeStaging | Out-Null
+        Protect-AdministrativeDirectory $administrativeStaging
+        $installArguments = @(
+            '/a', $msi, "TARGETDIR=$administrativeStaging") +
+            $installArguments
+    }
+    & $msiexec @installArguments
     $installExitCode = $LASTEXITCODE
 } catch {
     Restore-PreMsiTasks
@@ -528,12 +594,112 @@ if ($installExitCode -notin 0, 1641, 3010) {
     Remove-Item -LiteralPath $rollbackDirectory -Recurse -Force
     throw "Steward endpoint MSI failed with exit code $installExitCode."
 }
+if (-not [string]::IsNullOrWhiteSpace($AdministrativeRoot)) {
+    $provisioners = @(Get-ChildItem -LiteralPath $administrativeStaging `
+        -Filter 'Steward.Endpoint.Provisioner.exe' -File -Recurse)
+    if ($provisioners.Count -ne 1) {
+        throw 'Steward administrative image has an invalid provisioner layout.'
+    }
+    if (($provisioners[0].Attributes -band
+            [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'Steward administrative provisioner cannot be a reparse point.'
+    }
+    $relativeProvisioner = $provisioners[0].FullName.Substring(
+        $administrativeStaging.Length).TrimStart(
+            [IO.Path]::DirectorySeparatorChar)
+    if (Test-Path -LiteralPath $administrativeRootFull) {
+        $administrativeBackup = Join-Path $allowedRoot (
+            '.backup-' + [guid]::NewGuid().ToString('N'))
+        Move-Item -LiteralPath $administrativeRootFull `
+            -Destination $administrativeBackup
+    }
+    Move-Item -LiteralPath $administrativeStaging `
+        -Destination $administrativeRootFull
+    $administrativeStaging = $null
+    $administrativePromoted = $true
+    $administrativeProvisioner = Join-Path $administrativeRootFull `
+        $relativeProvisioner
+    $stateRoot = Join-Path $env:ProgramData 'Steward\Endpoint'
+    $provisionArguments = @(
+        '--install-root', (Split-Path -Parent $administrativeProvisioner),
+        '--config', $config,
+        '--state-root', $stateRoot,
+        '--artifact-attestation', $provisionAttestation)
+    & $administrativeProvisioner @provisionArguments
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Steward administrative image provisioning failed.'
+    }
+    $administrativeCommitted = $true
+    if ($null -ne $administrativeBackup) {
+        try {
+            Remove-Item -LiteralPath $administrativeBackup -Recurse -Force
+            $administrativeBackup = $null
+        } catch {
+            Write-Warning (
+                'Steward administrative backup cleanup failed; ' +
+                "the committed image remains active: $administrativeBackup")
+        }
+    }
+}
 $replacementCommitted = $true
 Remove-Item -LiteralPath $rollbackDirectory -Recurse -Force
-Write-Output 'STEWARD_ENDPOINT_MSI_INSTALLED'
+Write-Output $(if ([string]::IsNullOrWhiteSpace($AdministrativeRoot)) {
+    'STEWARD_ENDPOINT_MSI_INSTALLED'
+} else {
+    'STEWARD_ENDPOINT_ADMINISTRATIVE_IMAGE_PROVISIONED'
+})
 } finally {
+    $rollbackFailures = [Collections.Generic.List[string]]::new()
+    if (-not $administrativeCommitted) {
+        if ($administrativePromoted -and
+            $null -ne $administrativeRootFull -and
+            (Test-Path -LiteralPath $administrativeRootFull)) {
+            try {
+                Remove-Item -LiteralPath $administrativeRootFull `
+                    -Recurse -Force
+            } catch {
+                $rollbackFailures.Add(
+                    "failed to remove promoted image: $($_.Exception.Message)")
+            }
+        }
+        if ($null -ne $administrativeBackup -and
+            (Test-Path -LiteralPath $administrativeBackup)) {
+            if (Test-Path -LiteralPath $administrativeRootFull) {
+                $rollbackFailures.Add(
+                    'cannot restore backup while promoted image remains')
+            } else {
+                try {
+                    Move-Item -LiteralPath $administrativeBackup `
+                        -Destination $administrativeRootFull
+                } catch {
+                    $rollbackFailures.Add(
+                        "failed to restore backup: $($_.Exception.Message)")
+                }
+            }
+        }
+        if ($null -ne $administrativeStaging -and
+            (Test-Path -LiteralPath $administrativeStaging)) {
+            try {
+                Remove-Item -LiteralPath $administrativeStaging `
+                    -Recurse -Force
+            } catch {
+                $rollbackFailures.Add(
+                    "failed to remove staging image: $($_.Exception.Message)")
+            }
+        }
+    }
     if (-not $replacementCommitted) {
-        Restore-PreMsiTasks
+        try {
+            Restore-PreMsiTasks
+        } catch {
+            $rollbackFailures.Add(
+                "failed to restore scheduled tasks: $($_.Exception.Message)")
+        }
+    }
+    if ($rollbackFailures.Count -gt 0) {
+        throw (
+            'Steward endpoint rollback failed: ' +
+            ($rollbackFailures -join '; '))
     }
 }
 } catch {
