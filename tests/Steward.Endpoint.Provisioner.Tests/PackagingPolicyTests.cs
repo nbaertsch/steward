@@ -55,6 +55,14 @@ public sealed class PackagingPolicyTests
         Assert.Contains(".staging-", script, StringComparison.Ordinal);
         Assert.Contains(".backup-", script, StringComparison.Ordinal);
         Assert.Contains(
+            "Steward\\install\\Runtime",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "Steward\\install\\Endpoint",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
             "STEWARD_ENDPOINT_ADMINISTRATIVE_IMAGE_PROVISIONED",
             script,
             StringComparison.Ordinal);

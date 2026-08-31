@@ -382,7 +382,22 @@ $preMsiTaskSnapshot = $null
 $msiexec = Join-Path $env:SystemRoot 'System32\msiexec.exe'
 $log = Join-Path $env:ProgramData 'Steward\install\steward-endpoint-msi.log'
 New-Item -ItemType Directory -Path (Split-Path -Parent $log) -Force | Out-Null
-$identityPath = Join-Path $env:ProgramData 'Steward\Endpoint\identity.json'
+$administrativeStateRoot = Join-Path $env:ProgramData `
+    'Steward\install\Endpoint'
+if (-not [string]::IsNullOrWhiteSpace($AdministrativeRoot) -and
+    -not (Test-Path -LiteralPath $administrativeStateRoot) -and
+    (Test-Path -LiteralPath (
+        Join-Path $env:ProgramData 'Steward\Endpoint') -PathType Container)) {
+    throw (
+        'Legacy Steward endpoint state exists outside the durable root; ' +
+        'automatic secret-bearing state migration is not permitted.')
+}
+$identityPath = Join-Path $(if (
+    [string]::IsNullOrWhiteSpace($AdministrativeRoot)) {
+        Join-Path $env:ProgramData 'Steward\Endpoint'
+    } else {
+        $administrativeStateRoot
+    }) 'identity.json'
 if (Test-Path -LiteralPath $identityPath -PathType Leaf) {
     $identity = Get-Content -LiteralPath $identityPath -Raw | ConvertFrom-Json
     if ($identity.hostId -notmatch '^[0-9A-Fa-f-]{36}$') {
@@ -480,7 +495,7 @@ try {
         $administrativeRootFull = [IO.Path]::GetFullPath(
             $AdministrativeRoot)
         $allowedRoot = [IO.Path]::GetFullPath(
-            (Join-Path $env:ProgramData 'Steward\Runtime'))
+            (Join-Path $env:ProgramData 'Steward\install\Runtime'))
         if (-not [string]::Equals(
                 [IO.Path]::GetDirectoryName($administrativeRootFull),
                 $allowedRoot,
@@ -619,7 +634,7 @@ if (-not [string]::IsNullOrWhiteSpace($AdministrativeRoot)) {
     $administrativePromoted = $true
     $administrativeProvisioner = Join-Path $administrativeRootFull `
         $relativeProvisioner
-    $stateRoot = Join-Path $env:ProgramData 'Steward\Endpoint'
+    $stateRoot = $administrativeStateRoot
     $provisionArguments = @(
         '--install-root', (Split-Path -Parent $administrativeProvisioner),
         '--config', $config,
