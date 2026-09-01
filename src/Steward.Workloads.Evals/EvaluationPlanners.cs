@@ -5,7 +5,7 @@ using Steward.Scheduling;
 
 namespace Steward.Workloads.Evals;
 
-public sealed record SetupCommandTemplate(
+internal sealed record SetupCommandTemplate(
     string Executable,
     IReadOnlyList<string> Arguments,
     string? WorkingDirectory = null,
@@ -27,7 +27,7 @@ public sealed record SetupCommandTemplate(
     }
 }
 
-public sealed record EvaluationSetupProfile(
+internal sealed record EvaluationSetupProfile(
     string ProfileVersion,
     SetupCommandTemplate? HarnessAcquisition,
     SetupCommandTemplate? RepositoryAcquisition,
@@ -73,7 +73,7 @@ public sealed record EvaluationSetupProfile(
     }
 }
 
-public abstract class EvaluationPlannerBase
+internal abstract class EvaluationPlannerBase
 {
     private const string PlannerVersionValue = "1.0";
     private readonly IEvaluationHarnessAdapter adapter;
@@ -368,7 +368,9 @@ public abstract class EvaluationPlannerBase
                 manifestKey = EvaluationHash.Sha256($"{fingerprint}\n{key}"),
                 completedResults = completed.Select(x => new
                 {
-                    x.Result.CaseId, x.Result.AttemptGeneration, x.Result.ReceiptHash,
+                    x.Result.CaseId,
+                    x.Result.AttemptGeneration,
+                    x.Result.ReceiptHash,
                     x.PortableResultReference
                 }).ToArray(),
                 inputTaskIds = dependencies.Select(x => x.ToString()).Order(StringComparer.Ordinal).ToArray(),
@@ -399,16 +401,26 @@ public abstract class EvaluationPlannerBase
 
     private string InputFingerprint(EvaluationWorkloadInput input) => EvaluationHash.Sha256(EvaluationJson.Serialize(new
     {
-        harness = input.Harness.ToDto(), repository = input.Repository.ToDto(),
-        dataset = input.Dataset, input.EvaluationSet,
-        taskFilters = input.TaskFilters.Order(StringComparer.Ordinal).ToArray(), input.ModelProfileReference,
-        input.ShardPolicy, input.Locations, input.Runtime,
+        harness = input.Harness.ToDto(),
+        repository = input.Repository.ToDto(),
+        dataset = input.Dataset,
+        input.EvaluationSet,
+        taskFilters = input.TaskFilters.Order(StringComparer.Ordinal).ToArray(),
+        input.ModelProfileReference,
+        input.ShardPolicy,
+        input.Locations,
+        input.Runtime,
         identityCapabilities = input.IdentityCapabilities.OrderBy(x => x.Reference, StringComparer.Ordinal)
             .ThenBy(x => x.Capability, StringComparer.Ordinal).ToArray(),
-        inventoryHash = input.Inventory.ContentHash, input.CaseResources, input.InferenceRateScope,
-        input.InferenceUnitsPerCase, input.ReplicaCount,
-        adapter.HarnessName, adapter.HarnessVersion,
-        adapterProfileVersion = adapter.ProfileVersion, setupProfileVersion = setupProfile.ProfileVersion
+        inventoryHash = input.Inventory.ContentHash,
+        input.CaseResources,
+        input.InferenceRateScope,
+        input.InferenceUnitsPerCase,
+        input.ReplicaCount,
+        adapter.HarnessName,
+        adapter.HarnessVersion,
+        adapterProfileVersion = adapter.ProfileVersion,
+        setupProfileVersion = setupProfile.ProfileVersion
     }));
 
     private static TaskInput CreateInput(string schema, object value) =>
@@ -419,13 +431,13 @@ public abstract class EvaluationPlannerBase
     private static string EscapeKey(string value) => Uri.EscapeDataString(value);
 }
 
-public sealed class HarborEvaluationPlanner : EvaluationPlannerBase
+internal sealed class HarborEvaluationPlanner : EvaluationPlannerBase
 {
     public HarborEvaluationPlanner(IEvaluationHarnessAdapter adapter, EvaluationSetupProfile setupProfile)
         : base(adapter, setupProfile, "harbor") { }
 }
 
-public sealed class SaberEvaluationPlanner : EvaluationPlannerBase
+internal sealed class SaberEvaluationPlanner : EvaluationPlannerBase
 {
     public SaberEvaluationPlanner(IEvaluationHarnessAdapter adapter, EvaluationSetupProfile setupProfile)
         : base(adapter, setupProfile, "saber") { }

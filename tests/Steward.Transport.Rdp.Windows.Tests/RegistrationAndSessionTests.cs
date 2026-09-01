@@ -1,5 +1,5 @@
-using Microsoft.Win32;
 using System.ComponentModel;
+using Microsoft.Win32;
 using Steward.Transport.Rdp.Windows;
 
 namespace Steward.Transport.Rdp.Windows.Tests;

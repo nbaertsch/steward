@@ -1,5 +1,11 @@
 # Evidence-gated implementation plan
 
+> Production hardening and migration are governed by
+> [Steward production hardening and refactor plan](steward-hardening-refactor-plan.md).
+> That plan preserves the proven endpoint MSI/Provisioner installation path
+> while replacing prototype reconnect, ConnectionHost, privilege, and update
+> mechanisms.
+
 ## Delivery rule
 
 This plan delivers the complete Steward system. Workstreams are dependency and

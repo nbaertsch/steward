@@ -88,8 +88,8 @@ public sealed class LocalDirectTransportFactory(
             endpoint.Transport.Version != LocalStackOptions.TransportVersion)
             throw new InvalidOperationException(
                 "The Node endpoint is not a Local Stack direct transport binding.");
-        return endpoint.Transport.Data
-            .Deserialize<LocalDirectTransportBinding>()
+        return endpoint.Transport
+            .DeserializeData<LocalDirectTransportBinding>()
             ?.Validate()
             ?? throw new InvalidDataException(
                 "The Local Stack direct transport binding is invalid.");

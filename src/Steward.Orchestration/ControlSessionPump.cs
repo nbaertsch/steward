@@ -131,6 +131,11 @@ public sealed class ControlSessionPump
             if (frame.Stream != StreamKind.Events)
                 throw new OrchestrationMessageException("Control accepts orchestration facts only on the Events stream.");
             var decoded = OrchestrationMessageCodec.Decode(frame.Payload);
+            if (decoded.Value is LocalMaintenanceResultFact maintenance &&
+                (maintenance.HostId != hostId ||
+                 maintenance.NodeIncarnationId != nodeIncarnationId))
+                throw new OrchestrationMessageException(
+                    "Maintenance result targets another Control session.");
             var disposition = await orchestrator.ApplyNodeFactAsync(
                 connection.Session.NodeIncarnationId,
                 frame.Cursor,
@@ -148,7 +153,8 @@ public sealed class ControlSessionPump
     private static bool IsOrchestrationKind(string kind) =>
         kind is OrchestrationMessageKinds.Delegation
             or OrchestrationMessageKinds.ExecuteTask
-            or OrchestrationMessageKinds.CancelTask;
+            or OrchestrationMessageKinds.CancelTask
+            or OrchestrationMessageKinds.MaintenanceRequest;
 
     private static bool MatchesTarget(
         AggregateOutboxItem item,
@@ -167,6 +173,9 @@ public sealed class ControlSessionPump
             CancelTaskMessage value =>
                 value.Identity.HostId == hostId &&
                 value.Identity.NodeIncarnationId == incarnationId,
+            LocalMaintenanceRequestMessage value =>
+                value.HostId == hostId &&
+                value.NodeIncarnationId == incarnationId,
             _ => false
         };
     }

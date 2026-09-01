@@ -1,4 +1,3 @@
-using System.Threading.Channels;
 using Steward.DevBox.Windows;
 using Steward.RdCore.Windows;
 using Steward.Transport.Rdp.Windows;
@@ -14,6 +13,10 @@ public sealed class ConnectionHostOperationException(
 
 public sealed class ConnectionHostOrchestrator : IAsyncDisposable
 {
+    private const int MaximumPendingWork = 256;
+    private const int MaximumActiveQueues =
+        ConnectionHostProtocol.MaximumConnections + MaximumPendingWork;
+
     private readonly ConnectionHostOptions options;
     private readonly IDevBoxConnectionIdentityGate identity;
     private readonly IDevBoxConnectionResolver resolver;
@@ -22,10 +25,20 @@ public sealed class ConnectionHostOrchestrator : IAsyncDisposable
     private readonly IRdCoreConnectionRuntime runtime;
     private readonly IControlConnectAuthorizationValidator authorization;
     private readonly IConnectionMetadataStore metadata;
-    private readonly Channel<IWorkItem> queue;
+    private readonly IConnectionRecoveryMaterialIssuer? recoveryMaterialIssuer;
+    private readonly object synchronization = new();
+    private readonly SemaphoreSlim pendingCapacity =
+        new(MaximumPendingWork, MaximumPendingWork);
+    private readonly SemaphoreSlim persistenceGate = new(1, 1);
+    private readonly CancellationTokenSource shutdown = new();
+    private readonly Dictionary<string, QueueRegistration> queues =
+        new(StringComparer.Ordinal);
+    private readonly HashSet<Task> activeQueueActors = [];
     private readonly Dictionary<string, ConnectionEntry> connections =
         new(StringComparer.Ordinal);
-    private readonly Task actor;
+    private TaskCompletionSource<bool>? actorsDrained;
+    private Task? initializationTask;
+    private Task? disposalTask;
     private bool initialized;
     private bool disposed;
 
@@ -37,7 +50,8 @@ public sealed class ConnectionHostOrchestrator : IAsyncDisposable
         IDvcRegistrationSnapshotProvider registration,
         IRdCoreConnectionRuntime runtime,
         IControlConnectAuthorizationValidator authorization,
-        IConnectionMetadataStore metadata)
+        IConnectionMetadataStore metadata,
+        IConnectionRecoveryMaterialIssuer? recoveryMaterialIssuer = null)
     {
         this.options = options ??
             throw new ArgumentNullException(nameof(options));
@@ -55,15 +69,8 @@ public sealed class ConnectionHostOrchestrator : IAsyncDisposable
             throw new ArgumentNullException(nameof(authorization));
         this.metadata = metadata ??
             throw new ArgumentNullException(nameof(metadata));
+        this.recoveryMaterialIssuer = recoveryMaterialIssuer;
         ValidateOptions(options);
-        queue = Channel.CreateBounded<IWorkItem>(
-            new BoundedChannelOptions(256)
-            {
-                SingleReader = true,
-                SingleWriter = false,
-                FullMode = BoundedChannelFullMode.Wait
-            });
-        actor = RunActorAsync();
     }
 
     public ConnectionHostOrchestrator(
@@ -94,74 +101,439 @@ public sealed class ConnectionHostOrchestrator : IAsyncDisposable
     {
     }
 
-    public Task InitializeAsync(CancellationToken cancellationToken = default) =>
-        EnqueueAsync(InitializeCoreAsync, cancellationToken);
+    public Task InitializeAsync(CancellationToken cancellationToken = default)
+    {
+        TaskCompletionSource<bool>? completion = null;
+        Task task;
+        lock (synchronization)
+        {
+            ObjectDisposedException.ThrowIf(disposed, this);
+            if (initialized)
+                return Task.CompletedTask;
+            if (initializationTask is null)
+            {
+                completion = new(
+                    TaskCreationOptions.RunContinuationsAsynchronously);
+                initializationTask = completion.Task;
+            }
+            task = initializationTask;
+        }
+
+        if (completion is not null)
+            _ = RunInitializationAsync(completion);
+        return task.WaitAsync(cancellationToken);
+    }
 
     public Task<ConnectionHostResponse> ExecuteAsync(
         ConnectionHostCommand command,
         CancellationToken cancellationToken = default)
     {
         ConnectionHostProtocol.Validate(command);
-        return EnqueueAsync(
-            token => ExecuteCoreAsync(command, token),
-            cancellationToken);
+        return ExecuteAfterInitializationAsync(command, cancellationToken);
     }
 
     public Task<ConnectionHostStatus> NotifyViewClosedAsync(
         string connectionId,
         long connectionGeneration,
         CancellationToken cancellationToken = default) =>
-        EnqueueAsync(
+        EnqueueAfterInitializationAsync(
+            connectionId,
             async token =>
             {
-                RequireInitialized();
-                var entry = Find(connectionId);
-                entry.Machine.CloseVisibleSurface(connectionGeneration);
-                entry.Apply(entry.Machine.Snapshot);
+                ConnectionHostStatus status;
+                lock (synchronization)
+                {
+                    RequireInitialized();
+                    var entry = Find(connectionId);
+                    entry.Machine.CloseVisibleSurface(connectionGeneration);
+                    entry.Apply(entry.Machine.Snapshot);
+                    status = entry.Status;
+                }
                 await PersistAsync(token).ConfigureAwait(false);
-                return entry.Status;
+                return status;
             },
             cancellationToken);
 
-    public async ValueTask DisposeAsync()
+    public ValueTask DisposeAsync()
     {
-        if (disposed)
-            return;
-        disposed = true;
-        queue.Writer.TryComplete();
-        await actor.ConfigureAwait(false);
-        if (runtime is IAsyncDisposable asyncDisposable)
-            await asyncDisposable.DisposeAsync().ConfigureAwait(false);
-        else if (runtime is IDisposable disposable)
-            disposable.Dispose();
+        TaskCompletionSource<bool>? completion = null;
+        Task? initialization;
+        Task actorDrain;
+        QueueRegistration[] queueSnapshot;
+        lock (synchronization)
+        {
+            if (disposalTask is not null)
+                return new(disposalTask);
+
+            disposed = true;
+            queueSnapshot = queues.Values.ToArray();
+            initialization = initializationTask;
+            if (activeQueueActors.Count == 0)
+            {
+                actorDrain = Task.CompletedTask;
+            }
+            else
+            {
+                actorsDrained = new(
+                    TaskCreationOptions.RunContinuationsAsynchronously);
+                actorDrain = actorsDrained.Task;
+            }
+            completion = new(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            disposalTask = completion.Task;
+        }
+
+        shutdown.Cancel();
+        foreach (var queue in queueSnapshot)
+            queue.Queue.Complete();
+        _ = RunDisposalAsync(completion, initialization, actorDrain);
+        return new(completion.Task);
+    }
+
+    private async Task RunInitializationAsync(
+        TaskCompletionSource<bool> completion)
+    {
+        try
+        {
+            await InitializeCoreAsync(shutdown.Token).ConfigureAwait(false);
+            completion.TrySetResult(true);
+        }
+        catch (OperationCanceledException)
+            when (shutdown.IsCancellationRequested)
+        {
+            completion.TrySetCanceled(shutdown.Token);
+        }
+        catch (Exception exception)
+        {
+            completion.TrySetException(exception);
+        }
+        finally
+        {
+            lock (synchronization)
+            {
+                if (!initialized &&
+                    ReferenceEquals(initializationTask, completion.Task))
+                    initializationTask = null;
+            }
+        }
+    }
+
+    private async Task RunDisposalAsync(
+        TaskCompletionSource<bool> completion,
+        Task? initialization,
+        Task actorDrain)
+    {
+        try
+        {
+            await DisposeCoreAsync(initialization, actorDrain)
+                .ConfigureAwait(false);
+            completion.TrySetResult(true);
+        }
+        catch (OperationCanceledException exception)
+        {
+            completion.TrySetCanceled(exception.CancellationToken);
+        }
+        catch (Exception exception)
+        {
+            completion.TrySetException(exception);
+        }
+    }
+
+    private async Task DisposeCoreAsync(
+        Task? initialization,
+        Task actorDrain)
+    {
+        try
+        {
+            if (initialization is not null)
+            {
+                try
+                {
+                    await initialization.ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                    when (shutdown.IsCancellationRequested)
+                {
+                }
+            }
+            await actorDrain.ConfigureAwait(false);
+        }
+        finally
+        {
+            lock (synchronization)
+            {
+                foreach (var entry in connections.Values)
+                    entry.DisposeResolved();
+            }
+            if (runtime is IAsyncDisposable asyncDisposable)
+                await asyncDisposable.DisposeAsync().ConfigureAwait(false);
+            else if (runtime is IDisposable disposable)
+                disposable.Dispose();
+        }
+    }
+
+    private async Task<ConnectionHostResponse>
+        ExecuteAfterInitializationAsync(
+            ConnectionHostCommand command,
+            CancellationToken cancellationToken)
+    {
+        await AwaitInitializationAsync(cancellationToken)
+            .ConfigureAwait(false);
+        if (command.ConnectionId is null)
+            return await RunBoundedAsync(
+                    token => ExecuteCoreAsync(command, token),
+                    cancellationToken)
+                .ConfigureAwait(false);
+        return await EnqueueAsync(
+                command.ConnectionId,
+                token => ExecuteCoreAsync(command, token),
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private async Task<T> EnqueueAfterInitializationAsync<T>(
+        string connectionId,
+        Func<CancellationToken, Task<T>> action,
+        CancellationToken cancellationToken)
+    {
+        await AwaitInitializationAsync(cancellationToken)
+            .ConfigureAwait(false);
+        return await EnqueueAsync(connectionId, action, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private async Task AwaitInitializationAsync(
+        CancellationToken cancellationToken)
+    {
+        Task task;
+        lock (synchronization)
+        {
+            ObjectDisposedException.ThrowIf(disposed, this);
+            task = initializationTask ??
+                throw new InvalidOperationException(
+                    "The connection host has not been initialized.");
+        }
+        await task.WaitAsync(cancellationToken).ConfigureAwait(false);
     }
 
     private async Task InitializeCoreAsync(CancellationToken cancellationToken)
     {
-        if (initialized)
-            return;
+        lock (synchronization)
+        {
+            if (initialized)
+                return;
+        }
         var durable = await metadata.LoadAsync(cancellationToken)
             .ConfigureAwait(false);
+        if (durable.Count > ConnectionHostProtocol.MaximumConnections)
+            throw new InvalidDataException(
+                "The connection metadata store exceeds its bound.");
+        var restored = new Dictionary<string, ConnectionEntry>(
+            StringComparer.Ordinal);
         foreach (var value in durable)
         {
             ValidateDurable(value);
-            if (connections.Count >= ConnectionHostProtocol.MaximumConnections)
-                throw new InvalidDataException(
-                    "The connection metadata store exceeds its bound.");
-            if (!connections.TryAdd(
+            if (!restored.TryAdd(
                     value.ConnectionId,
                     ConnectionEntry.Restore(value)))
                 throw new InvalidDataException(
                     "The connection metadata store contains duplicate IDs.");
         }
-
-        foreach (var entry in connections.Values)
-            await ReconcileAsync(entry, cancellationToken)
+        if (metadata is IConnectionRecoveryStore recoveryStore)
+        {
+            var desired = await recoveryStore.LoadDesiredAsync(
+                    cancellationToken)
                 .ConfigureAwait(false);
-        initialized = true;
+            foreach (var value in desired)
+            {
+                var entry = restored.GetValueOrDefault(value.ConnectionId);
+                if (entry is null)
+                {
+                    if (restored.Count >=
+                        ConnectionHostProtocol.MaximumConnections)
+                        throw new InvalidDataException(
+                            "The desired connection store exceeds its bound.");
+                    entry = new ConnectionEntry(value.ConnectionId)
+                    {
+                        State = RdpDvcSessionState.Disconnected,
+                        Code = "CONNECTION_HOST_RECOVERY_PENDING"
+                    };
+                    restored.Add(value.ConnectionId, entry);
+                }
+                entry.Desired = value;
+            }
+        }
+
+        ConnectionEntry[] entries;
+        lock (synchronization)
+        {
+            if (connections.Count == 0)
+            {
+                foreach (var pair in restored)
+                    connections.Add(pair.Key, pair.Value);
+            }
+            entries = connections.Values.ToArray();
+        }
+        await Task.WhenAll(entries.Select(entry =>
+                ReconcileWithBoundAsync(entry, cancellationToken)))
+            .ConfigureAwait(false);
         await PersistAsync(cancellationToken).ConfigureAwait(false);
+        if (options.EnableLiveConnections)
+            await Task.WhenAll(entries
+                    .Where(entry => entry.Desired is
+                    { DesiredHeadless: true })
+                    .Select(entry => RecoverDesiredAsync(
+                        entry,
+                        cancellationToken)))
+                .ConfigureAwait(false);
+        await RecoverTransitionOutboxAsync(cancellationToken)
+            .ConfigureAwait(false);
+        lock (synchronization)
+            initialized = true;
     }
 
+    private async Task ReconcileWithBoundAsync(
+        ConnectionEntry entry,
+        CancellationToken cancellationToken)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(
+            cancellationToken,
+            shutdown.Token);
+        timeout.CancelAfter(options.CommandTimeout);
+        await ReconcileAsync(entry, timeout.Token).ConfigureAwait(false);
+    }
+
+    private async Task RecoverDesiredAsync(
+        ConnectionEntry entry,
+        CancellationToken cancellationToken)
+    {
+        lock (synchronization)
+            if (entry.State is RdpDvcSessionState.ConnectedTransport or
+                RdpDvcSessionState.Viewing or
+                RdpDvcSessionState.Controlled)
+                return;
+        var desired = entry.Desired ??
+            throw new InvalidOperationException(
+                "Desired recovery requires a typed desired identity.");
+        var identityStatus = await identity.StatusAsync(cancellationToken)
+            .ConfigureAwait(false);
+        if (identityStatus.Outcome != DevBoxConnectionIdentityOutcome.Ready ||
+            resolver is not IDesiredDevBoxConnectionResolver ||
+            recoveryMaterialIssuer is null)
+        {
+            lock (synchronization)
+            {
+                entry.State = RdpDvcSessionState.Disconnected;
+                entry.DvcConnected = false;
+                entry.Code = "CONNECTION_HOST_SILENT_AUTH_REFUSED";
+                entry.UpdatedAtUtc = DateTimeOffset.UtcNow;
+            }
+            await PersistAsync(cancellationToken).ConfigureAwait(false);
+            return;
+        }
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(
+            cancellationToken,
+            shutdown.Token);
+        timeout.CancelAfter(options.CommandTimeout);
+        try
+        {
+            var target = new DesiredConnectionTarget(
+                desired.DevBoxEndpoint,
+                desired.Project,
+                desired.User,
+                desired.DevBox,
+                desired.SessionId,
+                desired.HostId,
+                desired.NodeIncarnationId);
+            var resolve = RecoveryCommand(
+                ConnectionHostOperation.Resolve,
+                desired.ConnectionId,
+                desired: target);
+            _ = await ResolveAsync(resolve, timeout.Token)
+                .ConfigureAwait(false);
+            _ = await PrepareAsync(
+                    RecoveryCommand(
+                        ConnectionHostOperation.Prepare,
+                        desired.ConnectionId),
+                    timeout.Token)
+                .ConfigureAwait(false);
+            var material = await recoveryMaterialIssuer.IssueAsync(
+                    desired,
+                    timeout.Token)
+                .ConfigureAwait(false);
+            _ = await ConnectAsync(
+                    RecoveryCommand(
+                        ConnectionHostOperation.Connect,
+                        desired.ConnectionId,
+                        material.AuthorizationToken,
+                        material.EvidenceReference),
+                    timeout.Token)
+                .ConfigureAwait(false);
+            lock (synchronization)
+            {
+                entry.Code = "CONNECTION_HOST_DESIRED_RECOVERED";
+                entry.UpdatedAtUtc = DateTimeOffset.UtcNow;
+            }
+            await PersistAsync(timeout.Token).ConfigureAwait(false);
+        }
+        catch (DevBoxConnectionIdentityException)
+        {
+            lock (synchronization)
+            {
+                entry.State = RdpDvcSessionState.Disconnected;
+                entry.DvcConnected = false;
+                entry.Code = "CONNECTION_HOST_SILENT_AUTH_REFUSED";
+                entry.UpdatedAtUtc = DateTimeOffset.UtcNow;
+            }
+            await PersistAsync(CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception exception)
+            when (exception is
+                IOException or
+                TimeoutException or
+                UnauthorizedAccessException)
+        {
+            lock (synchronization)
+            {
+                entry.State = RdpDvcSessionState.Disconnected;
+                entry.DvcConnected = false;
+                entry.Code = "CONNECTION_HOST_DESIRED_RECOVERY_DEFERRED";
+                entry.UpdatedAtUtc = DateTimeOffset.UtcNow;
+            }
+            await PersistAsync(CancellationToken.None).ConfigureAwait(false);
+        }
+    }
+
+    private static ConnectionHostCommand RecoveryCommand(
+        ConnectionHostOperation operation,
+        string connectionId,
+        string? authorizationToken = null,
+        string? evidenceReference = null,
+        DesiredConnectionTarget? desired = null) =>
+        new(
+            ConnectionHostProtocol.CurrentVersion,
+            Guid.NewGuid().ToString("N"),
+            operation,
+            connectionId,
+            AuthorizationToken: authorizationToken,
+            DvcEvidenceReference: evidenceReference,
+            DesiredConnection: desired);
+
+    private async Task RecoverTransitionOutboxAsync(
+        CancellationToken cancellationToken)
+    {
+        if (metadata is not IConnectionRecoveryStore recoveryStore)
+            return;
+        var pending = await recoveryStore.ReadPendingTransitionsAsync(
+                1000,
+                cancellationToken)
+            .ConfigureAwait(false);
+        foreach (var transition in pending)
+            await recoveryStore.AcknowledgeTransitionAsync(
+                    transition.Sequence,
+                    cancellationToken)
+                .ConfigureAwait(false);
+    }
     private async Task<ConnectionHostResponse> ExecuteCoreAsync(
         ConnectionHostCommand command,
         CancellationToken cancellationToken)
@@ -262,17 +634,22 @@ public sealed class ConnectionHostOrchestrator : IAsyncDisposable
 
     private ConnectionHostResponse Status(ConnectionHostCommand command)
     {
-        if (command.ConnectionId is { } connectionId)
-            return Accepted(command, Find(connectionId).Status);
-        return new(
-            ConnectionHostProtocol.CurrentVersion,
-            command.RequestId,
-            true,
-            "CONNECTION_HOST_STATUS",
-            Connections: connections.Values
-                .Select(value => value.Status)
-                .OrderBy(value => value.ConnectionId, StringComparer.Ordinal)
-                .ToArray());
+        lock (synchronization)
+        {
+            if (command.ConnectionId is { } connectionId)
+                return Accepted(command, Find(connectionId).Status);
+            return new(
+                ConnectionHostProtocol.CurrentVersion,
+                command.RequestId,
+                true,
+                "CONNECTION_HOST_STATUS",
+                Connections: connections.Values
+                    .Select(value => value.Status)
+                    .OrderBy(
+                        value => value.ConnectionId,
+                        StringComparer.Ordinal)
+                    .ToArray());
+        }
     }
 
     private async Task<ConnectionHostStatus> ResolveAsync(
@@ -280,55 +657,127 @@ public sealed class ConnectionHostOrchestrator : IAsyncDisposable
         CancellationToken cancellationToken)
     {
         var connectionId = RequiredConnectionId(command);
-        if (!Uri.TryCreate(
+        var desired = command.DesiredConnection?.ToRecord(connectionId);
+        Uri? providerResource = null;
+        if (command.ProviderResource is not null &&
+            !Uri.TryCreate(
                 command.ProviderResource,
                 UriKind.Absolute,
-                out var providerResource))
+                out providerResource))
             throw Failure(
                 "CONNECTION_HOST_PROVIDER_RESOURCE_REQUIRED",
                 "Resolve requires an absolute provider resource URI.");
-        if (!connections.TryGetValue(connectionId, out var entry))
+        if (providerResource is null && desired is null)
+            throw Failure(
+                "CONNECTION_HOST_PROVIDER_RESOURCE_REQUIRED",
+                "Resolve requires provider material or desired identity.");
+        if (desired is not null)
         {
-            if (connections.Count >= ConnectionHostProtocol.MaximumConnections)
-                throw Failure(
-                    "CONNECTION_HOST_CONNECTION_LIMIT",
-                    "The connection limit has been reached.");
-            entry = new ConnectionEntry(connectionId);
-            connections.Add(connectionId, entry);
-        }
-        entry.DisposeResolved();
-        entry.PreparedPackage = null;
-        entry.Configuration = null;
-        entry.Machine.BeginResolving();
-        entry.Apply(entry.Machine.Snapshot);
-        try
-        {
-            entry.Resolved = await resolver.ResolveAsync(
-                    providerResource,
+            if (metadata is not IConnectionRecoveryStore recoveryStore)
+                throw new InvalidOperationException(
+                    "Desired connections require the durable recovery store.");
+            await recoveryStore.UpsertDesiredAsync(
+                    desired,
                     cancellationToken)
                 .ConfigureAwait(false);
-            entry.Code = "CONNECTION_HOST_RESOLVED";
+        }
+        ConnectionEntry entry;
+        lock (synchronization)
+        {
+            if (!connections.TryGetValue(connectionId, out entry!))
+            {
+                if (connections.Count >=
+                    ConnectionHostProtocol.MaximumConnections)
+                    throw Failure(
+                        "CONNECTION_HOST_CONNECTION_LIMIT",
+                        "The connection limit has been reached.");
+                entry = new ConnectionEntry(connectionId);
+                connections.Add(connectionId, entry);
+            }
+            entry.DisposeResolved();
+            if (desired is not null)
+                entry.Desired = desired;
+            entry.PreparedPackage = null;
+            entry.Configuration = null;
+            entry.Machine.BeginResolving();
+            entry.Apply(entry.Machine.Snapshot);
+        }
+
+        try
+        {
+            var resolved = providerResource is not null
+                ? await resolver.ResolveAsync(
+                        providerResource,
+                        cancellationToken)
+                    .ConfigureAwait(false)
+                : await (resolver as IDesiredDevBoxConnectionResolver ??
+                        throw new DevBoxConnectionIdentityException(
+                            DevBoxConnectionIdentityOutcome
+                                .InteractionRequired,
+                            "Silent Dev Box connection refresh is unavailable."))
+                    .ResolveDesiredAsync(
+                        desired ?? throw new InvalidOperationException(
+                            "Desired connection identity is unavailable."),
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            lock (synchronization)
+            {
+                entry.Resolved = resolved;
+                entry.Code = "CONNECTION_HOST_RESOLVED";
+            }
         }
         catch
         {
-            entry.Apply(entry.Machine.Fail("CONNECTION_HOST_RESOLVE_FAILED"));
+            lock (synchronization)
+                entry.Apply(
+                    entry.Machine.Fail("CONNECTION_HOST_RESOLVE_FAILED"));
             await PersistAsync(cancellationToken).ConfigureAwait(false);
             throw;
         }
-        await PersistAsync(cancellationToken).ConfigureAwait(false);
-        return entry.Status;
+        try
+        {
+            await PersistAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            lock (synchronization)
+            {
+                entry.DisposeResolved();
+                entry.Apply(
+                    entry.Machine.Fail(
+                        "CONNECTION_HOST_RESOLVE_PERSIST_FAILED"));
+            }
+            try
+            {
+                await PersistAsync(CancellationToken.None)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception exception)
+                when (exception is IOException or UnauthorizedAccessException)
+            {
+            }
+            throw;
+        }
+        lock (synchronization)
+            return entry.Status;
     }
 
     private async Task<ConnectionHostStatus> PrepareAsync(
         ConnectionHostCommand command,
         CancellationToken cancellationToken)
     {
-        var entry = Find(RequiredConnectionId(command));
-        if (entry.Resolved is null ||
-            entry.Machine.Snapshot.State != RdpDvcSessionState.Resolving)
-            throw Failure(
-                "CONNECTION_HOST_RESOLVE_REQUIRED",
-                "Prepare requires a resolved connection.");
+        ConnectionEntry entry;
+        lock (synchronization)
+        {
+            entry = Find(RequiredConnectionId(command));
+            if (entry.Resolved is null ||
+                entry.Machine.Snapshot.State !=
+                    RdpDvcSessionState.Resolving)
+                throw Failure(
+                    "CONNECTION_HOST_RESOLVE_REQUIRED",
+                    "Prepare requires a resolved connection.");
+        }
+
         var identityStatus = await identity.StatusAsync(cancellationToken)
             .ConfigureAwait(false);
         if (identityStatus.Outcome != DevBoxConnectionIdentityOutcome.Ready)
@@ -349,67 +798,128 @@ public sealed class ConnectionHostOrchestrator : IAsyncDisposable
         var result = RdCoreDvcContract.ValidateConfiguration(configuration);
         if (!result.Accepted)
             throw Failure(result.Code, "The DVC configuration is not ready.");
-        entry.PreparedPackage = report.Artifacts;
-        entry.Configuration = configuration;
-        entry.Code = "CONNECTION_HOST_PREPARED";
-        entry.UpdatedAtUtc = DateTimeOffset.UtcNow;
+        lock (synchronization)
+        {
+            entry.PreparedPackage = report.Artifacts;
+            entry.Configuration = configuration;
+            entry.Code = "CONNECTION_HOST_PREPARED";
+            entry.UpdatedAtUtc = DateTimeOffset.UtcNow;
+        }
         await PersistAsync(cancellationToken).ConfigureAwait(false);
-        return entry.Status;
+        lock (synchronization)
+            return entry.Status;
     }
 
     private async Task<ConnectionHostStatus> ConnectAsync(
         ConnectionHostCommand command,
         CancellationToken cancellationToken)
     {
-        var entry = Find(RequiredConnectionId(command));
-        if (!options.EnableLiveConnections)
-            throw Failure(
-                "CONNECTION_HOST_LIVE_CONNECT_DISABLED",
-                "Live RDCore connections are disabled.");
-        if (entry.Resolved is null ||
-            entry.PreparedPackage is null ||
-            entry.Configuration is null)
-            throw Failure(
-                "CONNECTION_HOST_PREPARE_REQUIRED",
-                "Connect requires a prepared connection.");
-        if (string.IsNullOrWhiteSpace(command.AuthorizationToken))
-            throw Failure(
-                "CONNECTION_HOST_CONTROL_AUTHORIZATION_REQUIRED",
-                "Connect requires a Control authorization token.");
-        if (string.IsNullOrWhiteSpace(command.DvcEvidenceReference))
-            throw Failure(
-                "CONNECTION_HOST_DVC_EVIDENCE_REFERENCE_REQUIRED",
-                "Connect requires an opaque DVC evidence reference.");
-        if (!await authorization.ConsumeAsync(
-                command.AuthorizationToken,
-                entry.ConnectionId,
-                cancellationToken).ConfigureAwait(false))
-            throw Failure(
-                "CONNECTION_HOST_CONTROL_AUTHORIZATION_REJECTED",
-                "Control rejected the connection authorization token.");
+        ConnectionEntry entry;
+        ISensitiveRdpConnectionMaterial resolved;
+        RdCorePackageArtifacts preparedPackage;
+        RdCoreDvcConfigurationRequest configuration;
+        lock (synchronization)
+        {
+            entry = Find(RequiredConnectionId(command));
+            if (!options.EnableLiveConnections)
+                throw Failure(
+                    "CONNECTION_HOST_LIVE_CONNECT_DISABLED",
+                    "Live RDCore connections are disabled.");
+            resolved = entry.Resolved ??
+                throw Failure(
+                    "CONNECTION_HOST_PREPARE_REQUIRED",
+                    "Connect requires a prepared connection.");
+            preparedPackage = entry.PreparedPackage ??
+                throw Failure(
+                    "CONNECTION_HOST_PREPARE_REQUIRED",
+                    "Connect requires a prepared connection.");
+            configuration = entry.Configuration ??
+                throw Failure(
+                    "CONNECTION_HOST_PREPARE_REQUIRED",
+                    "Connect requires a prepared connection.");
+        }
+        try
+        {
+            if (string.IsNullOrWhiteSpace(command.AuthorizationToken))
+                throw Failure(
+                    "CONNECTION_HOST_CONTROL_AUTHORIZATION_REQUIRED",
+                    "Connect requires a Control authorization token.");
+            if (string.IsNullOrWhiteSpace(command.DvcEvidenceReference))
+                throw Failure(
+                    "CONNECTION_HOST_DVC_EVIDENCE_REFERENCE_REQUIRED",
+                    "Connect requires an opaque DVC evidence reference.");
+            if (!await authorization.ConsumeAsync(
+                    command.AuthorizationToken,
+                    entry.ConnectionId,
+                    cancellationToken).ConfigureAwait(false))
+                throw Failure(
+                    "CONNECTION_HOST_CONTROL_AUTHORIZATION_REJECTED",
+                    "Control rejected the connection authorization token.");
+        }
+        catch
+        {
+            lock (synchronization)
+            {
+                entry.DisposeResolved();
+                entry.PreparedPackage = null;
+                entry.Configuration = null;
+            }
+            throw;
+        }
 
-        entry.Machine.BeginConnectingHeadless();
-        entry.Apply(entry.Machine.Snapshot);
+        var attemptId = Guid.NewGuid();
+        var attemptStartedAt = DateTimeOffset.UtcNow;
+        if (metadata is IConnectionRecoveryStore attemptStore)
+            await attemptStore.RecordAttemptAsync(
+                    new(
+                        attemptId,
+                        entry.ConnectionId,
+                        null,
+                        "Connecting",
+                        attemptStartedAt,
+                        null),
+                    cancellationToken)
+                .ConfigureAwait(false);
+        lock (synchronization)
+        {
+            entry.CurrentAttemptId = attemptId;
+            entry.Machine.BeginConnectingHeadless();
+            entry.Apply(entry.Machine.Snapshot);
+        }
         RdCoreConnectionRuntimeResult? started = null;
         try
         {
-            await using var rdp = entry.Resolved.OpenRdpContent();
+            await using var rdp = resolved.OpenRdpContent();
             started = await runtime.ConnectAsync(
                     new(
                         entry.ConnectionId,
-                        entry.Resolved.ProviderResourceUri,
+                        resolved.ProviderResourceUri,
                         rdp,
-                        entry.PreparedPackage,
-                        entry.Configuration.DvcRegistration,
+                        preparedPackage,
+                        configuration.DvcRegistration,
                         command.DvcEvidenceReference),
                     cancellationToken)
                 .ConfigureAwait(false);
             ValidateRuntimeResult(started);
-            var verified = VerifyEvidence(entry.Configuration, started);
-            entry.Machine.ConfirmConnectedTransport(verified);
-            entry.RuntimeConnectionId = started.RuntimeConnectionId;
-            entry.Capabilities = started.PresentationCapabilities;
-            entry.Apply(entry.Machine.Snapshot);
+            var verified = VerifyEvidence(configuration, started);
+            lock (synchronization)
+            {
+                entry.Machine.ConfirmConnectedTransport(verified);
+                entry.RuntimeConnectionId = started.RuntimeConnectionId;
+                entry.Capabilities = started.PresentationCapabilities;
+                entry.Apply(entry.Machine.Snapshot);
+            }
+            if (metadata is IConnectionRecoveryStore successStore)
+                await successStore.RecordAttemptAsync(
+                        new(
+                            attemptId,
+                            entry.ConnectionId,
+                            started.ConnectionGeneration,
+                            "Connected",
+                            attemptStartedAt,
+                            DateTimeOffset.UtcNow),
+                        cancellationToken)
+                    .ConfigureAwait(false);
             await PersistAsync(cancellationToken).ConfigureAwait(false);
         }
         catch
@@ -430,20 +940,33 @@ public sealed class ConnectionHostOrchestrator : IAsyncDisposable
                 }
                 catch (Exception exception)
                     when (exception is
-                        InvalidOperationException or
                         IOException or
                         UnauthorizedAccessException)
                 {
                 }
             }
-            entry.RuntimeConnectionId = null;
-            entry.Capabilities = null;
-            if (entry.Machine.Snapshot.State is not
-                (RdpDvcSessionState.Failed or
-                 RdpDvcSessionState.Disconnected))
-                entry.Apply(
-                    entry.Machine.Fail(
-                        "CONNECTION_HOST_CONNECT_FAILED"));
+            if (metadata is IConnectionRecoveryStore failureStore)
+                await failureStore.RecordAttemptAsync(
+                        new(
+                            attemptId,
+                            entry.ConnectionId,
+                            started?.ConnectionGeneration,
+                            "Failed",
+                            attemptStartedAt,
+                            DateTimeOffset.UtcNow),
+                        CancellationToken.None)
+                    .ConfigureAwait(false);
+            lock (synchronization)
+            {
+                entry.RuntimeConnectionId = null;
+                entry.Capabilities = null;
+                if (entry.Machine.Snapshot.State is not
+                    (RdpDvcSessionState.Failed or
+                     RdpDvcSessionState.Disconnected))
+                    entry.Apply(
+                        entry.Machine.Fail(
+                            "CONNECTION_HOST_CONNECT_FAILED"));
+            }
             try
             {
                 await PersistAsync(CancellationToken.None)
@@ -457,45 +980,77 @@ public sealed class ConnectionHostOrchestrator : IAsyncDisposable
         }
         finally
         {
-            entry.DisposeResolved();
-            entry.PreparedPackage = null;
-            entry.Configuration = null;
+            lock (synchronization)
+            {
+                entry.DisposeResolved();
+                entry.PreparedPackage = null;
+                entry.Configuration = null;
+            }
         }
-        return entry.Status;
+        lock (synchronization)
+            return entry.Status;
     }
 
     private async Task<ConnectionHostStatus> ViewAsync(
         ConnectionHostCommand command,
         CancellationToken cancellationToken)
     {
-        var entry = Connected(command);
-        RequireGeneration(command, entry);
-        if (entry.Capabilities is not
-            {
-                IsVerified: true,
-                SameConnectionView: true
-            })
-            throw Failure(
-                "CONNECTION_HOST_SAME_CONNECTION_VIEW_UNPROVEN",
-                "The runtime has not proved same-connection presentation.");
-        entry.Machine.View(command.ConnectionGeneration!.Value);
+        ConnectionEntry entry;
+        string runtimeId;
+        long generation;
+        lock (synchronization)
+        {
+            entry = Connected(command);
+            RequireGeneration(command, entry);
+            if (entry.Capabilities is not
+                {
+                    IsVerified: true,
+                    SameConnectionView: true
+                })
+                throw Failure(
+                    "CONNECTION_HOST_SAME_CONNECTION_VIEW_UNPROVEN",
+                    "The runtime has not proved same-connection presentation.");
+            generation = command.ConnectionGeneration!.Value;
+            runtimeId = entry.RuntimeConnectionId!;
+            entry.Machine.View(generation);
+        }
         try
         {
             var proof = await runtime.ViewExistingAsync(
-                    entry.RuntimeConnectionId!,
-                    command.ConnectionGeneration.Value,
+                    runtimeId,
+                    generation,
                     cancellationToken)
                 .ConfigureAwait(false);
-            ValidatePresentationProof(entry, proof);
-            entry.Apply(entry.Machine.Snapshot);
+            lock (synchronization)
+            {
+                ValidatePresentationProof(entry, proof);
+                entry.Apply(entry.Machine.Snapshot);
+            }
+            await SetPresentationLeaseAsync(
+                    entry.ConnectionId,
+                    generation,
+                    PresentationLeaseMode.View,
+                    active: true,
+                    cancellationToken)
+                .ConfigureAwait(false);
             await PersistAsync(cancellationToken).ConfigureAwait(false);
-            return entry.Status;
+            lock (synchronization)
+                return entry.Status;
         }
         catch
         {
-            entry.Machine.CloseVisibleSurface(
-                command.ConnectionGeneration.Value);
-            entry.Apply(entry.Machine.Snapshot);
+            lock (synchronization)
+            {
+                entry.Machine.CloseVisibleSurface(generation);
+                entry.Apply(entry.Machine.Snapshot);
+            }
+            await SetPresentationLeaseAsync(
+                    entry.ConnectionId,
+                    generation,
+                    PresentationLeaseMode.View,
+                    active: false,
+                    CancellationToken.None)
+                .ConfigureAwait(false);
             await PersistAsync(CancellationToken.None).ConfigureAwait(false);
             throw;
         }
@@ -505,86 +1060,142 @@ public sealed class ConnectionHostOrchestrator : IAsyncDisposable
         ConnectionHostCommand command,
         CancellationToken cancellationToken)
     {
-        var entry = Connected(command);
-        RequireGeneration(command, entry);
-        if (entry.Capabilities is not
-            {
-                IsVerified: true,
-                SameConnectionControl: true
-            })
-            throw Failure(
-                "CONNECTION_HOST_SAME_CONNECTION_CONTROL_UNPROVEN",
-                "The runtime has not proved same-connection control.");
+        ConnectionEntry entry;
+        string runtimeId;
+        long generation;
+        lock (synchronization)
+        {
+            entry = Connected(command);
+            RequireGeneration(command, entry);
+            if (entry.Capabilities is not
+                {
+                    IsVerified: true,
+                    SameConnectionControl: true
+                })
+                throw Failure(
+                    "CONNECTION_HOST_SAME_CONNECTION_CONTROL_UNPROVEN",
+                    "The runtime has not proved same-connection control.");
+            runtimeId = entry.RuntimeConnectionId!;
+            generation = command.ConnectionGeneration!.Value;
+        }
         var proof = await runtime.TakeControlAsync(
-                entry.RuntimeConnectionId!,
-                command.ConnectionGeneration!.Value,
+                runtimeId,
+                generation,
                 cancellationToken)
             .ConfigureAwait(false);
-        ValidatePresentationProof(entry, proof);
-        entry.Machine.TakeControl(command.ConnectionGeneration.Value);
-        entry.Apply(entry.Machine.Snapshot);
+        lock (synchronization)
+        {
+            ValidatePresentationProof(entry, proof);
+            entry.Machine.TakeControl(generation);
+            entry.Apply(entry.Machine.Snapshot);
+        }
+        await SetPresentationLeaseAsync(
+                entry.ConnectionId,
+                generation,
+                PresentationLeaseMode.Control,
+                active: true,
+                cancellationToken)
+            .ConfigureAwait(false);
         await PersistAsync(cancellationToken).ConfigureAwait(false);
-        return entry.Status;
+        lock (synchronization)
+            return entry.Status;
     }
 
     private async Task<ConnectionHostStatus> ReleaseControlAsync(
         ConnectionHostCommand command,
         CancellationToken cancellationToken)
     {
-        var entry = Connected(command);
-        RequireGeneration(command, entry);
+        ConnectionEntry entry;
+        string runtimeId;
+        long generation;
+        lock (synchronization)
+        {
+            entry = Connected(command);
+            RequireGeneration(command, entry);
+            runtimeId = entry.RuntimeConnectionId!;
+            generation = command.ConnectionGeneration!.Value;
+        }
         await runtime.ReleaseControlAsync(
-                entry.RuntimeConnectionId!,
-                command.ConnectionGeneration!.Value,
+                runtimeId,
+                generation,
                 cancellationToken)
             .ConfigureAwait(false);
-        entry.Machine.ReleaseControl(command.ConnectionGeneration.Value);
-        entry.Apply(entry.Machine.Snapshot);
+        lock (synchronization)
+        {
+            entry.Machine.ReleaseControl(generation);
+            entry.Apply(entry.Machine.Snapshot);
+        }
+        await SetPresentationLeaseAsync(
+                entry.ConnectionId,
+                generation,
+                PresentationLeaseMode.Control,
+                active: false,
+                cancellationToken)
+            .ConfigureAwait(false);
         await PersistAsync(cancellationToken).ConfigureAwait(false);
-        return entry.Status;
+        lock (synchronization)
+            return entry.Status;
     }
 
     private async Task<ConnectionHostStatus> DisconnectAsync(
         ConnectionHostCommand command,
         CancellationToken cancellationToken)
     {
-        var entry = Find(RequiredConnectionId(command));
-        if (entry.RuntimeConnectionId is { } runtimeId &&
-            entry.ConnectionGeneration is { } generation)
+        ConnectionEntry entry;
+        string? runtimeId;
+        long? generation;
+        lock (synchronization)
         {
-            if (command.ConnectionGeneration is { } requested &&
-                requested != generation)
+            entry = Find(RequiredConnectionId(command));
+            runtimeId = entry.RuntimeConnectionId;
+            generation = entry.ConnectionGeneration;
+            if (runtimeId is not null &&
+                generation is { } currentGeneration &&
+                command.ConnectionGeneration is { } requested &&
+                requested != currentGeneration)
                 throw Failure(
                     "RDP_DVC_CONNECTION_GENERATION_MISMATCH",
                     "Disconnect belongs to a stale generation.");
+        }
+        if (runtimeId is not null && generation is { } connectedGeneration)
             await runtime.DisconnectAsync(
                     runtimeId,
-                    generation,
+                    connectedGeneration,
                     cancellationToken)
                 .ConfigureAwait(false);
+        lock (synchronization)
+        {
+            entry.DisposeResolved();
+            entry.PreparedPackage = null;
+            entry.Configuration = null;
+            entry.RuntimeConnectionId = null;
+            entry.Capabilities = null;
+            entry.Apply(entry.Machine.Disconnect());
         }
-        entry.DisposeResolved();
-        entry.PreparedPackage = null;
-        entry.Configuration = null;
-        entry.RuntimeConnectionId = null;
-        entry.Capabilities = null;
-        entry.Apply(entry.Machine.Disconnect());
         await PersistAsync(cancellationToken).ConfigureAwait(false);
-        return entry.Status;
+        lock (synchronization)
+            return entry.Status;
     }
 
     private async Task ReconcileAsync(
         ConnectionEntry entry,
         CancellationToken cancellationToken)
     {
-        if (entry.RuntimeConnectionId is not { } runtimeId ||
-            entry.ConnectionGeneration is not { } generation ||
-            entry.State is not
-                (RdpDvcSessionState.ConnectedTransport or
-                 RdpDvcSessionState.Viewing or
-                 RdpDvcSessionState.Controlled or
-                 RdpDvcSessionState.Reconnecting))
-            return;
+        string runtimeId;
+        long generation;
+        lock (synchronization)
+        {
+            if (entry.RuntimeConnectionId is not { } currentRuntimeId ||
+                entry.ConnectionGeneration is not { } currentGeneration ||
+                entry.State is not
+                    (RdpDvcSessionState.ConnectedTransport or
+                     RdpDvcSessionState.Viewing or
+                     RdpDvcSessionState.Controlled or
+                     RdpDvcSessionState.Reconnecting))
+                return;
+            runtimeId = currentRuntimeId;
+            generation = currentGeneration;
+        }
         var result = await runtime.ReconcileAsync(
                 runtimeId,
                 generation,
@@ -592,13 +1203,17 @@ public sealed class ConnectionHostOrchestrator : IAsyncDisposable
             .ConfigureAwait(false);
         if (result is null)
         {
-            entry.RuntimeConnectionId = null;
-            entry.ConnectionGeneration = null;
-            entry.Capabilities = null;
-            entry.State = RdpDvcSessionState.Disconnected;
-            entry.DvcConnected = false;
-            entry.Code = "CONNECTION_HOST_RESTART_TRANSPORT_NOT_FOUND";
-            entry.UpdatedAtUtc = DateTimeOffset.UtcNow;
+            lock (synchronization)
+            {
+                entry.RuntimeConnectionId = null;
+                entry.ConnectionGeneration = null;
+                entry.Capabilities = null;
+                entry.State = RdpDvcSessionState.Disconnected;
+                entry.DvcConnected = false;
+                entry.Code =
+                    "CONNECTION_HOST_RESTART_TRANSPORT_NOT_FOUND";
+                entry.UpdatedAtUtc = DateTimeOffset.UtcNow;
+            }
             return;
         }
         ValidateRuntimeResult(result);
@@ -617,13 +1232,16 @@ public sealed class ConnectionHostOrchestrator : IAsyncDisposable
                 true,
                 RdpDvcPluginRegistration
                     .RegisteredActivationPendingCode));
-        entry.Machine.BeginResolving();
-        entry.Machine.BeginConnectingHeadless();
-        entry.Machine.ConfirmConnectedTransport(
-            VerifyEvidence(configuration, result));
-        entry.Capabilities = result.PresentationCapabilities;
-        entry.Apply(entry.Machine.Snapshot);
-        entry.Code = "CONNECTION_HOST_RESTART_RECONCILED";
+        var verified = VerifyEvidence(configuration, result);
+        lock (synchronization)
+        {
+            entry.Machine.BeginResolving();
+            entry.Machine.BeginConnectingHeadless();
+            entry.Machine.ConfirmConnectedTransport(verified);
+            entry.Capabilities = result.PresentationCapabilities;
+            entry.Apply(entry.Machine.Snapshot);
+            entry.Code = "CONNECTION_HOST_RESTART_RECONCILED";
+        }
     }
 
     private static RdCoreDvcConfigurationResult VerifyEvidence(
@@ -720,15 +1338,42 @@ public sealed class ConnectionHostOrchestrator : IAsyncDisposable
             "CONNECTION_HOST_CONNECTION_ID_REQUIRED",
             "The operation requires a connection ID.");
 
+    private Task SetPresentationLeaseAsync(
+        string connectionId,
+        long generation,
+        PresentationLeaseMode mode,
+        bool active,
+        CancellationToken cancellationToken) =>
+        metadata is IConnectionRecoveryStore recoveryStore
+            ? recoveryStore.SetPresentationLeaseAsync(
+                new(connectionId, generation),
+                mode,
+                active,
+                cancellationToken)
+            : Task.CompletedTask;
     private async Task PersistAsync(CancellationToken cancellationToken)
     {
-        await metadata.SaveAsync(
-                connections.Values
-                    .Select(value => value.ToDurable())
-                    .OrderBy(value => value.ConnectionId, StringComparer.Ordinal)
-                    .ToArray(),
-                cancellationToken)
+        await persistenceGate.WaitAsync(cancellationToken)
             .ConfigureAwait(false);
+        try
+        {
+            DurableConnectionMetadata[] snapshot;
+            lock (synchronization)
+            {
+                snapshot = connections.Values
+                    .Select(value => value.ToDurable())
+                    .OrderBy(
+                        value => value.ConnectionId,
+                        StringComparer.Ordinal)
+                    .ToArray();
+            }
+            await metadata.SaveAsync(snapshot, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            persistenceGate.Release();
+        }
     }
 
     private static ConnectionHostResponse Accepted(
@@ -792,72 +1437,199 @@ public sealed class ConnectionHostOrchestrator : IAsyncDisposable
                 "The connection metadata store contains invalid metadata.");
     }
 
-    private async Task RunActorAsync()
-    {
-        await foreach (var work in queue.Reader.ReadAllAsync()
-                           .ConfigureAwait(false))
-            await work.RunAsync().ConfigureAwait(false);
-        foreach (var entry in connections.Values)
-            entry.DisposeResolved();
-    }
-
-    private async Task<T> EnqueueAsync<T>(
+    private async Task<T> RunBoundedAsync<T>(
         Func<CancellationToken, Task<T>> action,
         CancellationToken cancellationToken)
     {
-        ObjectDisposedException.ThrowIf(disposed, this);
-        var work = new WorkItem<T>(action, cancellationToken);
-        await queue.Writer.WriteAsync(work, cancellationToken)
-            .ConfigureAwait(false);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(
+            cancellationToken,
+            shutdown.Token);
+        await pendingCapacity.WaitAsync(linked.Token).ConfigureAwait(false);
+        try
+        {
+            lock (synchronization)
+                ObjectDisposedException.ThrowIf(disposed, this);
+            return await action(linked.Token).ConfigureAwait(false);
+        }
+        finally
+        {
+            pendingCapacity.Release();
+        }
+    }
+
+    private async Task<T> EnqueueAsync<T>(
+        string connectionId,
+        Func<CancellationToken, Task<T>> action,
+        CancellationToken cancellationToken)
+    {
+        var linked = CancellationTokenSource.CreateLinkedTokenSource(
+            cancellationToken,
+            shutdown.Token);
+        var capacityAcquired = false;
+        QueueRegistration queue;
+        try
+        {
+            await pendingCapacity.WaitAsync(linked.Token).ConfigureAwait(false);
+            capacityAcquired = true;
+            lock (synchronization)
+            {
+                ObjectDisposedException.ThrowIf(disposed, this);
+                if (!queues.TryGetValue(connectionId, out queue!))
+                {
+                    if (queues.Count >= MaximumActiveQueues)
+                        throw Failure(
+                            "CONNECTION_HOST_CONNECTION_LIMIT",
+                            "The connection work-queue limit has been reached.");
+                    queue = CreateQueue(connectionId);
+                    queues.Add(connectionId, queue);
+                }
+                queue.PendingCount++;
+            }
+        }
+        catch
+        {
+            linked.Dispose();
+            if (capacityAcquired)
+                pendingCapacity.Release();
+            throw;
+        }
+
+        var work = new WorkItem<T>(
+            action,
+            cancellationToken,
+            linked,
+            () => CompleteQueuedWork(queue));
+        try
+        {
+            await queue.Queue.EnqueueAsync(work, linked.Token)
+                .ConfigureAwait(false);
+        }
+        catch (Exception exception)
+            when (exception is OperationCanceledException or
+                System.Threading.Channels.ChannelClosedException)
+        {
+            return await work.Completion.ConfigureAwait(false);
+        }
         return await work.Completion.ConfigureAwait(false);
     }
 
-    private Task EnqueueAsync(
-        Func<CancellationToken, Task> action,
-        CancellationToken cancellationToken) =>
-        EnqueueAsync(
-            async token =>
-            {
-                await action(token).ConfigureAwait(false);
-                return true;
-            },
-            cancellationToken);
-
-    private interface IWorkItem
+    private QueueRegistration CreateQueue(string connectionId)
     {
-        Task RunAsync();
+        var queue = new ConnectionWorkQueue(MaximumPendingWork);
+        var registration = new QueueRegistration(connectionId, queue);
+        activeQueueActors.Add(queue.Completion);
+        _ = ObserveQueueCompletionAsync(queue.Completion);
+        return registration;
+    }
+
+    private async Task ObserveQueueCompletionAsync(Task completion)
+    {
+        try
+        {
+            await completion.ConfigureAwait(false);
+        }
+        finally
+        {
+            lock (synchronization)
+            {
+                activeQueueActors.Remove(completion);
+                if (disposed && activeQueueActors.Count == 0)
+                    actorsDrained?.TrySetResult(true);
+            }
+        }
+    }
+
+    private void CompleteQueuedWork(QueueRegistration queue)
+    {
+        var completeQueue = false;
+        lock (synchronization)
+        {
+            queue.PendingCount--;
+            if (!disposed &&
+                queue.PendingCount == 0 &&
+                !connections.ContainsKey(queue.ConnectionId) &&
+                queues.TryGetValue(queue.ConnectionId, out var current) &&
+                ReferenceEquals(current, queue))
+            {
+                queues.Remove(queue.ConnectionId);
+                completeQueue = true;
+            }
+        }
+        if (completeQueue)
+            queue.Queue.Complete();
+        pendingCapacity.Release();
+    }
+
+    private sealed class QueueRegistration(
+        string connectionId,
+        ConnectionWorkQueue queue)
+    {
+        public string ConnectionId { get; } = connectionId;
+        public ConnectionWorkQueue Queue { get; } = queue;
+        public int PendingCount { get; set; }
     }
 
     private sealed class WorkItem<T>(
         Func<CancellationToken, Task<T>> action,
-        CancellationToken cancellationToken) : IWorkItem
+        CancellationToken callerCancellationToken,
+        CancellationTokenSource linkedCancellation,
+        Action completed) : IConnectionWorkItem
     {
         private readonly TaskCompletionSource<T> completion =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int finished;
 
         public Task<T> Completion => completion.Task;
 
         public async Task RunAsync()
         {
-            if (cancellationToken.IsCancellationRequested)
-            {
-                completion.TrySetCanceled(cancellationToken);
-                return;
-            }
             try
             {
+                if (linkedCancellation.IsCancellationRequested)
+                {
+                    completion.TrySetCanceled(
+                        callerCancellationToken.IsCancellationRequested
+                            ? callerCancellationToken
+                            : new CancellationToken(canceled: true));
+                    return;
+                }
                 completion.TrySetResult(
-                    await action(cancellationToken).ConfigureAwait(false));
+                    await action(linkedCancellation.Token)
+                        .ConfigureAwait(false));
             }
             catch (OperationCanceledException)
-                when (cancellationToken.IsCancellationRequested)
+                when (linkedCancellation.IsCancellationRequested)
             {
-                completion.TrySetCanceled(cancellationToken);
+                completion.TrySetCanceled(
+                    callerCancellationToken.IsCancellationRequested
+                        ? callerCancellationToken
+                        : new CancellationToken(canceled: true));
             }
             catch (Exception exception)
             {
                 completion.TrySetException(exception);
             }
+            finally
+            {
+                Finish();
+            }
+        }
+
+        public void Reject(Exception exception)
+        {
+            if (exception is OperationCanceledException canceled)
+                completion.TrySetCanceled(canceled.CancellationToken);
+            else
+                completion.TrySetException(exception);
+            Finish();
+        }
+
+        private void Finish()
+        {
+            if (Interlocked.Exchange(ref finished, 1) != 0)
+                return;
+            linkedCancellation.Dispose();
+            completed();
         }
     }
 
@@ -872,6 +1644,8 @@ public sealed class ConnectionHostOrchestrator : IAsyncDisposable
         public string ConnectionId { get; }
         public RdpDvcSessionStateMachine Machine { get; } = new();
         public ISensitiveRdpConnectionMaterial? Resolved { get; set; }
+        public DesiredConnectionRecord? Desired { get; set; }
+        public Guid? CurrentAttemptId { get; set; }
         public RdCorePackageArtifacts? PreparedPackage { get; set; }
         public RdCoreDvcConfigurationRequest? Configuration { get; set; }
         public string? RuntimeConnectionId { get; set; }

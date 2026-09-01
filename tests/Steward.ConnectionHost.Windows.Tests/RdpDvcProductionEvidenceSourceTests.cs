@@ -337,6 +337,171 @@ public sealed class RdpDvcProductionEvidenceSourceTests
     }
 
     [Fact]
+    public async Task Retained_v1_evidence_keeps_explicit_migration_state()
+    {
+        var key = Key();
+        var retained = new RdpDvcRetainedV1EndpointState(
+            "1.0.23",
+            FiniteNonceStateRetained: true);
+        var preauthorized = PreauthorizedRoute() with
+        {
+            RetainedV1Endpoint = retained
+        };
+        var candidate = preauthorized.BindWtsSession(42) with
+        {
+            RetainedV1Endpoint = null
+        };
+        await using var source = Source(
+            key,
+            out _,
+            ("retained-v1-reference", preauthorized));
+        var ticket = await source.RegisterExpectedAsync(
+            "retained-v1-reference",
+            "connection-v1",
+            "runtime-v1",
+            31,
+            CancellationToken.None);
+        var lifecycleReporter = Guid.NewGuid();
+        Assert.True(Accept(
+            source,
+            key,
+            Lifecycle(
+                lifecycleReporter,
+                1,
+                RdpDvcEvidencePublicationEvent
+                    .StewardComClassActivated)));
+        Assert.True(Accept(
+            source,
+            key,
+            Lifecycle(
+                lifecycleReporter,
+                2,
+                RdpDvcEvidencePublicationEvent
+                    .StewardPluginInitialized)));
+        Assert.True(Accept(
+            source,
+            key,
+            Lifecycle(
+                lifecycleReporter,
+                3,
+                RdpDvcEvidencePublicationEvent
+                    .StewardChannelOpened,
+                candidate)));
+        var boundRoute = candidate with
+        {
+            RetainedV1Endpoint = retained
+        };
+        var bound = ticket.Identity with { Route = boundRoute };
+        var transportReporter = Guid.NewGuid();
+        Assert.True(Accept(
+            source,
+            key,
+            Transport(
+                transportReporter,
+                1,
+                RdpDvcEvidencePublicationEvent
+                    .DvcHmacAuthenticated,
+                bound)));
+        Assert.True(Accept(
+            source,
+            key,
+            Transport(
+                transportReporter,
+                2,
+                RdpDvcEvidencePublicationEvent
+                    .SecurePeerAuthenticated,
+                bound)));
+
+        var batch = await source.WaitForEvidenceAsync(
+            ticket,
+            CancellationToken.None);
+        Assert.Equal(retained, batch.AuthenticatedRoute!
+            .RetainedV1Endpoint);
+    }
+    [Fact]
+    public async Task V2_evidence_binds_fresh_attempt_only_after_secure_phase()
+    {
+        var key = Key();
+        var preauthorized = new RdpDvcEvidenceRoute(
+            Guid.NewGuid(),
+            Guid.NewGuid(),
+            Guid.NewGuid(),
+            0,
+            Guid.NewGuid());
+        var authenticated = new RdpDvcEvidenceRoute(
+            preauthorized.SessionId,
+            preauthorized.HostId,
+            preauthorized.NodeIncarnationId,
+            42,
+            Guid.NewGuid(),
+            ProtocolVersion: 2);
+        await using var source = Source(
+            key,
+            out _,
+            ("v2-reference", preauthorized));
+        var ticket = await source.RegisterExpectedAsync(
+            "v2-reference",
+            "connection-v2",
+            "runtime-v2",
+            29,
+            CancellationToken.None);
+        var lifecycleReporter = Guid.NewGuid();
+        Assert.True(Accept(
+            source,
+            key,
+            Lifecycle(
+                lifecycleReporter,
+                1,
+                RdpDvcEvidencePublicationEvent
+                    .StewardComClassActivated)));
+        Assert.True(Accept(
+            source,
+            key,
+            Lifecycle(
+                lifecycleReporter,
+                2,
+                RdpDvcEvidencePublicationEvent
+                    .StewardPluginInitialized)));
+        Assert.True(Accept(
+            source,
+            key,
+            Lifecycle(
+                lifecycleReporter,
+                3,
+                RdpDvcEvidencePublicationEvent
+                    .StewardChannelOpened,
+                authenticated)));
+        var transportReporter = Guid.NewGuid();
+        var bound = ticket.Identity with { Route = authenticated };
+        Assert.True(Accept(
+            source,
+            key,
+            Transport(
+                transportReporter,
+                1,
+                RdpDvcEvidencePublicationEvent
+                    .DvcHmacAuthenticated,
+                bound)));
+        Assert.False(source.WaitForEvidenceAsync(
+            ticket,
+            CancellationToken.None).IsCompleted);
+        Assert.True(Accept(
+            source,
+            key,
+            Transport(
+                transportReporter,
+                2,
+                RdpDvcEvidencePublicationEvent
+                    .SecurePeerAuthenticated,
+                bound)));
+
+        var batch = await source.WaitForEvidenceAsync(
+            ticket,
+            CancellationToken.None);
+        Assert.Equal(authenticated, batch.AuthenticatedRoute);
+        Assert.Equal(5, batch.Evidence.Count);
+    }
+    [Fact]
     public async Task Authenticated_wts_binding_is_immutable()
     {
         var key = Key();
@@ -562,7 +727,8 @@ public sealed class RdpDvcProductionEvidenceSourceTests
             Guid.NewGuid(),
             Guid.NewGuid(),
             0,
-            Guid.NewGuid());
+            Guid.NewGuid(),
+            ProtocolVersion: 1);
 
     private static byte[] Key() =>
         RandomNumberGenerator.GetBytes(32);
@@ -586,7 +752,7 @@ public sealed class RdpDvcProductionEvidenceSourceTests
         IRdpDvcEvidenceTicketResolver
     {
         public IReadOnlyDictionary<string, RdpDvcEvidenceRoute> Routes
-            { get; } = routes.ToDictionary(
+        { get; } = routes.ToDictionary(
                 value => value.Reference,
                 value => value.Route,
                 StringComparer.Ordinal);

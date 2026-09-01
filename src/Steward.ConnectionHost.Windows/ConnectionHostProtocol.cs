@@ -17,6 +17,29 @@ public enum ConnectionHostOperation
     Disconnect
 }
 
+public sealed record DesiredConnectionTarget(
+    Uri DevBoxEndpoint,
+    string Project,
+    string User,
+    string DevBox,
+    Guid SessionId,
+    Guid HostId,
+    Guid NodeIncarnationId)
+{
+    public DesiredConnectionRecord ToRecord(string connectionId) =>
+        new DesiredConnectionRecord(
+            ConnectionHostProtocol.CurrentVersion,
+            connectionId,
+            DevBoxEndpoint,
+            Project,
+            User,
+            DevBox,
+            SessionId,
+            HostId,
+            NodeIncarnationId,
+            true,
+            DateTimeOffset.UtcNow).Validate();
+}
 public sealed record ConnectionHostCommand(
     int Version,
     string RequestId,
@@ -25,7 +48,8 @@ public sealed record ConnectionHostCommand(
     string? ProviderResource = null,
     string? AuthorizationToken = null,
     long? ConnectionGeneration = null,
-    string? DvcEvidenceReference = null)
+    string? DvcEvidenceReference = null,
+    DesiredConnectionTarget? DesiredConnection = null)
 {
     public override string ToString() =>
         $"ConnectionHostCommand {{ Version = {Version}, " +
@@ -149,7 +173,14 @@ public static class ConnectionHostProtocol
                 "DVC evidence reference");
         if (command.ConnectionGeneration is <= 0)
             throw new InvalidDataException(
-                "The connection generation must be positive.");
+                "The connection generation must be positive."); if (command.DesiredConnection is not null)
+        {
+            if (command.ConnectionId is null ||
+                command.Operation != ConnectionHostOperation.Resolve)
+                throw new InvalidDataException(
+                    "Desired connection identity is valid only for Resolve.");
+            _ = command.DesiredConnection.ToRecord(command.ConnectionId);
+        }
     }
 
     private static async Task<byte[]> ReadFrameAsync(

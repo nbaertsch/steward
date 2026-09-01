@@ -390,7 +390,8 @@ public sealed class ConnectionIdentityTests : IDisposable
         IDevBoxConnectionBroker
     {
         public int EnrollmentCalls { get; private set; }
-        public IReadOnlyList<DevBoxConnectionAudience> EnrollmentAudiences {
+        public IReadOnlyList<DevBoxConnectionAudience> EnrollmentAudiences
+        {
             get;
             private set;
         } = [];

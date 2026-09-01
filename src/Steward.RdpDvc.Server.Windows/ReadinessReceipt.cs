@@ -34,10 +34,23 @@ public sealed class DvcEndpointReadinessStore(
     string path,
     Guid sessionId,
     Guid hostId,
-    Guid incarnationId)
+    Guid incarnationId,
+    IReadOnlyList<Guid>? expectedNonces = null)
 {
     private static readonly JsonSerializerOptions Json = CreateJson();
     private readonly string _path = Path.GetFullPath(path);
+    private readonly IReadOnlyList<Guid>? _expectedNonces =
+        expectedNonces?.ToArray();
+    private readonly int _maximumGenerations =
+        expectedNonces?.Count is null
+            ? 2
+            : expectedNonces.Count is >= 2 and <= 256 &&
+              expectedNonces.All(value => value != Guid.Empty) &&
+              expectedNonces.Distinct().Count() == expectedNonces.Count
+                ? expectedNonces.Count
+                : throw new ArgumentException(
+                    "Expected DVC nonces are invalid.",
+                    nameof(expectedNonces));
 
     public async Task<DvcEndpointReadinessReceipt?> LoadAsync(
         CancellationToken cancellationToken)
@@ -57,16 +70,20 @@ public sealed class DvcEndpointReadinessStore(
             receipt.SessionId != sessionId ||
             receipt.HostId != hostId ||
             receipt.NodeIncarnationId != incarnationId ||
-            receipt.AuthenticatedGenerations.Count > 2 ||
+            receipt.NextGeneration < 0 ||
+            receipt.NextGeneration > _maximumGenerations ||
+            receipt.AuthenticatedGenerations.Count > _maximumGenerations ||
             receipt.AuthenticatedGenerations.Any(value =>
-                value.Index is < 0 or > 1 ||
+                value.Index < 0 ||
+                value.Index >= _maximumGenerations ||
                 value.Nonce == Guid.Empty ||
                 value.WtsSessionId <= 0 ||
                 value.Sequence != 1) ||
             receipt.AuthenticatedGenerations
                 .Select(value => value.Index)
                 .Distinct()
-                .Count() != receipt.AuthenticatedGenerations.Count)
+                .Count() != receipt.AuthenticatedGenerations.Count ||
+            !MatchesExpectedSequence(receipt.AuthenticatedGenerations))
             throw new InvalidDataException(
                 "DVC endpoint readiness receipt is invalid.");
         return receipt;
@@ -78,10 +95,12 @@ public sealed class DvcEndpointReadinessStore(
         int nextGeneration,
         CancellationToken cancellationToken)
     {
-        if (authenticated.Count > 2 ||
+        if (authenticated.Count > _maximumGenerations ||
             authenticated.Select(value => value.Nonce).Distinct().Count() !=
             authenticated.Count ||
-            nextGeneration is < 0 or > 2)
+            !MatchesExpectedSequence(authenticated) ||
+            nextGeneration < 0 ||
+            nextGeneration > _maximumGenerations)
             throw new ArgumentException(
                 "DVC endpoint readiness state is invalid.");
         var receipt = new DvcEndpointReadinessReceipt(
@@ -118,6 +137,14 @@ public sealed class DvcEndpointReadinessStore(
         }
         File.Move(pending, _path, overwrite: true);
     }
+
+    private bool MatchesExpectedSequence(
+        IReadOnlyList<DvcAuthenticatedGeneration> authenticated) =>
+        authenticated.Select((value, index) =>
+                value.Index == index &&
+                (_expectedNonces is null ||
+                 value.Nonce == _expectedNonces[index]))
+            .All(value => value);
 
     private static JsonSerializerOptions CreateJson()
     {

@@ -161,15 +161,15 @@ public sealed class TransitionMatrixTests
         where TState : notnull
     {
         foreach (var edge in edges)
-        foreach (var destination in edge.Value)
-        {
-            var aggregate = factory();
-            foreach (var step in FindRoute(edges, initial, edge.Key))
-                transition(aggregate, step);
-            Assert.Equal(edge.Key, getState(aggregate));
-            transition(aggregate, destination);
-            Assert.Equal(destination, getState(aggregate));
-        }
+            foreach (var destination in edge.Value)
+            {
+                var aggregate = factory();
+                foreach (var step in FindRoute(edges, initial, edge.Key))
+                    transition(aggregate, step);
+                Assert.Equal(edge.Key, getState(aggregate));
+                transition(aggregate, destination);
+                Assert.Equal(destination, getState(aggregate));
+            }
     }
 
     private static IReadOnlyList<TState> FindRoute<TState>(

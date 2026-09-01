@@ -65,7 +65,8 @@ public sealed class DpapiRdpDvcEvidenceTicketStore :
                 JsonSerializer.Deserialize<TicketDescriptor>(cleartext) ??
                 throw new InvalidDataException(
                     "The DVC evidence ticket descriptor is empty.");
-            var route = descriptor.Route.Validate();
+            var route = ValidateCarrierAuthorization(
+                descriptor.Route);
             if (!route.IsWtsWildcard)
                 throw new InvalidDataException(
                     "The preauthorized DVC evidence ticket must leave WTS unspecified.");
@@ -82,7 +83,8 @@ public sealed class DpapiRdpDvcEvidenceTicketStore :
         RdpDvcEvidenceRoute route)
     {
         ValidateReference(evidenceReference);
-        if (!route.Validate().IsWtsWildcard)
+        route = ValidateCarrierAuthorization(route);
+        if (!route.IsWtsWildcard)
             throw new ArgumentException(
                 "A preauthorized DVC evidence ticket must leave WTS unspecified.",
                 nameof(route));
@@ -180,12 +182,38 @@ public sealed class DpapiRdpDvcEvidenceTicketStore :
     public ValueTask ReleaseAsync(string evidenceReference)
     {
         ValidateReference(evidenceReference);
-        var path = BoundPath(evidenceReference);
-        if (File.Exists(path))
-            CurrentUserProtectedDataFile.Delete(path);
+        foreach (var path in new[]
+                 {
+                     Path.Combine(
+                         directory,
+                         evidenceReference + ".ticket"),
+                     BoundPath(evidenceReference)
+                 })
+            if (File.Exists(path))
+                CurrentUserProtectedDataFile.Delete(path);
         return ValueTask.CompletedTask;
     }
 
+    private static RdpDvcEvidenceRoute ValidateCarrierAuthorization(
+        RdpDvcEvidenceRoute route)
+    {
+        ArgumentNullException.ThrowIfNull(route);
+        try
+        {
+            _ = route.Validate();
+        }
+        catch (ArgumentException exception)
+        {
+            throw new InvalidDataException(
+                "The DVC evidence route is invalid.",
+                exception);
+        }
+        if (route.ProtocolVersion == 1 &&
+            route.RetainedV1Endpoint is null)
+            throw new InvalidDataException(
+                "A v1 evidence route requires explicit retained endpoint state.");
+        return route;
+    }
     private string BoundPath(string evidenceReference) =>
         Path.Combine(directory, evidenceReference + ".bound");
 
@@ -489,11 +517,15 @@ public sealed class ProductionRdpDvcRuntimeEvidenceSource :
             reporter.TicketId is not null ||
             !reporter.Pending.SequenceEqual(RequiredOrder[..2]) ||
             route.WtsSessionId <= 0 ||
-            !routes.TryGetValue(
-                route.AsPreauthorized(),
-                out var ticketId) ||
-            !tickets.TryGetValue(ticketId, out var ticket))
+            !TryFindTicketForCandidate(
+                route,
+                out var ticketId,
+                out var ticket))
             return new(false, "DVC_EVIDENCE_ROUTE_REJECTED");
+        if (route.ProtocolVersion == 1 &&
+            ticket.Ticket.Identity.Route.RetainedV1Endpoint is
+            { } retained)
+            route = route with { RetainedV1Endpoint = retained };
         if (ticket.CandidateRoute is { } candidate &&
             candidate != route)
             return new(false, "DVC_EVIDENCE_ROUTE_AMBIGUOUS");
@@ -563,37 +595,72 @@ public sealed class ProductionRdpDvcRuntimeEvidenceSource :
         return new(true, "DVC_EVIDENCE_ACCEPTED");
     }
 
+    private bool TryFindTicketForCandidate(
+        RdpDvcEvidenceRoute route,
+        out Guid ticketId,
+        out TicketState ticket)
+    {
+        var matches = tickets
+            .Where(pair =>
+            {
+                var expected = pair.Value.Ticket.Identity.Route;
+                return expected.ProtocolVersion ==
+                        route.ProtocolVersion &&
+                    (route.ProtocolVersion == 2
+                        ? expected.MatchesAuthenticatedRoute(route)
+                        : expected.HasSamePreauthorizedBase(route));
+            })
+            .Take(2)
+            .ToArray();
+        if (matches.Length != 1)
+        {
+            ticketId = Guid.Empty;
+            ticket = null!;
+            return false;
+        }
+        ticketId = matches[0].Key;
+        ticket = matches[0].Value;
+        return true;
+    }
+
     private bool TryFindTicket(
         RdpDvcEvidenceTicketIdentity identity,
         out TicketState ticket)
     {
-        if (!routes.TryGetValue(
-                identity.Route.AsPreauthorized(),
-                out var ticketId) ||
-            !tickets.TryGetValue(ticketId, out var resolved))
+        var matches = tickets.Values
+            .Where(value =>
+            {
+                var expected = value.Ticket.Identity;
+                return string.Equals(
+                        expected.EvidenceReference,
+                        identity.EvidenceReference,
+                        StringComparison.Ordinal) &&
+                    string.Equals(
+                        expected.ConnectionId,
+                        identity.ConnectionId,
+                        StringComparison.Ordinal) &&
+                    string.Equals(
+                        expected.RuntimeConnectionId,
+                        identity.RuntimeConnectionId,
+                        StringComparison.Ordinal) &&
+                    expected.ConnectionGeneration ==
+                        identity.ConnectionGeneration &&
+                    (identity.Route.ProtocolVersion == 2
+                        ? expected.Route.MatchesAuthenticatedRoute(
+                            identity.Route)
+                        : expected.Route.HasSamePreauthorizedBase(
+                            identity.Route));
+            })
+            .Take(2)
+            .ToArray();
+        if (matches.Length != 1)
         {
             ticket = null!;
             return false;
         }
-        ticket = resolved;
-        var expected = ticket.Ticket.Identity;
-        return string.Equals(
-                expected.EvidenceReference,
-                identity.EvidenceReference,
-                StringComparison.Ordinal) &&
-            string.Equals(
-                expected.ConnectionId,
-                identity.ConnectionId,
-                StringComparison.Ordinal) &&
-            string.Equals(
-                expected.RuntimeConnectionId,
-                identity.RuntimeConnectionId,
-                StringComparison.Ordinal) &&
-            expected.ConnectionGeneration ==
-                identity.ConnectionGeneration &&
-            expected.Route.HasSamePreauthorizedBase(identity.Route);
+        ticket = matches[0];
+        return true;
     }
-
     private static bool TryAppend(
         TicketState ticket,
         RdpDvcEvidencePublicationEvent evidenceEvent)
@@ -770,7 +837,8 @@ public sealed class ProductionRdpDvcRuntimeEvidenceSource :
         internal RdpDvcRuntimeEvidenceTicket Ticket { get; } = ticket;
         internal List<RdCoreRuntimeEvidence> Evidence { get; } = [];
         internal TaskCompletionSource<RdpDvcRuntimeEvidenceBatch>
-            Completion { get; } = new(
+            Completion
+        { get; } = new(
                 TaskCreationOptions.RunContinuationsAsynchronously);
         internal int Next { get; set; }
         internal RdpDvcEvidenceRoute? CandidateRoute { get; set; }

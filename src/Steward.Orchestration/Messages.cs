@@ -1,5 +1,6 @@
 using Steward.Contracts;
 using Steward.Domain;
+using Steward.Maintenance.Windows;
 
 namespace Steward.Orchestration;
 
@@ -24,9 +25,11 @@ public static class OrchestrationMessageKinds
     public const string RateFeedback = "node.rate-feedback.v1";
     public const string IdentityDeliveryRequest = "node.identity-delivery-request.v1";
     public const string IdentityDelivery = "control.identity-delivery.v1";
+    public const string MaintenanceRequest = "control.local-maintenance.v1";
+    public const string MaintenanceResult = "node.local-maintenance-result.v1";
 }
 
-public sealed record OrchestrationEnvelope(
+internal sealed record OrchestrationEnvelope(
     string Schema,
     string Version,
     string Kind,
@@ -94,6 +97,18 @@ public sealed record CancelTaskMessage(
     AttemptIdentity Identity,
     int GracePeriodMilliseconds);
 
+public sealed record LocalMaintenanceRequestMessage(
+    int Version,
+    HostId HostId,
+    NodeIncarnationId NodeIncarnationId,
+    AuthenticatedMaintenanceRequest Request);
+
+public sealed record LocalMaintenanceResultFact(
+    int Version,
+    HostId HostId,
+    NodeIncarnationId NodeIncarnationId,
+    MaintenanceResponse Result);
+
 public sealed record FactAcknowledgementMessage(long ThroughCursor);
 
 public sealed record DelegationAcceptedFact(
@@ -142,4 +157,4 @@ public sealed record AgentActivityFact(AttemptIdentity Identity, string Text);
 public sealed record AgentFinalFact(AttemptIdentity Identity, string Text, string Receipt);
 public sealed record RateFeedbackFact(long FeedbackSequence, string Scope, DateTimeOffset RetryAfter);
 
-public sealed record DecodedOrchestrationMessage(string Kind, object Value);
+internal sealed record DecodedOrchestrationMessage(string Kind, object Value);

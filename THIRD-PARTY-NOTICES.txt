@@ -1,0 +1,97 @@
+Steward Endpoint Third-Party Notices
+====================================
+
+This file covers third-party components redistributed in the Steward endpoint
+MSI. It does not license Steward itself.
+
+MIT-licensed NuGet packages
+---------------------------
+
+Azure.Core 1.38.0
+Azure.Developer.DevCenter 1.0.0
+Microsoft.Bcl.AsyncInterfaces 1.1.1
+Microsoft.Data.Sqlite 10.0.4
+Microsoft.Data.Sqlite.Core 10.0.4
+Microsoft.Extensions.Configuration 10.0.11
+Microsoft.Extensions.Configuration.Abstractions 10.0.11
+Microsoft.Extensions.Configuration.Binder 10.0.11
+Microsoft.Extensions.Configuration.CommandLine 10.0.11
+Microsoft.Extensions.Configuration.EnvironmentVariables 10.0.11
+Microsoft.Extensions.Configuration.FileExtensions 10.0.11
+Microsoft.Extensions.Configuration.Json 10.0.11
+Microsoft.Extensions.Configuration.UserSecrets 10.0.11
+Microsoft.Extensions.DependencyInjection 10.0.11
+Microsoft.Extensions.DependencyInjection.Abstractions 10.0.11
+Microsoft.Extensions.Diagnostics 10.0.11
+Microsoft.Extensions.Diagnostics.Abstractions 10.0.11
+Microsoft.Extensions.FileProviders.Abstractions 10.0.11
+Microsoft.Extensions.FileProviders.Physical 10.0.11
+Microsoft.Extensions.FileSystemGlobbing 10.0.11
+Microsoft.Extensions.Hosting 10.0.11
+Microsoft.Extensions.Hosting.Abstractions 10.0.11
+Microsoft.Extensions.Hosting.WindowsServices 10.0.11
+Microsoft.Extensions.Logging 10.0.11
+Microsoft.Extensions.Logging.Abstractions 10.0.11
+Microsoft.Extensions.Logging.Configuration 10.0.11
+Microsoft.Extensions.Logging.Console 10.0.11
+Microsoft.Extensions.Logging.Debug 10.0.11
+Microsoft.Extensions.Logging.EventLog 10.0.11
+Microsoft.Extensions.Logging.EventSource 10.0.11
+Microsoft.Extensions.Options 10.0.11
+Microsoft.Extensions.Options.ConfigurationExtensions 10.0.11
+Microsoft.Extensions.Primitives 10.0.11
+System.ClientModel 1.0.0
+System.Diagnostics.EventLog 10.0.11
+System.Memory.Data 1.0.2
+System.Security.Cryptography.ProtectedData 10.0.0
+System.ServiceProcess.ServiceController 10.0.11
+
+MIT permission notice
+---------------------
+
+Copyright (c) Microsoft Corporation. All rights reserved.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+Apache-2.0-licensed NuGet packages
+----------------------------------
+
+SQLitePCLRaw.bundle_e_sqlite3 3.0.5
+SQLitePCLRaw.config.e_sqlite3 3.0.5
+SQLitePCLRaw.core 3.0.5
+SQLitePCLRaw.provider.e_sqlite3 3.0.5
+
+The complete Apache License 2.0 text is included as Apache-2.0.txt in the MSI
+payload.
+
+SQLite
+------
+
+SQLite 3.53.4
+SQLitePCLRaw.lib.e_sqlite3 3.53.3
+
+SQLite is Public Domain.
+https://sqlite.org/copyright.html
+
+Microsoft RDP DVC sample adaptation
+-----------------------------------
+
+The complete MIT license and Microsoft copyright notice for the adapted
+Microsoft RDP DVC sample material is included separately as
+Microsoft.RdpDvcSamples.LICENSE.txt.

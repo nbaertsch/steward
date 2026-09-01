@@ -1,11 +1,11 @@
 using System.Net;
 using System.Text;
 using System.Text.Json;
-using Steward.Cli;
 using Steward.Application;
+using Steward.Cli;
 using Steward.Contracts;
-using Steward.Domain;
 using Steward.DevBox.Windows;
+using Steward.Domain;
 using Steward.Terminal.Abstractions;
 
 namespace Steward.Cli.Tests;
@@ -304,7 +304,7 @@ public sealed class CliApplicationTests
             TerminalContractLimits.SchemaVersion, session, host, node, "local-user",
             @"C:\workspace", null, now, now, now.AddMinutes(5), TimeSpan.FromMinutes(5),
             1_048_576, 16_777_216, TerminalTranscriptMode.Metadata, 0,
-            TerminalFileTransferCapabilities.None, false, false, 0);
+            TerminalFileTransferCapabilities.None, false, false, 0, TimeSpan.Zero, 0);
         var context = new TerminalOperationContext(host, node, "local-user", 0);
         var cases = new (string[] Words, object Request, string Route)[]
         {

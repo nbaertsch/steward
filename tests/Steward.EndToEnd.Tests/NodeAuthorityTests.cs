@@ -542,7 +542,7 @@ public sealed class NodeAuthorityTests
     }
 
     private static ExtensionMetadataDto Metadata(string kind, string value) =>
-        new(kind, "1.0", JsonSerializer.SerializeToElement(new { value }));
+        ExtensionMetadataDto.Create(kind, "1.0", new { value });
 
     private static TaskAttemptDto Attempt(TaskAttemptId attemptId, TaskId taskId, int generation, NodeIncarnationId incarnation) =>
         new(

@@ -1,23 +1,24 @@
 using System.Collections.Concurrent;
 using System.Collections.Immutable;
-using System.Security.Cryptography;
+using System.Net.Http.Json;
 using System.Security.AccessControl;
+using System.Security.Cryptography;
 using System.Security.Principal;
-using Azure.Core;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Channels;
+using Azure.Core;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
-using Microsoft.AspNetCore.Mvc.Testing;
-using Microsoft.AspNetCore.Hosting;
-using System.Net.Http.Json;
-using Steward.Application;
 using Steward.Agents;
+using Steward.Application;
 using Steward.Contracts;
 using Steward.Control;
 using Steward.Domain;
+using Steward.Maintenance.Windows;
 using Steward.Node;
 using Steward.Node.Host;
 using Steward.Orchestration;
@@ -28,10 +29,10 @@ using Steward.Scheduling;
 using Steward.Stack.Local;
 using Steward.Tasks.Abstractions;
 using Steward.Tasks.Agent;
-using Steward.Transport;
-using Steward.Workloads.Evals;
 using Steward.Terminal.Abstractions;
 using Steward.Terminal.Windows;
+using Steward.Transport;
+using Steward.Workloads.Evals;
 
 namespace Steward.Orchestration.Tests;
 
@@ -96,11 +97,14 @@ public sealed class OrchestrationTests
             var controlKeyPath = Path.Combine(root, "control.pem");
             await File.WriteAllTextAsync(controlKeyPath, controlKey.ExportPkcs8PrivateKeyPem());
             var nodeOptions = new List<LocalNodeEndpointOptions>();
+            var sessionIds = new List<Guid>();
             for (var index = 0; index < 3; index++)
             {
                 using var nodeKey = ECDsa.Create();
                 var nodeKeyPath = Path.Combine(root, $"node-{index}.pem");
                 await File.WriteAllTextAsync(nodeKeyPath, nodeKey.ExportSubjectPublicKeyInfoPem());
+                var sessionId = Guid.NewGuid();
+                sessionIds.Add(sessionId);
                 nodeOptions.Add(new()
                 {
                     HostId = Steward.Domain.HostId.New().ToString(),
@@ -108,6 +112,7 @@ public sealed class OrchestrationTests
                     PoolId = Steward.Domain.PoolId.New().ToString(),
                     DialDirection = LocalDirectDialDirection.ControlDialsNode,
                     Endpoint = $"wss://node-{index}.example.invalid/steward",
+                    SessionId = sessionId.ToString(),
                     PeerIdentity = $"node-{index}",
                     PeerPublicKeyPemPath = nodeKeyPath
                 });
@@ -123,6 +128,13 @@ public sealed class OrchestrationTests
                 Nodes = nodeOptions
             }.Validate();
             Assert.Equal(3, enabled.Nodes.Count);
+            Assert.Equal(
+                sessionIds.ToArray(),
+                enabled.Nodes.Select(node =>
+                    node.Transport
+                        .DeserializeData<LocalDirectTransportBinding>()!
+                        .SessionId!.Value)
+                    .ToArray());
             nodeOptions[2].HostId = nodeOptions[0].HostId;
             Assert.Throws<InvalidOperationException>(() => new LocalStackOptions
             {
@@ -169,144 +181,144 @@ public sealed class OrchestrationTests
 
     [Fact]
     public async Task Managed_remote_agent_runtime_replays_remote_events_without_local_process()
+    {
+        var root = Path.Combine(
+            AppContext.BaseDirectory, "agent-process", Guid.NewGuid().ToString("N"));
+        var source = new FakeRemoteAgentSource();
+        var runtime = new ManagedRemoteAgentRuntime(source, new(
+            true, Path.Combine(Environment.SystemDirectory, "where.exe"), [], root,
+            PoolId.New(), 1024 * 1024,
+            TimeSpan.FromMilliseconds(10), ["git"], new Dictionary<string, string>
+            {
+                ["sdk"] = "dotnet10"
+            }));
+        try
         {
-            var root = Path.Combine(
-                AppContext.BaseDirectory, "agent-process", Guid.NewGuid().ToString("N"));
-            var source = new FakeRemoteAgentSource();
-            var runtime = new ManagedRemoteAgentRuntime(source, new(
-                true, Path.Combine(Environment.SystemDirectory, "where.exe"), [], root,
-                PoolId.New(), 1024 * 1024,
-                TimeSpan.FromMilliseconds(10), ["git"], new Dictionary<string, string>
-                {
-                    ["sdk"] = "dotnet10"
-                }));
-            try
+            foreach (var text in new[] { "first", "second" })
             {
-                foreach (var text in new[] { "first", "second" })
-                {
-                    var agentId = StewardAgentId.New();
-                    var turnId = AgentTurnId.New();
-                    var execution = new ManagedAgentExecution(
-                        Guid.NewGuid(), WorkloadId.New(), TaskId.New(), TaskAttemptId.New(),
-                        1, HostId.New(), NodeIncarnationId.New(), DateTimeOffset.UtcNow);
-                    var request = new AgentRuntimeRequest(
-                        new(agentId, "process-jsonl", "1.0.0", false, "parent", 0, 0, 0, 0, false),
-                        new(agentId, turnId, text, TextProvenance.User, null,
-                            AgentTurnStatus.Running, 1, null, null, null, null,
-                            execution.WorkloadId, execution.TaskId, execution),
-                        execution, [], []);
-                    var events = new List<AgentRuntimeEvent>();
-                    await foreach (var item in runtime.ExecuteAsync(request, CancellationToken.None))
-                        events.Add(item);
-                    Assert.Contains(events, x => x is AgentActivity);
-                    Assert.Equal($"fixture:{text}", Assert.IsType<AgentFinalResponse>(events.Last()).Text);
-                }
+                var agentId = StewardAgentId.New();
+                var turnId = AgentTurnId.New();
+                var execution = new ManagedAgentExecution(
+                    Guid.NewGuid(), WorkloadId.New(), TaskId.New(), TaskAttemptId.New(),
+                    1, HostId.New(), NodeIncarnationId.New(), DateTimeOffset.UtcNow);
+                var request = new AgentRuntimeRequest(
+                    new(agentId, "process-jsonl", "1.0.0", false, "parent", 0, 0, 0, 0, false),
+                    new(agentId, turnId, text, TextProvenance.User, null,
+                        AgentTurnStatus.Running, 1, null, null, null, null,
+                        execution.WorkloadId, execution.TaskId, execution),
+                    execution, [], []);
+                var events = new List<AgentRuntimeEvent>();
+                await foreach (var item in runtime.ExecuteAsync(request, CancellationToken.None))
+                    events.Add(item);
+                Assert.Contains(events, x => x is AgentActivity);
+                Assert.Equal($"fixture:{text}", Assert.IsType<AgentFinalResponse>(events.Last()).Text);
+            }
 
-                Assert.Equal(2, source.Reads);
-            }
-            finally
-            {
-                try { Directory.Delete(root, true); } catch (IOException) { }
-            }
+            Assert.Equal(2, source.Reads);
+        }
+        finally
+        {
+            try { Directory.Delete(root, true); } catch (IOException) { }
+        }
     }
 
     [Fact]
     public async Task Agent_turn_task_executes_configured_process_once_and_persists_final_before_terminal()
-            {
-                var root = Path.Combine(
-                    AppContext.BaseDirectory, "agent-task-type", Guid.NewGuid().ToString("N"));
-                Directory.CreateDirectory(root);
-                try
-                {
-                    var executable = Path.Combine(Environment.SystemDirectory, "where.exe");
-                    var executor = new AgentFixtureExecutor();
-                    var type = new AgentTurnTaskType(
-                        executor, new AgentTurnStateStore(Path.Combine(root, "agent-state.db")),
-                        executable, "process-jsonl/1.0");
-                    var input = new AgentTurnTaskInput(
-                        StewardAgentId.New(), AgentTurnId.New(), "remote-only", "User",
-                        ["context"], ["git"], new Dictionary<string, string>(),
-                        "process-jsonl/1.0", executable, ["dotnet"], 1024 * 1024);
-                    var context = new TaskExecutionContext(
-                        TaskAttemptId.New(), 1, root,
-                        JsonSerializer.SerializeToElement(input, StewardJson.Options));
-                    Assert.True(type.Validate(context.Input).IsValid);
-                    var handle = await type.StartAsync(context, CancellationToken.None);
-                    Assert.Equal(1, executor.Starts);
-                    Assert.Contains("remote-only", await File.ReadAllTextAsync(executor.StandardInputPath!));
-                    Assert.Equal(ExecutionState.Exited,
-                        (await type.ObserveAsync(handle, CancellationToken.None)).State);
-                    var outputs = await type.ReadOutputsAsync(handle, 0, 10, CancellationToken.None);
-                    Assert.Single(outputs.Outputs, x => x is TaskRuntimeAgentFinal);
-                    Assert.Contains(outputs.Outputs, x =>
-                        x is TaskRuntimeAgentActivity activity && activity.Text == "wörking");
-                    Assert.Equal(1, executor.Starts);
-                }
-                finally
-                {
-                    Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
-                    try { Directory.Delete(root, true); } catch (IOException) { }
-                }
+    {
+        var root = Path.Combine(
+            AppContext.BaseDirectory, "agent-task-type", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var executable = Path.Combine(Environment.SystemDirectory, "where.exe");
+            var executor = new AgentFixtureExecutor();
+            var type = new AgentTurnTaskType(
+                executor, new AgentTurnStateStore(Path.Combine(root, "agent-state.db")),
+                executable, "process-jsonl/1.0");
+            var input = new AgentTurnTaskInput(
+                StewardAgentId.New(), AgentTurnId.New(), "remote-only", "User",
+                ["context"], ["git"], new Dictionary<string, string>(),
+                "process-jsonl/1.0", executable, ["dotnet"], 1024 * 1024);
+            var context = new TaskExecutionContext(
+                TaskAttemptId.New(), 1, root,
+                TaskPayload.From(input, StewardJson.Options));
+            Assert.True(type.Validate(context.Input).IsValid);
+            var handle = await type.StartAsync(context, CancellationToken.None);
+            Assert.Equal(1, executor.Starts);
+            Assert.Contains("remote-only", await File.ReadAllTextAsync(executor.StandardInputPath!));
+            Assert.Equal(ExecutionState.Exited,
+                (await type.ObserveAsync(handle, CancellationToken.None)).State);
+            var outputs = await type.ReadOutputsAsync(handle, 0, 10, CancellationToken.None);
+            Assert.Single(outputs.Outputs, x => x is TaskRuntimeAgentFinal);
+            Assert.Contains(outputs.Outputs, x =>
+                x is TaskRuntimeAgentActivity activity && activity.Text == "wörking");
+            Assert.Equal(1, executor.Starts);
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            try { Directory.Delete(root, true); } catch (IOException) { }
+        }
     }
 
     [Fact]
     public async Task Remote_agent_runtime_uses_node_fact_sequence_and_stops_on_terminal_without_final()
-                {
-                    var execution = new ManagedAgentExecution(
-                        Guid.NewGuid(), WorkloadId.New(), TaskId.New(), TaskAttemptId.New(),
-                        2, HostId.New(), NodeIncarnationId.New(), DateTimeOffset.UtcNow);
-                    var request = new AgentRuntimeRequest(
-                        new(StewardAgentId.New(), "remote", "1.0", false, null, 0, 0, 0, 0, false),
-                        new(StewardAgentId.New(), AgentTurnId.New(), "turn", TextProvenance.User,
-                            null, AgentTurnStatus.Running, 1, null, null, null, null,
-                            execution.WorkloadId, execution.TaskId, execution),
-                        execution, [], []);
-                    var source = new SequencedRemoteSource();
-                    var runtime = new ManagedRemoteAgentRuntime(source, new(
-                        true, Path.Combine(Environment.SystemDirectory, "where.exe"), [],
-                        Environment.CurrentDirectory, PoolId.New(), 1024,
-                        TimeSpan.FromMilliseconds(1), [], new Dictionary<string, string>()));
-                    var values = new List<AgentRuntimeEvent>();
-                    await foreach (var item in runtime.ExecuteAsync(request, CancellationToken.None))
-                        values.Add(item);
-                    Assert.Equal(3, values.Count);
-                    Assert.Equal([0L, 5L, 8L], source.Cursors);
+    {
+        var execution = new ManagedAgentExecution(
+            Guid.NewGuid(), WorkloadId.New(), TaskId.New(), TaskAttemptId.New(),
+            2, HostId.New(), NodeIncarnationId.New(), DateTimeOffset.UtcNow);
+        var request = new AgentRuntimeRequest(
+            new(StewardAgentId.New(), "remote", "1.0", false, null, 0, 0, 0, 0, false),
+            new(StewardAgentId.New(), AgentTurnId.New(), "turn", TextProvenance.User,
+                null, AgentTurnStatus.Running, 1, null, null, null, null,
+                execution.WorkloadId, execution.TaskId, execution),
+            execution, [], []);
+        var source = new SequencedRemoteSource();
+        var runtime = new ManagedRemoteAgentRuntime(source, new(
+            true, Path.Combine(Environment.SystemDirectory, "where.exe"), [],
+            Environment.CurrentDirectory, PoolId.New(), 1024,
+            TimeSpan.FromMilliseconds(1), [], new Dictionary<string, string>()));
+        var values = new List<AgentRuntimeEvent>();
+        await foreach (var item in runtime.ExecuteAsync(request, CancellationToken.None))
+            values.Add(item);
+        Assert.Equal(3, values.Count);
+        Assert.Equal([0L, 5L, 8L], source.Cursors);
 
-                    var failed = new ManagedRemoteAgentRuntime(
-                        new TerminalRemoteSource(TaskAttemptState.Failed), new(
-                            true, Path.Combine(Environment.SystemDirectory, "where.exe"), [],
-                            Environment.CurrentDirectory, PoolId.New(), 1024,
-                            TimeSpan.FromMilliseconds(1), [], new Dictionary<string, string>()));
-                    var exception = await Assert.ThrowsAsync<RemoteAgentExecutionException>(async () =>
-                    {
-                        await foreach (var _ in failed.ExecuteAsync(request, CancellationToken.None)) { }
-                    });
-                    Assert.Equal("agent-task-failed", exception.Code);
+        var failed = new ManagedRemoteAgentRuntime(
+            new TerminalRemoteSource(TaskAttemptState.Failed), new(
+                true, Path.Combine(Environment.SystemDirectory, "where.exe"), [],
+                Environment.CurrentDirectory, PoolId.New(), 1024,
+                TimeSpan.FromMilliseconds(1), [], new Dictionary<string, string>()));
+        var exception = await Assert.ThrowsAsync<RemoteAgentExecutionException>(async () =>
+        {
+            await foreach (var _ in failed.ExecuteAsync(request, CancellationToken.None)) { }
+        });
+        Assert.Equal("agent-task-failed", exception.Code);
     }
 
     [Fact]
     public void Agent_turn_state_store_replays_identically_and_rejects_conflicting_sequence_after_restart()
-                {
-                    var root = Path.Combine(
-                        AppContext.BaseDirectory, "agent-event-conflict", Guid.NewGuid().ToString("N"));
-                    Directory.CreateDirectory(root);
-                    try
-                    {
-                        var path = Path.Combine(root, "events.db");
-                        var attempt = TaskAttemptId.New();
-                        var first = new AgentTurnStateStore(path);
-                        first.Append(attempt, 1, new(1, "activity", "same", null));
-                        first.Append(attempt, 1, new(1, "activity", "same", null));
-                        var restarted = new AgentTurnStateStore(path);
-                        Assert.Single(restarted.Read(attempt, 1, 0));
-                        Assert.Throws<InvalidDataException>(() =>
-                            restarted.Append(attempt, 1, new(1, "activity", "different", null)));
-                }
-                finally
-                {
-                    Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
-                    try { Directory.Delete(root, true); } catch (IOException) { }
-                }
+    {
+        var root = Path.Combine(
+            AppContext.BaseDirectory, "agent-event-conflict", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var path = Path.Combine(root, "events.db");
+            var attempt = TaskAttemptId.New();
+            var first = new AgentTurnStateStore(path);
+            first.Append(attempt, 1, new(1, "activity", "same", null));
+            first.Append(attempt, 1, new(1, "activity", "same", null));
+            var restarted = new AgentTurnStateStore(path);
+            Assert.Single(restarted.Read(attempt, 1, 0));
+            Assert.Throws<InvalidDataException>(() =>
+                restarted.Append(attempt, 1, new(1, "activity", "different", null)));
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            try { Directory.Delete(root, true); } catch (IOException) { }
+        }
     }
 
     [Fact]
@@ -334,9 +346,15 @@ public sealed class OrchestrationTests
             command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O"));
             await command.ExecuteNonQueryAsync();
         }
+        var liveness = new ControlNodeLivenessRegistry();
+        _ = liveness.MarkOnline(
+            fixture.Host.HostId,
+            fixture.Incarnation,
+            DateTimeOffset.UtcNow);
         var application = new ExecutableWorkloadApplicationService(
             fixture.Orchestrator, registrations,
-            new WorkloadPlanFactoryRegistry([new AgentTurnWorkloadPlanFactory()]));
+            new WorkloadPlanFactoryRegistry([new AgentTurnWorkloadPlanFactory()]),
+            liveness: liveness);
         var options = new ValidatedAgentExecutionOptions(
             true, Path.Combine(Environment.SystemDirectory, "where.exe"), [],
             Environment.CurrentDirectory, fixture.Host.PoolId, 1024 * 1024,
@@ -491,6 +509,7 @@ public sealed class OrchestrationTests
                     new LocalIdentityGrantStore(
                         Path.Combine(fixture.RootPath, "identity.db")))),
             [],
+            new ControlNodeLivenessRegistry(),
             NullLogger<LocalControlSessionWorker>.Instance);
         await worker.StartAsync(CancellationToken.None);
         try
@@ -516,38 +535,211 @@ public sealed class OrchestrationTests
     }
 
     [Fact]
-    public void Mutation_token_rejects_permissive_existing_file_and_generated_file_is_private()
+    public async Task Node_registration_liveness_touch_preserves_authenticated_identity()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var registrations = new ControlNodeRegistrationStore(fixture.Control);
+        var original = new NodeEndpointRegistration(
+            fixture.Host.HostId, fixture.Incarnation, fixture.Host.PoolId,
+            DirectTransport(45123), "node", "node.pem", fixture.Host.Capacity,
+            ["process"], [], DateTimeOffset.UtcNow.AddMinutes(-10));
+        await registrations.RegisterAsync(original);
+        var refreshedAt = DateTimeOffset.UtcNow;
+
+        await registrations.TouchObservedAtAsync(
+            original.HostId, original.NodeIncarnationId, refreshedAt);
+
+        var refreshed = Assert.Single(await registrations.ListAsync());
+        Assert.Equal(original.HostId, refreshed.HostId);
+        Assert.Equal(original.NodeIncarnationId, refreshed.NodeIncarnationId);
+        Assert.Equal(original.Transport, refreshed.Transport);
+        Assert.Equal(original.PeerIdentity, refreshed.PeerIdentity);
+        Assert.Equal(original.PeerPublicKeyReference, refreshed.PeerPublicKeyReference);
+        Assert.Equal(refreshedAt, refreshed.ObservedAt);
+        await registrations.TouchObservedAtAsync(
+            original.HostId,
+            original.NodeIncarnationId,
+            refreshedAt.AddMinutes(-5));
+        Assert.Equal(
+            refreshedAt,
+            Assert.Single(await registrations.ListAsync()).ObservedAt);
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            registrations.TouchObservedAtAsync(
+                original.HostId, NodeIncarnationId.New(), DateTimeOffset.UtcNow));
+    }
+
+    [Fact]
+    public async Task Live_host_observation_schedules_work_queued_by_stale_capacity()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var plan = Plan(1);
+        var staleHost = fixture.Host with
         {
-            var root = Path.Combine(
-                AppContext.BaseDirectory, "token-acl", Guid.NewGuid().ToString("N"));
-            Directory.CreateDirectory(root);
-            try
+            ObservedAt = fixture.Now.Subtract(TimeSpan.FromMinutes(10))
+        };
+        var initial = await fixture.Orchestrator.RegisterAndScheduleAsync(
+            plan, [staleHost], fixture.Host.PoolId, fixture.Now);
+        Assert.Empty(initial.Placements);
+
+        var placements = await fixture.Orchestrator.ObserveHostAsync(
+            fixture.Host with { ObservedAt = fixture.Now },
+            fixture.Now);
+
+        Assert.Equal(1, placements);
+        var task = await fixture.Control.GetTaskAsync(plan.Tasks[0].TaskId);
+        Assert.NotNull(task);
+        Assert.Equal(1, task.Payload.AcceptedGeneration);
+        var executeItem = (await fixture.Control.ReadOutboxAsync())
+            .Single(x => x.Kind == OrchestrationMessageKinds.ExecuteTask);
+        var execute = (ExecuteTaskMessage)OrchestrationMessageCodec.Decode(
+            Encoding.UTF8.GetBytes(executeItem.PayloadJson)).Value;
+        var attempt = await fixture.Control.GetTaskAttemptAsync(
+            execute.Identity.AttemptId);
+        Assert.NotNull(attempt);
+        Assert.Equal(fixture.Host.HostId, attempt.Payload.HostId);
+        Assert.Equal(
+            fixture.Host.IncarnationId,
+            attempt.Payload.NodeIncarnationId);
+    }
+
+    [Fact]
+    public async Task Older_live_host_observation_cannot_replace_newer_capacity()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var plan = Plan(1);
+        var newer = fixture.Host with
+        {
+            ObservedAt = fixture.Now,
+            Available = false
+        };
+        var initial = await fixture.Orchestrator.RegisterAndScheduleAsync(
+            plan,
+            [newer],
+            fixture.Host.PoolId,
+            fixture.Now);
+        Assert.Empty(initial.Placements);
+
+        var placements = await fixture.Orchestrator.ObserveHostAsync(
+            fixture.Host with
             {
-                var generated = Path.Combine(root, "generated.token");
-                _ = new LocalMutationSecurity(generated);
-                if (OperatingSystem.IsWindows())
-                {
-                    Assert.True(new FileInfo(generated).GetAccessControl().AreAccessRulesProtected);
-                    var permissive = Path.Combine(root, "permissive.token");
-                    File.WriteAllText(permissive, Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(32)));
-                    var acl = new FileInfo(permissive).GetAccessControl();
-                    acl.SetAccessRuleProtection(true, false);
-                    acl.AddAccessRule(new(
-                        new SecurityIdentifier(WellKnownSidType.WorldSid, null),
-                        FileSystemRights.ReadData, AccessControlType.Allow));
-                    new FileInfo(permissive).SetAccessControl(acl);
-                    Assert.Throws<InvalidDataException>(() => new LocalMutationSecurity(permissive));
-                }
-                else
-                {
-                    var mode = File.GetUnixFileMode(generated);
-                    Assert.Equal(0, (int)(mode & (UnixFileMode.GroupRead | UnixFileMode.OtherRead)));
-                }
-            }
-            finally
+                ObservedAt = fixture.Now.AddMinutes(-1),
+                Available = true
+            },
+            fixture.Now);
+
+        Assert.Equal(0, placements);
+        Assert.Equal(
+            0,
+            (await fixture.Control.GetTaskAsync(plan.Tasks[0].TaskId))!
+                .Payload.AcceptedGeneration);
+    }
+
+    [Fact]
+    public void New_liveness_lease_preserves_newer_observation_and_stale_lease_cannot_remove_it()
+    {
+        var liveness = new ControlNodeLivenessRegistry();
+        var host = HostId.New();
+        var incarnation = NodeIncarnationId.New();
+        var newer = DateTimeOffset.UtcNow;
+        var first = liveness.MarkOnline(host, incarnation, newer);
+        var second = liveness.MarkOnline(
+            host,
+            incarnation,
+            newer.AddMinutes(-5));
+
+        Assert.True(
+            liveness.TryGetOnline(host, incarnation, out var observedAt));
+        Assert.Equal(newer.ToUniversalTime(), observedAt);
+        Assert.False(liveness.MarkOffline(host, incarnation, first));
+        Assert.True(liveness.TryGetOnline(host, incarnation, out _));
+        Assert.True(liveness.MarkOffline(host, incarnation, second));
+        Assert.False(liveness.TryGetOnline(host, incarnation, out _));
+    }
+
+    [Fact]
+    public async Task Offline_observation_prevents_retry_placement()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var originalPlan = Plan(1);
+        var plan = new WorkloadPlan(
+            originalPlan.WorkloadId,
+            originalPlan.PlanRevisionId,
+            originalPlan.SchemaVersion,
+            originalPlan.PlannerType,
+            originalPlan.PlannerVersion,
+            [originalPlan.Tasks[0] with { RetryCap = 1 }],
+            originalPlan.FailurePolicy,
+            originalPlan.MaximumConcurrency);
+        var scheduled = await fixture.Orchestrator.RegisterAndScheduleAsync(
+            plan,
+            [fixture.Host],
+            fixture.Host.PoolId,
+            fixture.Now);
+        var placement = Assert.Single(scheduled.Placements);
+        var executeItem = (await fixture.Control.ReadOutboxAsync())
+            .Single(x => x.Kind == OrchestrationMessageKinds.ExecuteTask);
+        var execute = (ExecuteTaskMessage)OrchestrationMessageCodec.Decode(
+            Encoding.UTF8.GetBytes(executeItem.PayloadJson)).Value;
+        Assert.Equal(
+            FactDisposition.Applied,
+            await fixture.Orchestrator.ApplyNodeFactAsync(
+                fixture.Incarnation,
+                1,
+                OrchestrationMessageKinds.TaskTerminal,
+                new TaskTerminalFact(
+                    execute.Identity,
+                    TaskAttemptState.Interrupted,
+                    1,
+                    "failed-receipt",
+                    null)));
+        await fixture.Orchestrator.ObserveHostOfflineAsync(
+            fixture.Host.HostId,
+            fixture.Incarnation);
+
+        await fixture.Orchestrator.RetryAsync(
+            plan.WorkloadId,
+            placement.TaskId,
+            fixture.Now.AddMinutes(1));
+        var task = await fixture.Control.GetTaskAsync(placement.TaskId);
+
+        Assert.NotNull(task);
+        Assert.Equal(placement.Generation, task.Payload.AcceptedGeneration);
+        Assert.Equal(TaskObservedState.Queued, task.Payload.ObservedState);
+    }
+
+    [Fact]
+    public void Mutation_token_rejects_permissive_existing_file_and_generated_file_is_private()
+    {
+        var root = Path.Combine(
+            AppContext.BaseDirectory, "token-acl", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var generated = Path.Combine(root, "generated.token");
+            _ = new LocalMutationSecurity(generated);
+            if (OperatingSystem.IsWindows())
             {
-                try { Directory.Delete(root, true); } catch (IOException) { }
+                Assert.True(new FileInfo(generated).GetAccessControl().AreAccessRulesProtected);
+                var permissive = Path.Combine(root, "permissive.token");
+                File.WriteAllText(permissive, Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(32)));
+                var acl = new FileInfo(permissive).GetAccessControl();
+                acl.SetAccessRuleProtection(true, false);
+                acl.AddAccessRule(new(
+                    new SecurityIdentifier(WellKnownSidType.WorldSid, null),
+                    FileSystemRights.ReadData, AccessControlType.Allow));
+                new FileInfo(permissive).SetAccessControl(acl);
+                Assert.Throws<InvalidDataException>(() => new LocalMutationSecurity(permissive));
             }
+            else
+            {
+                var mode = File.GetUnixFileMode(generated);
+                Assert.Equal(0, (int)(mode & (UnixFileMode.GroupRead | UnixFileMode.OtherRead)));
+            }
+        }
+        finally
+        {
+            try { Directory.Delete(root, true); } catch (IOException) { }
+        }
     }
 
     [Fact]
@@ -612,10 +804,19 @@ public sealed class OrchestrationTests
                     $"node-{index}", $"keys/node-{index}.pem",
                     new ResourceRequirements(100, 10_000, 10_000, processCount: 100, concurrencyUnits: 100),
                     [], [], DateTimeOffset.UtcNow)).ToArray();
-            foreach (var endpoint in endpoints) await registrations.RegisterAsync(endpoint);
+            var liveness = new ControlNodeLivenessRegistry();
+            foreach (var endpoint in endpoints)
+            {
+                await registrations.RegisterAsync(endpoint);
+                _ = liveness.MarkOnline(
+                    endpoint.HostId,
+                    endpoint.NodeIncarnationId,
+                    endpoint.ObservedAt);
+            }
             var application = new ExecutableWorkloadApplicationService(
                 orchestrator, registrations,
-                new WorkloadPlanFactoryRegistry([new SyntheticPlanFactory(300)]));
+                new WorkloadPlanFactoryRegistry([new SyntheticPlanFactory(300)]),
+                liveness: liveness);
             var submitted = await application.SubmitAsync(new(
                 "synthetic-300", JsonSerializer.SerializeToElement(new { }),
                 pool, "synthetic-300"));
@@ -712,6 +913,7 @@ public sealed class OrchestrationTests
                 new ResourceRequirements(1), [], [], DateTimeOffset.UtcNow);
             using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
             var session = await ConnectAsync(orchestrator, endpoint, journal, processor, cancellation.Token);
+
             await WaitUntilAsync(async () =>
                 (await controlStore.GetWorkloadAsync(workloadId))?.Payload.ObservedState ==
                 WorkloadObservedState.Succeeded);
@@ -737,53 +939,53 @@ public sealed class OrchestrationTests
 
     [Fact]
     public async Task Pool_application_enforces_maximum_and_blocks_destructive_active_host_action()
+    {
+        var root = Path.Combine(
+            AppContext.BaseDirectory, "pool-application", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var schedulerStore = new InMemorySchedulerStateStore();
+        try
         {
-            var root = Path.Combine(
-                AppContext.BaseDirectory, "pool-application", Guid.NewGuid().ToString("N"));
-            Directory.CreateDirectory(root);
-            var schedulerStore = new InMemorySchedulerStateStore();
-            try
-            {
-                var controlStore = new SqliteControlStore(Path.Combine(root, "control.db"));
-                var orchestrator = new ControlOrchestrator(
-                    controlStore, new CompositeScheduler(schedulerStore), schedulerStore,
-                    new(new(10, TimeSpan.FromHours(1), TimeSpan.FromMinutes(5), 1024 * 1024, 2)));
-                await orchestrator.InitializeAsync();
-                var poolStore = new SqlitePoolStateStore(Path.Combine(root, "pools.db"));
-                var coordinator = new PoolCoordinator(poolStore);
-                var provider = new FakeHostProvider();
-                var nodeStore = new ControlNodeRegistrationStore(controlStore);
-                var enrollment = new FakeEnrollmentWorkflow();
-                var service = new HostPoolApplicationService(
-                    controlStore, poolStore, coordinator,
-                    new HostProviderRegistry([
-                        new KeyValuePair<string, IHostProvider>("fake", provider)
-                    ]),
-                    nodeStore, enrollment: enrollment);
-                var pool = PoolId.New();
-                await service.RegisterPoolAsync(new(
-                    new(pool, 0, 2, TimeSpan.FromMinutes(1)),
-                    new("fake", "project", "pool")));
-                var reconciliation = await service.ReconcileAsync(
-                    pool, [new("a"), new("b"), new("c")], DateTimeOffset.UtcNow);
-                Assert.Equal(2, reconciliation.Members.Count);
-                Assert.Equal(2, provider.Created);
-                Assert.Equal(2, enrollment.Enrolled);
-                Assert.Equal(2, (await nodeStore.ListAsync()).Count);
+            var controlStore = new SqliteControlStore(Path.Combine(root, "control.db"));
+            var orchestrator = new ControlOrchestrator(
+                controlStore, new CompositeScheduler(schedulerStore), schedulerStore,
+                new(new(10, TimeSpan.FromHours(1), TimeSpan.FromMinutes(5), 1024 * 1024, 2)));
+            await orchestrator.InitializeAsync();
+            var poolStore = new SqlitePoolStateStore(Path.Combine(root, "pools.db"));
+            var coordinator = new PoolCoordinator(poolStore);
+            var provider = new FakeHostProvider();
+            var nodeStore = new ControlNodeRegistrationStore(controlStore);
+            var enrollment = new FakeEnrollmentWorkflow();
+            var service = new HostPoolApplicationService(
+                controlStore, poolStore, coordinator,
+                new HostProviderRegistry([
+                    new KeyValuePair<string, IHostProvider>("fake", provider)
+                ]),
+                nodeStore, enrollment: enrollment);
+            var pool = PoolId.New();
+            await service.RegisterPoolAsync(new(
+                new(pool, 0, 2, TimeSpan.FromMinutes(1)),
+                new("fake", "project", "pool")));
+            var reconciliation = await service.ReconcileAsync(
+                pool, [new("a"), new("b"), new("c")], DateTimeOffset.UtcNow);
+            Assert.Equal(2, reconciliation.Members.Count);
+            Assert.Equal(2, provider.Created);
+            Assert.Equal(2, enrollment.Enrolled);
+            Assert.Equal(2, (await nodeStore.ListAsync()).Count);
 
-                var member = reconciliation.Members[0];
-                var plan = new WorkloadPlan(
-                    WorkloadId.New(), PlanRevisionId.New(), WorkloadPlan.CurrentSchemaVersion,
-                    "test", "1.0",
-                    [new(TaskId.New(), "active", "lean", "1.0", new ResourceRequirements(1),
+            var member = reconciliation.Members[0];
+            var plan = new WorkloadPlan(
+                WorkloadId.New(), PlanRevisionId.New(), WorkloadPlan.CurrentSchemaVersion,
+                "test", "1.0",
+                [new(TaskId.New(), "active", "lean", "1.0", new ResourceRequirements(1),
                         TaskInput.Empty, [], new HashSet<string>(), null, null, member.HostId, 0,
                         InterruptionClass.NonInterruptible, [], "result")]);
-                await orchestrator.RegisterAndScheduleAsync(
-                    plan, [(await nodeStore.ListAsync()).Single(x => x.HostId == member.HostId).ToSnapshot()],
-                    pool, DateTimeOffset.UtcNow);
-                var blocked = await Assert.ThrowsAsync<ApplicationContractException>(
-                    () => service.StopAsync(member.HostId, force: false));
-                Assert.Equal(ProblemCodes.LifecycleBlockedByActiveWork, blocked.Code);
+            await orchestrator.RegisterAndScheduleAsync(
+                plan, [(await nodeStore.ListAsync()).Single(x => x.HostId == member.HostId).ToSnapshot()],
+                pool, DateTimeOffset.UtcNow);
+            var blocked = await Assert.ThrowsAsync<ApplicationContractException>(
+                () => service.StopAsync(member.HostId, force: false));
+            Assert.Equal(ProblemCodes.LifecycleBlockedByActiveWork, blocked.Code);
         }
         finally
         {
@@ -907,40 +1109,178 @@ public sealed class OrchestrationTests
 
     [Fact]
     public async Task General_process_application_submission_creates_attempt_and_completes_through_node()
-        {
-            using var fixture = await Fixture.CreateAsync();
-            var registrations = new ControlNodeRegistrationStore(fixture.Control);
-            await registrations.RegisterAsync(new(
-                fixture.Host.HostId, fixture.Incarnation, fixture.Host.PoolId,
-                DirectTransport(46031), "node", "node.pem",
-                fixture.Host.Capacity,
-                [], [], DateTimeOffset.UtcNow));
-            var application = new ExecutableWorkloadApplicationService(
-                fixture.Orchestrator, registrations,
-                new WorkloadPlanFactoryRegistry([
-                    new GeneralTaskWorkloadPlanFactory("process", compose: false)
-                ]));
-            var input = new GeneralTaskWorkloadInput(JsonSerializer.SerializeToElement(
-                new Steward.Tasks.Process.ProcessTaskDefinition(
-                    Path.Combine(Environment.SystemDirectory, "where.exe"), ["dotnet"])),
-                new ResourceRequirements(1, 1, 1, processCount: 1, concurrencyUnits: 1));
-            var workload = await application.SubmitAsync(new(
-                "process", JsonSerializer.SerializeToElement(input, StewardJson.Options),
-                fixture.Host.PoolId, "process-http-shared-handler"));
-            Assert.Single(workload.Payload.TaskIds);
-            Assert.NotEmpty(await fixture.Control.ReadOutboxAsync());
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var registrations = new ControlNodeRegistrationStore(fixture.Control);
+        await registrations.RegisterAsync(new(
+            fixture.Host.HostId, fixture.Incarnation, fixture.Host.PoolId,
+            DirectTransport(46031), "node", "node.pem",
+            fixture.Host.Capacity,
+            [], [], DateTimeOffset.UtcNow));
+        var liveness = new ControlNodeLivenessRegistry();
+        _ = liveness.MarkOnline(
+            fixture.Host.HostId,
+            fixture.Incarnation,
+            DateTimeOffset.UtcNow);
+        var application = new ExecutableWorkloadApplicationService(
+            fixture.Orchestrator, registrations,
+            new WorkloadPlanFactoryRegistry([
+                new GeneralTaskWorkloadPlanFactory("process", compose: false)
+            ]),
+            liveness: liveness);
+        var input = new GeneralTaskWorkloadInput(JsonSerializer.SerializeToElement(
+            new Steward.Tasks.Process.ProcessTaskDefinition(
+                Path.Combine(Environment.SystemDirectory, "where.exe"), ["dotnet"])),
+            new ResourceRequirements(1, 1, 1, processCount: 1, concurrencyUnits: 1));
+        var workload = await application.SubmitAsync(new(
+            "process", JsonSerializer.SerializeToElement(input, StewardJson.Options),
+            fixture.Host.PoolId, "process-http-shared-handler"));
+        Assert.Single(workload.Payload.TaskIds);
+        Assert.NotEmpty(await fixture.Control.ReadOutboxAsync());
 
-            await using var journal = await fixture.OpenNodeAsync();
-            await using var processor = fixture.CreateNodeProcessor(journal, new LeanTaskType("process"));
-            using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-            var session = await fixture.ConnectAsync(journal, processor, cancellation.Token);
-            await WaitUntilAsync(async () =>
-                (await fixture.Control.GetWorkloadAsync(workload.Payload.WorkloadId))?.Payload.ObservedState ==
-                WorkloadObservedState.Succeeded);
-            cancellation.Cancel();
-            await IgnoreCancellationAsync(session.Control);
-            await IgnoreCancellationAsync(session.Node);
-            Assert.NotNull(await fixture.Control.GetTaskAsync(workload.Payload.TaskIds[0]));
+        await using var journal = await fixture.OpenNodeAsync();
+        await using var processor = fixture.CreateNodeProcessor(journal, new LeanTaskType("process"));
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var session = await fixture.ConnectAsync(journal, processor, cancellation.Token);
+        await WaitUntilAsync(async () =>
+            (await fixture.Control.GetWorkloadAsync(workload.Payload.WorkloadId))?.Payload.ObservedState ==
+            WorkloadObservedState.Succeeded);
+        cancellation.Cancel();
+        await IgnoreCancellationAsync(session.Control);
+        await IgnoreCancellationAsync(session.Node);
+        Assert.NotNull(await fixture.Control.GetTaskAsync(workload.Payload.TaskIds[0]));
+    }
+
+    [Fact]
+    public async Task Capacity_reconciliation_failure_does_not_hide_committed_workload()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var registrations = new ControlNodeRegistrationStore(fixture.Control);
+        await registrations.RegisterAsync(new(
+            fixture.Host.HostId,
+            fixture.Incarnation,
+            fixture.Host.PoolId,
+            DirectTransport(46032),
+            "node",
+            "node.pem",
+            fixture.Host.Capacity,
+            [],
+            [],
+            fixture.Now.Subtract(TimeSpan.FromMinutes(10))));
+        string? diagnostic = null;
+        var application = new ExecutableWorkloadApplicationService(
+            fixture.Orchestrator,
+            registrations,
+            new WorkloadPlanFactoryRegistry([
+                new GeneralTaskWorkloadPlanFactory("process", compose: false)
+            ]),
+            new ThrowingPoolDemandReconciler(),
+            value => diagnostic = value);
+        var input = new GeneralTaskWorkloadInput(
+            JsonSerializer.SerializeToElement(
+                new Steward.Tasks.Process.ProcessTaskDefinition(
+                    Path.Combine(Environment.SystemDirectory, "where.exe"),
+                    ["dotnet"])),
+            new ResourceRequirements(
+                1, 1, 1, processCount: 1, concurrencyUnits: 1));
+
+        var workload = await application.SubmitAsync(new(
+            "process",
+            JsonSerializer.SerializeToElement(input, StewardJson.Options),
+            fixture.Host.PoolId,
+            "capacity-reconciliation-failure"));
+
+        Assert.NotNull(
+            await fixture.Control.GetWorkloadAsync(workload.Payload.WorkloadId));
+        Assert.StartsWith(
+            "capacity-reconciliation-failed-InvalidOperationException-",
+            diagnostic,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Workload_is_durably_accepted_and_schedules_when_authenticated_node_appears()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var registrations = new ControlNodeRegistrationStore(fixture.Control);
+        var application = new ExecutableWorkloadApplicationService(
+            fixture.Orchestrator,
+            registrations,
+            new WorkloadPlanFactoryRegistry([
+                new GeneralTaskWorkloadPlanFactory("process", compose: false)
+            ]),
+            liveness: new ControlNodeLivenessRegistry());
+        var input = new GeneralTaskWorkloadInput(
+            JsonSerializer.SerializeToElement(
+                new Steward.Tasks.Process.ProcessTaskDefinition(
+                    Path.Combine(Environment.SystemDirectory, "where.exe"),
+                    ["dotnet"])),
+            new ResourceRequirements(
+                1, 1, 1, processCount: 1, concurrencyUnits: 1));
+
+        var workload = await application.SubmitAsync(new(
+            "process",
+            JsonSerializer.SerializeToElement(input, StewardJson.Options),
+            fixture.Host.PoolId,
+            "deferred-until-authenticated-node"));
+        var taskId = Assert.Single(workload.Payload.TaskIds);
+        Assert.Equal(
+            0,
+            (await fixture.Control.GetTaskAsync(taskId))!
+                .Payload.AcceptedGeneration);
+
+        var placements = await fixture.Orchestrator.ObserveHostAsync(
+            fixture.Host with { ObservedAt = fixture.Now },
+            fixture.Now);
+
+        Assert.Equal(1, placements);
+        Assert.Equal(
+            1,
+            (await fixture.Control.GetTaskAsync(taskId))!
+                .Payload.AcceptedGeneration);
+    }
+    [Fact]
+    public async Task Configured_node_is_not_schedulable_before_authenticated_session()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var registrations = new ControlNodeRegistrationStore(fixture.Control);
+        await registrations.RegisterAsync(new(
+            fixture.Host.HostId,
+            fixture.Incarnation,
+            fixture.Host.PoolId,
+            DirectTransport(46033),
+            "node",
+            "node.pem",
+            fixture.Host.Capacity,
+            [],
+            [],
+            DateTimeOffset.UtcNow));
+        var application = new ExecutableWorkloadApplicationService(
+            fixture.Orchestrator,
+            registrations,
+            new WorkloadPlanFactoryRegistry([
+                new GeneralTaskWorkloadPlanFactory("process", compose: false)
+            ]),
+            liveness: new ControlNodeLivenessRegistry());
+        var input = new GeneralTaskWorkloadInput(
+            JsonSerializer.SerializeToElement(
+                new Steward.Tasks.Process.ProcessTaskDefinition(
+                    Path.Combine(Environment.SystemDirectory, "where.exe"),
+                    ["dotnet"])),
+            new ResourceRequirements(
+                1, 1, 1, processCount: 1, concurrencyUnits: 1));
+
+        var workload = await application.SubmitAsync(new(
+            "process",
+            JsonSerializer.SerializeToElement(input, StewardJson.Options),
+            fixture.Host.PoolId,
+            "unauthenticated-node-capacity"));
+
+        var task = await fixture.Control.GetTaskAsync(
+            Assert.Single(workload.Payload.TaskIds));
+        Assert.NotNull(task);
+        Assert.Equal(0, task.Payload.AcceptedGeneration);
+        Assert.Equal(TaskObservedState.Queued, task.Payload.ObservedState);
     }
 
     [Fact]
@@ -1032,14 +1372,32 @@ public sealed class OrchestrationTests
             do
             {
                 var current = await app.GetAsync(authority.SessionId, cancellation.Token);
-                snapshot = TerminalWireCodec.FromElement<TerminalSessionSnapshot>(
-                    current.Snapshot!.Value)!;
+                snapshot = current.Snapshot!;
                 if (snapshot.State != TerminalSessionState.Open) await Task.Delay(25);
             } while (snapshot.State != TerminalSessionState.Open);
             var input = Encoding.UTF8.GetBytes("echo managed-input\r\n");
-            var afterInput = await app.InputAsync(authority.SessionId, new(
-                authority.SessionId, default!, "input-1", snapshot.Revision, input), cancellation.Token);
-            var inputSnapshot = TerminalWireCodec.FromElement<TerminalSessionSnapshot>(afterInput.Snapshot!.Value)!;
+            TerminalWireResponse? afterInput = null;
+            for (var attempt = 0; attempt < 20 && afterInput is null; attempt++)
+            {
+                try
+                {
+                    afterInput = await app.InputAsync(authority.SessionId, new(
+                        authority.SessionId, default!, "input-1",
+                        snapshot.Revision, input), cancellation.Token);
+                }
+                catch (ApplicationContractException exception)
+                    when (exception.Message.Contains(
+                        "revision does not match",
+                        StringComparison.Ordinal))
+                {
+                    var current = await app.GetAsync(
+                        authority.SessionId,
+                        cancellation.Token);
+                    snapshot = current.Snapshot!;
+                }
+            }
+            Assert.NotNull(afterInput);
+            var inputSnapshot = afterInput.Snapshot!;
             TerminalWireResponse output;
             do
             {
@@ -1157,7 +1515,7 @@ public sealed class OrchestrationTests
             var submit = new
             {
                 kind = "process",
-                input = JsonSerializer.SerializeToElement(input, StewardJson.Options),
+                input = TaskPayload.From(input, StewardJson.Options),
                 poolId = pool.ToString(),
                 idempotencyKey = "http-process"
             };
@@ -1212,6 +1570,18 @@ public sealed class OrchestrationTests
                 new(Path.Combine(root, "workspaces")));
             using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
             var session = await ConnectAsync(orchestrator, endpoint, journal, processor, cancellation.Token);
+            var liveAt = DateTimeOffset.UtcNow;
+            _ = factory.Services
+                .GetRequiredService<ControlNodeLivenessRegistry>()
+                .MarkOnline(host, incarnation, liveAt);
+            await orchestrator.ObserveHostAsync(
+                endpoint.ToSnapshot() with
+                {
+                    ObservedAt = liveAt,
+                    Available = true
+                },
+                liveAt,
+                cancellation.Token);
             await WaitUntilAsync(async () =>
             {
                 await ThrowIfFaultedAsync(session.Control, session.Node);
@@ -1230,6 +1600,91 @@ public sealed class OrchestrationTests
             Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
             try { Directory.Delete(root, true); } catch (IOException) { }
         }
+    }
+
+    [Fact]
+    public async Task Node_maintenance_handler_validates_identity_and_forwards_once()
+    {
+        var host = HostId.New();
+        var incarnation = NodeIncarnationId.New();
+        var request = new AuthenticatedMaintenanceRequest(
+            new MaintenanceRequestBody(
+                MaintenanceContract.ProtocolVersion,
+                Guid.NewGuid(),
+                Guid.NewGuid(),
+                DateTimeOffset.UtcNow,
+                new CollectDiagnosticsOperation(
+                    1,
+                    DiagnosticKind.MaintenanceAndEndpointHealth,
+                    4096)),
+            "AA==");
+        var forwarder = new RecordingMaintenanceForwarder();
+        var handler = new NodeMaintenanceCommandHandler(
+            host, incarnation, forwarder);
+        var message = new LocalMaintenanceRequestMessage(
+            1, host, incarnation, request);
+
+        var result = await handler.HandleAsync(message, default);
+
+        Assert.Equal(1, forwarder.Calls);
+        Assert.Equal(request.Body.RequestId, result.Result.RequestId);
+        Assert.Equal(request.Body.OperationId, result.Result.OperationId);
+        await Assert.ThrowsAsync<OrchestrationMessageException>(() =>
+            handler.HandleAsync(
+                message with { HostId = HostId.New() },
+                default));
+    }
+
+    [Fact]
+    public void Maintenance_messages_are_closed_bounded_and_round_trip()
+    {
+        var host = HostId.New();
+        var incarnation = NodeIncarnationId.New();
+        var request = new AuthenticatedMaintenanceRequest(
+            new MaintenanceRequestBody(
+                MaintenanceContract.ProtocolVersion,
+                Guid.NewGuid(),
+                Guid.NewGuid(),
+                DateTimeOffset.UtcNow,
+                new CollectDiagnosticsOperation(
+                    1,
+                    DiagnosticKind.MaintenanceAndEndpointHealth,
+                    4096)),
+            "AA==");
+        var message = new LocalMaintenanceRequestMessage(
+            1,
+            host,
+            incarnation,
+            request);
+
+        var decoded = OrchestrationMessageCodec.Decode(
+            OrchestrationMessageCodec.Encode(message, DateTimeOffset.UtcNow));
+
+        Assert.Equal(OrchestrationMessageKinds.MaintenanceRequest, decoded.Kind);
+        var parsed = Assert.IsType<LocalMaintenanceRequestMessage>(
+            decoded.Value);
+        Assert.Equal(host, parsed.HostId);
+        Assert.Equal(incarnation, parsed.NodeIncarnationId);
+        Assert.Equal(
+            MaintenanceContract.Serialize(request),
+            MaintenanceContract.Serialize(parsed.Request));
+        Assert.Throws<OrchestrationMessageException>(() =>
+            OrchestrationMessageCodec.Encode(
+                message with { Version = 2 },
+                DateTimeOffset.UtcNow));
+        Assert.Throws<OrchestrationMessageException>(() =>
+            OrchestrationMessageCodec.Encode(
+                new LocalMaintenanceResultFact(
+                    1,
+                    host,
+                    incarnation,
+                    new MaintenanceResponse(
+                        MaintenanceContract.ProtocolVersion,
+                        request.Body.RequestId,
+                        request.Body.OperationId,
+                        MaintenanceOperationStatus.Succeeded,
+                        false)),
+                DateTimeOffset.UtcNow));
     }
 
     [Fact]
@@ -1567,6 +2022,66 @@ public sealed class OrchestrationTests
     }
 
     [Fact]
+    public async Task Control_restart_fences_stale_capacity_until_authenticated_observation()
+    {
+        using var fixture = await Fixture.CreateAsync(durableScheduler: true);
+        var original = Plan(1);
+        var plan = new WorkloadPlan(
+            original.WorkloadId,
+            original.PlanRevisionId,
+            original.SchemaVersion,
+            original.PlannerType,
+            original.PlannerVersion,
+            [original.Tasks[0] with { RetryCap = 1 }],
+            original.FailurePolicy,
+            original.MaximumConcurrency);
+        var scheduled = await fixture.Orchestrator.RegisterAndScheduleAsync(
+            plan,
+            [fixture.Host],
+            fixture.Host.PoolId,
+            fixture.Now);
+        _ = Assert.Single(scheduled.Placements);
+        var executeItem = (await fixture.Control.ReadOutboxAsync())
+            .Single(value =>
+                value.Kind == OrchestrationMessageKinds.ExecuteTask);
+        var execute = (ExecuteTaskMessage)OrchestrationMessageCodec.Decode(
+            Encoding.UTF8.GetBytes(executeItem.PayloadJson)).Value;
+        Assert.Equal(
+            FactDisposition.Applied,
+            await fixture.Orchestrator.ApplyNodeFactAsync(
+                fixture.Incarnation,
+                1,
+                OrchestrationMessageKinds.TaskTerminal,
+                new TaskTerminalFact(
+                    execute.Identity,
+                    TaskAttemptState.Failed,
+                    1,
+                    "retryable",
+                    null)));
+
+        await fixture.RestartControlAsync();
+        var repaired = await fixture.Orchestrator.ReconcileSchedulingAsync(
+            fixture.Now.AddMinutes(1));
+
+        Assert.Equal(0, repaired);
+        Assert.Equal(
+            1,
+            (await fixture.Control.GetTaskAsync(plan.Tasks[0].TaskId))!
+                .Payload.AcceptedGeneration);
+        var placements = await fixture.Orchestrator.ObserveHostAsync(
+            fixture.Host with
+            {
+                ObservedAt = fixture.Now.AddMinutes(1),
+                Available = true
+            },
+            fixture.Now.AddMinutes(1));
+        Assert.Equal(1, placements);
+        Assert.Equal(
+            2,
+            (await fixture.Control.GetTaskAsync(plan.Tasks[0].TaskId))!
+                .Payload.AcceptedGeneration);
+    }
+    [Fact]
     public async Task Control_restart_reloads_plan_and_scheduler_then_releases_dependency()
     {
         using var fixture = await Fixture.CreateAsync(durableScheduler: true);
@@ -1898,6 +2413,14 @@ public sealed class OrchestrationTests
             var nodeConnect = carriers.Second.ConnectAsync(nodeHello, cancellationToken).AsTask();
             var controlConnection = await controlConnect;
             var nodeConnection = await nodeConnect;
+            await Orchestrator.ObserveHostAsync(
+                Host with
+                {
+                    ObservedAt = DateTimeOffset.UtcNow,
+                    Available = true
+                },
+                DateTimeOffset.UtcNow,
+                cancellationToken);
             var controlTask = RunAndDisposeAsync(
                 controlConnection,
                 connection => new ControlSessionPump(
@@ -1952,8 +2475,8 @@ public sealed class OrchestrationTests
         public override InterruptionClass InterruptionClass => InterruptionClass.Restartable;
 
         public void Release() => release.TrySetResult();
-        public override ValidationResult Validate(JsonElement input) =>
-            input.ValueKind == JsonValueKind.Object ? ValidationResult.Valid : ValidationResult.Invalid("object required");
+        public override ValidationResult Validate(TaskPayload input) =>
+            input.Deserialize<JsonElement>().ValueKind == JsonValueKind.Object ? ValidationResult.Valid : ValidationResult.Invalid("object required");
         public override ValueTask<SetupResult> SetupAsync(
             TaskExecutionContext context, CancellationToken cancellationToken) =>
             ValueTask.FromResult(new SetupResult(false, "deterministic"));
@@ -2024,79 +2547,79 @@ public sealed class OrchestrationTests
     }
 
     private sealed class NonRecoverableLongTaskType : TaskTypeBase
+    {
+        private int starts;
+        public int StartCount => starts;
+        public override TaskTypeVersion Type { get; } = new("deterministic", new Version(1, 0));
+        public override TaskCapabilities Capabilities =>
+            TaskCapabilities.Execute | TaskCapabilities.Observe | TaskCapabilities.Cancel;
+        public override InterruptionClass InterruptionClass => InterruptionClass.Restartable;
+        public override ValidationResult Validate(TaskPayload input) => ValidationResult.Valid;
+        public override ValueTask<IExecutionHandle> StartAsync(
+            TaskExecutionContext context, CancellationToken cancellationToken)
         {
-            private int starts;
-            public int StartCount => starts;
-            public override TaskTypeVersion Type { get; } = new("deterministic", new Version(1, 0));
-            public override TaskCapabilities Capabilities =>
-                TaskCapabilities.Execute | TaskCapabilities.Observe | TaskCapabilities.Cancel;
-            public override InterruptionClass InterruptionClass => InterruptionClass.Restartable;
-            public override ValidationResult Validate(JsonElement input) => ValidationResult.Valid;
-            public override ValueTask<IExecutionHandle> StartAsync(
-                TaskExecutionContext context, CancellationToken cancellationToken)
-            {
-                Interlocked.Increment(ref starts);
-                return ValueTask.FromResult<IExecutionHandle>(new Handle(context.AttemptId, context.Generation));
-            }
-            public override ValueTask<ExecutionObservation> ObserveAsync(
-                IExecutionHandle execution, CancellationToken cancellationToken)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                return ValueTask.FromResult(new ExecutionObservation(ExecutionState.Running));
-            }
-            public override ValueTask CancelAsync(
-                IExecutionHandle execution, TimeSpan gracePeriod, CancellationToken cancellationToken) =>
-                ValueTask.CompletedTask;
-
-            private sealed record Handle(TaskAttemptId AttemptId, int Generation) : IExecutionHandle
-            {
-                public int ProcessId => 1;
-                public long ProcessCreationTimeUtcTicks => 1;
-            }
+            Interlocked.Increment(ref starts);
+            return ValueTask.FromResult<IExecutionHandle>(new Handle(context.AttemptId, context.Generation));
         }
+        public override ValueTask<ExecutionObservation> ObserveAsync(
+            IExecutionHandle execution, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return ValueTask.FromResult(new ExecutionObservation(ExecutionState.Running));
+        }
+        public override ValueTask CancelAsync(
+            IExecutionHandle execution, TimeSpan gracePeriod, CancellationToken cancellationToken) =>
+            ValueTask.CompletedTask;
+
+        private sealed record Handle(TaskAttemptId AttemptId, int Generation) : IExecutionHandle
+        {
+            public int ProcessId => 1;
+            public long ProcessCreationTimeUtcTicks => 1;
+        }
+    }
 
     private sealed class SyntheticPlanFactory(int count) : IWorkloadPlanFactory
-        {
-            public string Kind => "synthetic-300";
-            public WorkloadPlan Create(
-                WorkloadId workloadId, PlanRevisionId planRevisionId, JsonElement input) =>
-                new(workloadId, planRevisionId, WorkloadPlan.CurrentSchemaVersion,
-                    Kind, "1.0",
-                    Enumerable.Range(0, count).Select(index => new TaskPlanNode(
-                        new(new Guid(index + 1, 0, 0, new byte[8])),
-                        $"task-{index:D3}", "lean", "1.0",
-                        new ResourceRequirements(1, 1, 1, processCount: 1, concurrencyUnits: 1),
-                        TaskInput.Empty, [], new HashSet<string>(), null, null, null, 0,
-                        InterruptionClass.Restartable, [], $"result-{index:D3}")).ToArray(),
-                    AggregateFailurePolicy.FailFast, count);
-        }
+    {
+        public string Kind => "synthetic-300";
+        public WorkloadPlan Create(
+            WorkloadId workloadId, PlanRevisionId planRevisionId, JsonElement input) =>
+            new(workloadId, planRevisionId, WorkloadPlan.CurrentSchemaVersion,
+                Kind, "1.0",
+                Enumerable.Range(0, count).Select(index => new TaskPlanNode(
+                    new(new Guid(index + 1, 0, 0, new byte[8])),
+                    $"task-{index:D3}", "lean", "1.0",
+                    new ResourceRequirements(1, 1, 1, processCount: 1, concurrencyUnits: 1),
+                    TaskInput.Empty, [], new HashSet<string>(), null, null, null, 0,
+                    InterruptionClass.Restartable, [], $"result-{index:D3}")).ToArray(),
+                AggregateFailurePolicy.FailFast, count);
+    }
 
-        private sealed class LeanTaskType(string name = "lean") : TaskTypeBase
+    private sealed class LeanTaskType(string name = "lean") : TaskTypeBase
+    {
+        public ConcurrentBag<TaskAttemptId> Started { get; } = [];
+        public override TaskTypeVersion Type => new(name, new Version(1, 0));
+        public override TaskCapabilities Capabilities =>
+            TaskCapabilities.Execute | TaskCapabilities.Observe | TaskCapabilities.Cancel;
+        public override InterruptionClass InterruptionClass => InterruptionClass.Restartable;
+        public override ValidationResult Validate(TaskPayload input) => ValidationResult.Valid;
+        public override ValueTask<IExecutionHandle> StartAsync(
+            TaskExecutionContext context, CancellationToken cancellationToken)
         {
-            public ConcurrentBag<TaskAttemptId> Started { get; } = [];
-            public override TaskTypeVersion Type => new(name, new Version(1, 0));
-            public override TaskCapabilities Capabilities =>
-                TaskCapabilities.Execute | TaskCapabilities.Observe | TaskCapabilities.Cancel;
-            public override InterruptionClass InterruptionClass => InterruptionClass.Restartable;
-            public override ValidationResult Validate(JsonElement input) => ValidationResult.Valid;
-            public override ValueTask<IExecutionHandle> StartAsync(
-                TaskExecutionContext context, CancellationToken cancellationToken)
-            {
-                Started.Add(context.AttemptId);
-                return ValueTask.FromResult<IExecutionHandle>(new LeanHandle(context.AttemptId, context.Generation));
-            }
-            public override ValueTask<ExecutionObservation> ObserveAsync(
-                IExecutionHandle execution, CancellationToken cancellationToken) =>
-                ValueTask.FromResult(new ExecutionObservation(ExecutionState.Exited, 0));
-            public override ValueTask CancelAsync(
-                IExecutionHandle execution, TimeSpan gracePeriod, CancellationToken cancellationToken) =>
-                ValueTask.CompletedTask;
-            private sealed record LeanHandle(TaskAttemptId AttemptId, int Generation) : IExecutionHandle
-            {
-                public int ProcessId => 0;
-                public long ProcessCreationTimeUtcTicks => 0;
-            }
+            Started.Add(context.AttemptId);
+            return ValueTask.FromResult<IExecutionHandle>(new LeanHandle(context.AttemptId, context.Generation));
         }
+        public override ValueTask<ExecutionObservation> ObserveAsync(
+            IExecutionHandle execution, CancellationToken cancellationToken) =>
+            ValueTask.FromResult(new ExecutionObservation(ExecutionState.Exited, 0));
+        public override ValueTask CancelAsync(
+            IExecutionHandle execution, TimeSpan gracePeriod, CancellationToken cancellationToken) =>
+            ValueTask.CompletedTask;
+        private sealed record LeanHandle(TaskAttemptId AttemptId, int Generation) : IExecutionHandle
+        {
+            public int ProcessId => 0;
+            public long ProcessCreationTimeUtcTicks => 0;
+        }
+    }
 
     private sealed class FakeIdentityCatalog(
                 IdentityGrantId grantId,
@@ -2104,153 +2627,153 @@ public sealed class OrchestrationTests
                 TaskId taskId,
                 HostId hostId,
                 NodeIncarnationId incarnationId) : IControlIdentityGrantCatalog
-            {
-                public ValueTask<TaskIdentityGrantReference?> ResolveAsync(
-                    IdentityGrantId requestedGrantId,
-                    WorkloadId requestedWorkloadId,
-                    TaskId requestedTaskId,
-                    int generation,
-                    HostId requestedHostId,
-                    NodeIncarnationId requestedIncarnationId,
-                    CancellationToken cancellationToken) =>
-                    ValueTask.FromResult<TaskIdentityGrantReference?>(new(
-                        grantId, workloadId, taskId, generation, hostId, incarnationId,
-                        "https://inference.example", ["inference.invoke"],
-                        DateTimeOffset.UtcNow.AddHours(1), IdentityRenewalMode.LocalBroker));
+    {
+        public ValueTask<TaskIdentityGrantReference?> ResolveAsync(
+            IdentityGrantId requestedGrantId,
+            WorkloadId requestedWorkloadId,
+            TaskId requestedTaskId,
+            int generation,
+            HostId requestedHostId,
+            NodeIncarnationId requestedIncarnationId,
+            CancellationToken cancellationToken) =>
+            ValueTask.FromResult<TaskIdentityGrantReference?>(new(
+                grantId, workloadId, taskId, generation, hostId, incarnationId,
+                "https://inference.example", ["inference.invoke"],
+                DateTimeOffset.UtcNow.AddHours(1), IdentityRenewalMode.LocalBroker));
     }
 
     private sealed class FakeIdentityResolver(string secret) : ITaskIdentityResolver
-            {
-                private readonly InMemoryProtectedIdentityVault vault = new();
-                public int ResolveCount { get; private set; }
+    {
+        private readonly InMemoryProtectedIdentityVault vault = new();
+        public int ResolveCount { get; private set; }
 
-                public ValueTask<TaskIdentityLease> ResolveAsync(
-                    AttemptIdentity identity,
-                    IReadOnlyList<TaskIdentityGrantReference> grants,
-                    CancellationToken cancellationToken)
-                {
-                    Assert.Single(grants);
-                    Assert.Equal(identity.TaskId, grants[0].TaskId);
-                    ResolveCount++;
-                    var handle = vault.Store("fake-broker", secret, grants[0].ExpiresAt);
-                    return ValueTask.FromResult(new TaskIdentityLease([handle], () =>
-                    {
-                        vault.Remove(handle);
-                        return ValueTask.CompletedTask;
-                    }));
-                }
+        public ValueTask<TaskIdentityLease> ResolveAsync(
+            AttemptIdentity identity,
+            IReadOnlyList<TaskIdentityGrantReference> grants,
+            CancellationToken cancellationToken)
+        {
+            Assert.Single(grants);
+            Assert.Equal(identity.TaskId, grants[0].TaskId);
+            ResolveCount++;
+            var handle = vault.Store("fake-broker", secret, grants[0].ExpiresAt);
+            return ValueTask.FromResult(new TaskIdentityLease([handle], () =>
+            {
+                vault.Remove(handle);
+                return ValueTask.CompletedTask;
+            }));
+        }
     }
 
     private sealed class IdentityAwareTaskType : TaskTypeBase
-            {
-                public int IdentityHandleCount { get; private set; }
-                public override TaskTypeVersion Type => new("identity-aware", new Version(1, 0));
-                public override TaskCapabilities Capabilities =>
-                    TaskCapabilities.Execute | TaskCapabilities.Observe | TaskCapabilities.Cancel;
-                public override InterruptionClass InterruptionClass => InterruptionClass.Restartable;
-                public override ValidationResult Validate(JsonElement input) => ValidationResult.Valid;
-                public override ValueTask<IExecutionHandle> StartAsync(
-                    TaskExecutionContext context, CancellationToken cancellationToken)
-                {
-                    IdentityHandleCount = context.IdentityHandles?.Count ?? 0;
-                    return ValueTask.FromResult<IExecutionHandle>(new Handle(context.AttemptId, context.Generation));
-                }
-                public override ValueTask<ExecutionObservation> ObserveAsync(
-                    IExecutionHandle execution, CancellationToken cancellationToken) =>
-                    ValueTask.FromResult(new ExecutionObservation(ExecutionState.Exited, 0));
-                public override ValueTask CancelAsync(
-                    IExecutionHandle execution, TimeSpan gracePeriod, CancellationToken cancellationToken) =>
-                    ValueTask.CompletedTask;
-                private sealed record Handle(TaskAttemptId AttemptId, int Generation) : IExecutionHandle
-                {
-                    public int ProcessId => 0;
-                    public long ProcessCreationTimeUtcTicks => 0;
-                }
-            }
+    {
+        public int IdentityHandleCount { get; private set; }
+        public override TaskTypeVersion Type => new("identity-aware", new Version(1, 0));
+        public override TaskCapabilities Capabilities =>
+            TaskCapabilities.Execute | TaskCapabilities.Observe | TaskCapabilities.Cancel;
+        public override InterruptionClass InterruptionClass => InterruptionClass.Restartable;
+        public override ValidationResult Validate(TaskPayload input) => ValidationResult.Valid;
+        public override ValueTask<IExecutionHandle> StartAsync(
+            TaskExecutionContext context, CancellationToken cancellationToken)
+        {
+            IdentityHandleCount = context.IdentityHandles?.Count ?? 0;
+            return ValueTask.FromResult<IExecutionHandle>(new Handle(context.AttemptId, context.Generation));
+        }
+        public override ValueTask<ExecutionObservation> ObserveAsync(
+            IExecutionHandle execution, CancellationToken cancellationToken) =>
+            ValueTask.FromResult(new ExecutionObservation(ExecutionState.Exited, 0));
+        public override ValueTask CancelAsync(
+            IExecutionHandle execution, TimeSpan gracePeriod, CancellationToken cancellationToken) =>
+            ValueTask.CompletedTask;
+        private sealed record Handle(TaskAttemptId AttemptId, int Generation) : IExecutionHandle
+        {
+            public int ProcessId => 0;
+            public long ProcessCreationTimeUtcTicks => 0;
+        }
+    }
 
     private sealed class FakeHostProvider : IHostProvider
+    {
+        private readonly Dictionary<
+            ProviderOperationId, ProviderEffect> pendingCreates = [];
+        public int Created { get; private set; }
+        public int Reconciled { get; private set; }
+        public bool DelayCreates { get; init; }
+        public bool CompleteCreates { get; set; }
+        public Task<ProviderCapabilities> DiscoverCapabilitiesAsync(
+            ProviderBinding binding, CancellationToken cancellationToken = default) =>
+            Task.FromResult(new ProviderCapabilities(
+                ProviderCapability.Discover | ProviderCapability.Inspect | ProviderCapability.Create |
+                ProviderCapability.Start | ProviderCapability.Stop | ProviderCapability.Delete,
+                new Dictionary<ProviderCapability, string>()));
+        public async IAsyncEnumerable<ProviderResource> DiscoverAsync(
+            ProviderBinding binding,
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
         {
-            private readonly Dictionary<
-                ProviderOperationId, ProviderEffect> pendingCreates = [];
-            public int Created { get; private set; }
-            public int Reconciled { get; private set; }
-            public bool DelayCreates { get; init; }
-            public bool CompleteCreates { get; set; }
-            public Task<ProviderCapabilities> DiscoverCapabilitiesAsync(
-                ProviderBinding binding, CancellationToken cancellationToken = default) =>
-                Task.FromResult(new ProviderCapabilities(
-                    ProviderCapability.Discover | ProviderCapability.Inspect | ProviderCapability.Create |
-                    ProviderCapability.Start | ProviderCapability.Stop | ProviderCapability.Delete,
-                    new Dictionary<ProviderCapability, string>()));
-            public async IAsyncEnumerable<ProviderResource> DiscoverAsync(
-                ProviderBinding binding,
-                [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
-            {
-                await Task.CompletedTask;
-                yield break;
-            }
+            await Task.CompletedTask;
+            yield break;
+        }
 
-            public Task<ProviderResource?> InspectAsync(
-                ProviderBinding binding, string resourceName, CancellationToken cancellationToken = default) =>
-                Task.FromResult<ProviderResource?>(null);
-            public Task<ProviderOperationResult> CreateAsync(
-                ProviderEffect effect, CancellationToken cancellationToken = default)
+        public Task<ProviderResource?> InspectAsync(
+            ProviderBinding binding, string resourceName, CancellationToken cancellationToken = default) =>
+            Task.FromResult<ProviderResource?>(null);
+        public Task<ProviderOperationResult> CreateAsync(
+            ProviderEffect effect, CancellationToken cancellationToken = default)
+        {
+            Created++;
+            if (DelayCreates)
             {
-                Created++;
-                if (DelayCreates)
-                {
-                    pendingCreates[effect.OperationId] = effect;
-                    return Task.FromResult(new ProviderOperationResult(
-                        ProviderOperationStatus.Running,
-                        new(
-                            effect.OperationId,
-                            effect.IdempotencyKey,
-                            "fake",
-                            effect.HostId.ToString()),
-                        null));
-                }
-                return Result(effect, ProviderHostStatus.Running);
+                pendingCreates[effect.OperationId] = effect;
+                return Task.FromResult(new ProviderOperationResult(
+                    ProviderOperationStatus.Running,
+                    new(
+                        effect.OperationId,
+                        effect.IdempotencyKey,
+                        "fake",
+                        effect.HostId.ToString()),
+                    null));
             }
-            public Task<ProviderOperationResult> StartAsync(
-                ProviderEffect effect, CancellationToken cancellationToken = default) =>
-                Result(effect, ProviderHostStatus.Running);
-            public Task<ProviderOperationResult> StopAsync(
-                ProviderEffect effect, CancellationToken cancellationToken = default) =>
-                Result(effect, ProviderHostStatus.Stopped);
-            public Task<ProviderOperationResult> DeleteAsync(
-                ProviderEffect effect, CancellationToken cancellationToken = default) =>
-                Result(effect, ProviderHostStatus.Deleted);
-            public Task<ProviderOperationResult> RepairAsync(
-                ProviderEffect effect, CancellationToken cancellationToken = default) =>
-                Result(effect, ProviderHostStatus.Running);
-            public Task<ProviderOperationResult> RestoreAsync(
-                ProviderEffect effect, CancellationToken cancellationToken = default) =>
-                Result(effect, ProviderHostStatus.Running);
-            public Task<ProviderOperationResult> ReconcileAsync(
-                ProviderOperationHandle handle, CancellationToken cancellationToken = default)
-            {
-                Reconciled++;
-                var effect = pendingCreates[handle.OperationId];
-                return Task.FromResult(CompleteCreates
-                    ? new ProviderOperationResult(
-                        ProviderOperationStatus.Succeeded,
-                        handle,
-                        new(
-                            effect.HostId.ToString(),
-                            effect.ResourceName,
-                            ProviderHostStatus.Running,
-                            new Dictionary<string, string>()))
-                    : new ProviderOperationResult(
-                        ProviderOperationStatus.Running,
-                        handle,
-                        null));
-            }
-            private static Task<ProviderOperationResult> Result(
-                ProviderEffect effect, ProviderHostStatus status) =>
-                Task.FromResult(new ProviderOperationResult(
-                    ProviderOperationStatus.Succeeded, null,
-                    new(effect.HostId.ToString(), effect.ResourceName, status,
-                        new Dictionary<string, string>())));
+            return Result(effect, ProviderHostStatus.Running);
+        }
+        public Task<ProviderOperationResult> StartAsync(
+            ProviderEffect effect, CancellationToken cancellationToken = default) =>
+            Result(effect, ProviderHostStatus.Running);
+        public Task<ProviderOperationResult> StopAsync(
+            ProviderEffect effect, CancellationToken cancellationToken = default) =>
+            Result(effect, ProviderHostStatus.Stopped);
+        public Task<ProviderOperationResult> DeleteAsync(
+            ProviderEffect effect, CancellationToken cancellationToken = default) =>
+            Result(effect, ProviderHostStatus.Deleted);
+        public Task<ProviderOperationResult> RepairAsync(
+            ProviderEffect effect, CancellationToken cancellationToken = default) =>
+            Result(effect, ProviderHostStatus.Running);
+        public Task<ProviderOperationResult> RestoreAsync(
+            ProviderEffect effect, CancellationToken cancellationToken = default) =>
+            Result(effect, ProviderHostStatus.Running);
+        public Task<ProviderOperationResult> ReconcileAsync(
+            ProviderOperationHandle handle, CancellationToken cancellationToken = default)
+        {
+            Reconciled++;
+            var effect = pendingCreates[handle.OperationId];
+            return Task.FromResult(CompleteCreates
+                ? new ProviderOperationResult(
+                    ProviderOperationStatus.Succeeded,
+                    handle,
+                    new(
+                        effect.HostId.ToString(),
+                        effect.ResourceName,
+                        ProviderHostStatus.Running,
+                        new Dictionary<string, string>()))
+                : new ProviderOperationResult(
+                    ProviderOperationStatus.Running,
+                    handle,
+                    null));
+        }
+        private static Task<ProviderOperationResult> Result(
+            ProviderEffect effect, ProviderHostStatus status) =>
+            Task.FromResult(new ProviderOperationResult(
+                ProviderOperationStatus.Succeeded, null,
+                new(effect.HostId.ToString(), effect.ResourceName, status,
+                    new Dictionary<string, string>())));
     }
 
     private sealed class FakeEnrollmentWorkflow : IProvisionedNodeEnrollmentWorkflow
@@ -2272,14 +2795,14 @@ public sealed class OrchestrationTests
     }
 
     private sealed class RotatingTokenCredential : TokenCredential
-        {
-            private int count;
-            public override AccessToken GetToken(
-                TokenRequestContext requestContext, CancellationToken cancellationToken) =>
-                new($"token-{Interlocked.Increment(ref count)}", DateTimeOffset.UtcNow.AddMinutes(5));
-            public override ValueTask<AccessToken> GetTokenAsync(
-                TokenRequestContext requestContext, CancellationToken cancellationToken) =>
-                ValueTask.FromResult(GetToken(requestContext, cancellationToken));
+    {
+        private int count;
+        public override AccessToken GetToken(
+            TokenRequestContext requestContext, CancellationToken cancellationToken) =>
+            new($"token-{Interlocked.Increment(ref count)}", DateTimeOffset.UtcNow.AddMinutes(5));
+        public override ValueTask<AccessToken> GetTokenAsync(
+            TokenRequestContext requestContext, CancellationToken cancellationToken) =>
+            ValueTask.FromResult(GetToken(requestContext, cancellationToken));
     }
 
     private sealed class FakeRemoteAgentSource : IOrchestrationAgentEventSource
@@ -2301,46 +2824,46 @@ public sealed class OrchestrationTests
     }
 
     private sealed class AgentFixtureExecutor : IProcessExecutor
+    {
+        public int Starts { get; private set; }
+        public string? StandardInputPath { get; private set; }
+        public ValueTask<IExecutionHandle> StartAsync(
+            ProcessLaunchRequest request, CancellationToken cancellationToken)
         {
-            public int Starts { get; private set; }
-            public string? StandardInputPath { get; private set; }
-            public ValueTask<IExecutionHandle> StartAsync(
-                ProcessLaunchRequest request, CancellationToken cancellationToken)
-            {
-                Starts++;
-                StandardInputPath = request.StandardInputPath;
-                return ValueTask.FromResult<IExecutionHandle>(
-                    new AgentFixtureHandle(request.AttemptId, request.Generation));
-            }
+            Starts++;
+            StandardInputPath = request.StandardInputPath;
+            return ValueTask.FromResult<IExecutionHandle>(
+                new AgentFixtureHandle(request.AttemptId, request.Generation));
+        }
 
-            public ValueTask<ExecutionObservation> ObserveAsync(
-                IExecutionHandle execution, CancellationToken cancellationToken) =>
-                ValueTask.FromResult(new ExecutionObservation(ExecutionState.Exited, 0));
-            public ValueTask<SpoolRead> ReadOutputAsync(
-                IExecutionHandle execution, string stream, long offset, int maximumBytes,
-                CancellationToken cancellationToken)
-            {
-                var all = Encoding.UTF8.GetBytes(
-                    """{"type":"activity","text":"wörking"}""" + "\n" +
-                    """{"type":"final","text":"done"}""" + "\n");
-                var count = (int)Math.Min(5, Math.Max(0, all.Length - offset));
-                var bytes = all.AsMemory((int)offset, count).ToArray();
-                return ValueTask.FromResult(new SpoolRead(
-                    new(stream, "memory", offset + bytes.Length, all.Length, false), bytes));
-            }
+        public ValueTask<ExecutionObservation> ObserveAsync(
+            IExecutionHandle execution, CancellationToken cancellationToken) =>
+            ValueTask.FromResult(new ExecutionObservation(ExecutionState.Exited, 0));
+        public ValueTask<SpoolRead> ReadOutputAsync(
+            IExecutionHandle execution, string stream, long offset, int maximumBytes,
+            CancellationToken cancellationToken)
+        {
+            var all = Encoding.UTF8.GetBytes(
+                """{"type":"activity","text":"wörking"}""" + "\n" +
+                """{"type":"final","text":"done"}""" + "\n");
+            var count = (int)Math.Min(5, Math.Max(0, all.Length - offset));
+            var bytes = all.AsMemory((int)offset, count).ToArray();
+            return ValueTask.FromResult(new SpoolRead(
+                new(stream, "memory", offset + bytes.Length, all.Length, false), bytes));
+        }
 
-            public ValueTask CancelAsync(
-                IExecutionHandle execution, TimeSpan gracePeriod, CancellationToken cancellationToken) =>
-                ValueTask.CompletedTask;
-            public ValueTask<IExecutionHandle> RecoverAsync(
-                TaskAttemptId attemptId, int generation, string currentBootId,
-                CancellationToken cancellationToken) =>
-                ValueTask.FromResult<IExecutionHandle>(new AgentFixtureHandle(attemptId, generation));
-            private sealed record AgentFixtureHandle(
-                TaskAttemptId AttemptId, int Generation) : IExecutionHandle
-            {
-                public int ProcessId => 1;
-                public long ProcessCreationTimeUtcTicks => 1;
+        public ValueTask CancelAsync(
+            IExecutionHandle execution, TimeSpan gracePeriod, CancellationToken cancellationToken) =>
+            ValueTask.CompletedTask;
+        public ValueTask<IExecutionHandle> RecoverAsync(
+            TaskAttemptId attemptId, int generation, string currentBootId,
+            CancellationToken cancellationToken) =>
+            ValueTask.FromResult<IExecutionHandle>(new AgentFixtureHandle(attemptId, generation));
+        private sealed record AgentFixtureHandle(
+            TaskAttemptId AttemptId, int Generation) : IExecutionHandle
+        {
+            public int ProcessId => 1;
+            public long ProcessCreationTimeUtcTicks => 1;
         }
     }
 
@@ -2443,6 +2966,40 @@ public sealed class OrchestrationTests
                 return ValueTask.CompletedTask;
             }
         }
+    }
+
+    private sealed class RecordingMaintenanceForwarder :
+        ILocalMaintenanceForwarder
+    {
+        internal int Calls { get; private set; }
+
+        public Task<MaintenanceResponse> ForwardAsync(
+            AuthenticatedMaintenanceRequest request,
+            CancellationToken cancellationToken)
+        {
+            Calls++;
+            return Task.FromResult(new MaintenanceResponse(
+                MaintenanceContract.ProtocolVersion,
+                request.Body.RequestId,
+                request.Body.OperationId,
+                MaintenanceOperationStatus.Succeeded,
+                false,
+                OperationDigest: MaintenanceOperationDigest.Create(
+                    request.Body.Operation)));
+        }
+    }
+
+    private sealed class ThrowingPoolDemandReconciler :
+        IHostPoolDemandReconciler
+    {
+        public Task<PoolReconcileResult> ReconcileAsync(
+            PoolId poolId,
+            IReadOnlyList<PoolDemand> demands,
+            DateTimeOffset now,
+            CancellationToken cancellationToken = default) =>
+            Task.FromException<PoolReconcileResult>(
+                new InvalidOperationException(
+                    "Synthetic capacity reconciliation failure."));
     }
 
     private static ExtensionMetadataDto DirectTransport(int port) =>

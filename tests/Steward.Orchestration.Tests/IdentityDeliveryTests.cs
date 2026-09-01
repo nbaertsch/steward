@@ -38,11 +38,11 @@ public sealed class IdentityDeliveryTests
             fixture.Identity, [grant], CancellationToken.None);
         var handle = Assert.Single(lease.Handles);
         string? revealed = null;
-        Assert.True(fixture.NodeVault.TryReveal(handle, value => revealed = new string(value)));
+        Assert.True(fixture.NodeVault.TryReveal(handle, new TestMaterialConsumer(value => revealed = value)));
         Assert.Equal(IdentityFixture.Secret, revealed);
 
         await lease.DisposeAsync();
-        Assert.False(fixture.NodeVault.TryReveal(handle, _ => { }));
+        Assert.False(fixture.NodeVault.TryReveal(handle, new TestMaterialConsumer(_ => { })));
         Assert.Empty(Directory.GetFiles(fixture.NodeVaultRoot));
     }
 
@@ -162,7 +162,7 @@ public sealed class IdentityDeliveryTests
             fixture.Identity, [afterResolve], CancellationToken.None);
         string? material = null;
         Assert.True(fixture.NodeVault.TryReveal(
-            Assert.Single(lease.Handles), value => material = new string(value)));
+            Assert.Single(lease.Handles), new TestMaterialConsumer(value => material = value)));
         Assert.Equal(IdentityFixture.Secret, material);
     }
 
@@ -388,7 +388,7 @@ public sealed class IdentityDeliveryTests
             fixture.Identity, [grant], cancellation.Token);
         string? revealed = null;
         Assert.True(fixture.NodeVault.TryReveal(
-            Assert.Single(lease.Handles), value => revealed = new string(value)));
+            Assert.Single(lease.Handles), new TestMaterialConsumer(value => revealed = value)));
         Assert.Equal(IdentityFixture.Secret, revealed);
         attachment.Dispose();
         Assert.False(nodeClient.IsControlConnected);
@@ -466,9 +466,16 @@ public sealed class IdentityDeliveryTests
                 await cmd.ExecuteNonQueryAsync();
             }
             SqliteConnection.ClearAllPools();
-            Assert.False(Contains(
-                await File.ReadAllBytesAsync(dbPath),
-                marker));
+            await using var database = new FileStream(
+                dbPath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete,
+                4096,
+                FileOptions.Asynchronous | FileOptions.SequentialScan);
+            var databaseBytes = new byte[database.Length];
+            await database.ReadExactlyAsync(databaseBytes);
+            Assert.False(Contains(databaseBytes, marker));
         }
         finally
         {
@@ -506,6 +513,12 @@ public sealed class IdentityDeliveryTests
         return false;
     }
 
+    private sealed class TestMaterialConsumer(Action<string> consume)
+        : IProtectedMaterialConsumer
+    {
+        public void Consume(ReadOnlySpan<char> material) =>
+            consume(new string(material));
+    }
     private sealed class IdentityFixture : IDisposable
     {
         public const string Secret = "local-secret-material-9ddf290e";

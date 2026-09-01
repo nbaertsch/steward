@@ -4,7 +4,7 @@ using Steward.Tasks.Abstractions;
 
 namespace Steward.Tasks.Process;
 
-public sealed record ProcessTaskDefinition(
+internal sealed record ProcessTaskDefinition(
     string Executable,
     IReadOnlyList<string>? Arguments = null,
     string? WorkingDirectory = null,
@@ -15,7 +15,7 @@ public sealed record ProcessTaskDefinition(
     long RequiredDiskReserveBytes = 256 * 1024 * 1024,
     GracefulSignal? GracefulSignal = null);
 
-public sealed class ProcessTaskType(
+internal sealed class ProcessTaskType(
     IProcessExecutor executor,
     Action<string>? diagnostic = null) :
     TaskTypeBase,
@@ -32,7 +32,7 @@ public sealed class ProcessTaskType(
         TaskCapabilities.Cancel | TaskCapabilities.Restart | TaskCapabilities.Cleanup;
     public override InterruptionClass InterruptionClass => InterruptionClass.Restartable;
 
-    public override ValidationResult Validate(JsonElement input)
+    public override ValidationResult Validate(TaskPayload input)
     {
         ProcessTaskDefinition? definition;
         try { definition = input.Deserialize<ProcessTaskDefinition>(JsonOptions); }
@@ -93,7 +93,10 @@ public sealed class ProcessTaskType(
             ? context.Workspace : WorkspacePaths.Resolve(context.Workspace, definition.WorkingDirectory);
         return executor.StartAsync(new(context.AttemptId, context.Generation, definition.Executable,
             definition.Arguments ?? [], workingDirectory, Path.Combine(context.Workspace, ".steward", "spool"),
-            definition.MaxOutputBytes, definition.RequiredDiskReserveBytes, false, definition.GracefulSignal), cancellationToken);
+            definition.MaxOutputBytes, definition.RequiredDiskReserveBytes, false, definition.GracefulSignal,
+            Isolation: ProcessIsolationProfile.ForTask(
+                context,
+                ProcessIsolationCapability.Process)), cancellationToken);
     }
 
     public override ValueTask<ExecutionObservation> ObserveAsync(IExecutionHandle execution, CancellationToken cancellationToken) =>

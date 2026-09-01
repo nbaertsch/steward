@@ -5,7 +5,7 @@ using Steward.Persistence.Sqlite;
 namespace Steward.Control;
 
 // Compatibility types preserve the original Control API while implementations live in Steward.Application.
-public sealed record CreateWorkloadRequest(
+internal sealed record CreateWorkloadRequest(
     string WorkloadType,
     string PlannerKind,
     string PlannerVersion,
@@ -16,7 +16,7 @@ public sealed record CreateWorkloadRequest(
     : Steward.Application.CreateWorkloadRequest(
         WorkloadType, PlannerKind, PlannerVersion, PlannerData, WorkloadId, PlanRevisionId, IdempotencyKey);
 
-public sealed class WorkloadApplicationService(SqliteControlStore store)
+internal sealed class WorkloadApplicationService(SqliteControlStore store)
     : Steward.Application.WorkloadApplicationService(store);
 
 public sealed class OutboxApplicationService(SqliteControlStore store)

@@ -286,7 +286,9 @@ public sealed class CompositeScheduler
             {
                 items[taskId] = item with
                 {
-                    State = ScheduledTaskState.Succeeded, Placement = null, Claim = null,
+                    State = ScheduledTaskState.Succeeded,
+                    Placement = null,
+                    Claim = null,
                     SelectedTerminalGeneration = generation
                 };
                 results.Add(new(taskId, generation, node.ResultReductionKey, receipt, true, now));
@@ -296,7 +298,9 @@ public sealed class CompositeScheduler
                 items[taskId] = item with
                 {
                     State = poison ? ScheduledTaskState.Quarantined : ScheduledTaskState.Failed,
-                    Placement = null, Claim = null, QuarantineReason = poison ? receipt : null,
+                    Placement = null,
+                    Claim = null,
+                    QuarantineReason = poison ? receipt : null,
                     SelectedTerminalGeneration = generation
                 };
                 results.Add(new(taskId, generation, node.ResultReductionKey, receipt, false, now));
@@ -306,8 +310,11 @@ public sealed class CompositeScheduler
                 var delay = retryDelay ?? TimeSpan.FromSeconds(Math.Min(300, Math.Pow(2, item.RetryCount)));
                 items[taskId] = item with
                 {
-                    State = ScheduledTaskState.Ready, RetryCount = item.RetryCount + 1,
-                    Placement = null, Claim = null, Backoff = new(now + delay, delay, receipt)
+                    State = ScheduledTaskState.Ready,
+                    RetryCount = item.RetryCount + 1,
+                    Placement = null,
+                    Claim = null,
+                    Backoff = new(now + delay, delay, receipt)
                 };
             }
             PropagateTerminalDependencies(plan, items);
@@ -333,8 +340,11 @@ public sealed class CompositeScheduler
                 return eligible && item.RetryCount < node.RetryCap
                     ? item with
                     {
-                        State = ScheduledTaskState.Ready, RetryCount = item.RetryCount + 1,
-                        Placement = null, Claim = null, Backoff = new(now, TimeSpan.Zero, "Host lost")
+                        State = ScheduledTaskState.Ready,
+                        RetryCount = item.RetryCount + 1,
+                        Placement = null,
+                        Claim = null,
+                        Backoff = new(now, TimeSpan.Zero, "Host lost")
                     }
                     : item with { State = ScheduledTaskState.Interrupted, Placement = null, Claim = null };
             }).ToArray();

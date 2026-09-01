@@ -64,6 +64,16 @@ public sealed record ExpectedPeerIdentity(string Identity, ReadOnlyMemory<byte> 
     }
 }
 
+internal sealed record ReconnectBindingWire(
+    int Version,
+    Guid RouteId,
+    Guid HostId,
+    Guid NodeIncarnationId,
+    long ReconnectGeneration,
+    Guid AttemptId,
+    int RdpSessionId,
+    string CarrierTranscriptSha256);
+
 internal sealed record HelloWire(
     Guid SessionId,
     Guid NodeIncarnationId,
@@ -72,7 +82,8 @@ internal sealed record HelloWire(
     string[] SupportedFeatures,
     string[] RequiredFeatures,
     Dictionary<StreamKind, long> ResumeCursors,
-    TransportLimits Limits);
+    TransportLimits Limits,
+    ReconnectBindingWire? ReconnectBinding);
 
 internal sealed record HandshakeWire(
     int Version,
@@ -100,16 +111,48 @@ internal static class SecureTransportProtocol
     };
 
     internal static HelloWire ToWire(SessionHello hello) => new(
-        hello.SessionId, hello.NodeIncarnationId.Value, hello.ProtocolMajor, hello.ProtocolMinor,
+        hello.SessionId,
+        hello.NodeIncarnationId.Value,
+        hello.ProtocolMajor,
+        hello.ProtocolMinor,
         [.. hello.SupportedFeatures.Order(StringComparer.Ordinal)],
         [.. hello.RequiredFeatures.Order(StringComparer.Ordinal)],
-        hello.ResumeCursors.ToDictionary(), hello.Limits);
+        hello.ResumeCursors.ToDictionary(),
+        hello.Limits,
+        hello.ReconnectBinding is { } binding
+            ? new(
+                binding.Version,
+                binding.RouteId,
+                binding.HostId.Value,
+                binding.NodeIncarnationId.Value,
+                binding.ReconnectGeneration,
+                binding.AttemptId,
+                binding.RdpSessionId,
+                binding.CarrierTranscriptSha256)
+            : null);
 
     internal static SessionHello FromWire(HelloWire hello) => new(
-        hello.SessionId, new NodeIncarnationId(hello.NodeIncarnationId), hello.ProtocolMajor, hello.ProtocolMinor,
+        hello.SessionId,
+        new NodeIncarnationId(hello.NodeIncarnationId),
+        hello.ProtocolMajor,
+        hello.ProtocolMinor,
         hello.SupportedFeatures.ToHashSet(StringComparer.Ordinal),
         hello.RequiredFeatures.ToHashSet(StringComparer.Ordinal),
-        hello.ResumeCursors, hello.Limits);
+        hello.ResumeCursors,
+        hello.Limits,
+        hello.ReconnectBinding is { } binding
+            ? new(
+                binding.Version,
+                new HostId(binding.HostId),
+                new NodeIncarnationId(binding.NodeIncarnationId),
+                binding.ReconnectGeneration,
+                binding.AttemptId,
+                binding.RdpSessionId,
+                binding.CarrierTranscriptSha256)
+            {
+                RouteId = binding.RouteId
+            }
+            : null);
 
     internal static byte[] CreateHandshake(
         TransportEndpointRole role,
@@ -151,9 +194,14 @@ internal static class SecureTransportProtocol
                 SHA256.HashData(expectedPeer.SigningPublicKey.Span)))
             throw new SecureHandshakeException(SecureHandshakeError.IdentityMismatch, "The peer identity does not match the enrolled identity.");
         VerifySignature(handshake);
-        if (handshake.Hello.SessionId != localHello.SessionId ||
-            handshake.Hello.NodeIncarnationId != localHello.NodeIncarnationId.Value)
-            throw new SecureHandshakeException(SecureHandshakeError.SessionBindingMismatch, "The signed session or Node incarnation binding differs.");
+        var localWire = ToWire(localHello);
+        ValidateHello(localWire);
+        if (handshake.Hello.SessionId != localWire.SessionId ||
+            handshake.Hello.NodeIncarnationId != localWire.NodeIncarnationId ||
+            handshake.Hello.ReconnectBinding != localWire.ReconnectBinding)
+            throw new SecureHandshakeException(
+                SecureHandshakeError.SessionBindingMismatch,
+                "The signed session, Node incarnation, or reconnect binding differs.");
         return handshake;
     }
 
@@ -365,6 +413,19 @@ internal static class SecureTransportProtocol
             hello.ResumeCursors.Any(value => !Enum.IsDefined(value.Key) || value.Value < 0))
             throw new SecureHandshakeException(SecureHandshakeError.BoundsExceeded, "The handshake hello exceeds protocol bounds.");
         hello.Limits.Validate();
+        if (hello.ReconnectBinding is { } binding)
+            _ = new ReconnectTransportBinding(
+                    binding.Version,
+                    new HostId(binding.HostId),
+                    new NodeIncarnationId(binding.NodeIncarnationId),
+                    binding.ReconnectGeneration,
+                    binding.AttemptId,
+                    binding.RdpSessionId,
+                    binding.CarrierTranscriptSha256)
+            {
+                RouteId = binding.RouteId
+            }
+                .Validate(new NodeIncarnationId(hello.NodeIncarnationId));
     }
 
     private static byte[] CreateAad(Guid sessionId, TransportEndpointRole role, long sequence)

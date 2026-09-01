@@ -15,6 +15,31 @@ public sealed class WindowsProcessExecutorTests : IDisposable
 
     public WindowsProcessExecutorTests() => Directory.CreateDirectory(directory);
 
+    [Fact]
+    public void Boot_identity_uses_Windows_kernel_evidence_or_is_unverified()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+
+        var first = WindowsBootIdentity.Capture();
+        var second = WindowsBootIdentity.Capture();
+
+        Assert.False(string.IsNullOrWhiteSpace(first.Identity));
+        Assert.False(string.IsNullOrWhiteSpace(first.Source));
+        if (first.Verified)
+        {
+            Assert.Equal(
+                "NtQuerySystemInformation.SystemTimeOfDayInformation",
+                first.Source);
+            Assert.Equal(first.Identity, second.Identity);
+            Assert.True(second.Verified);
+        }
+        else
+        {
+            Assert.StartsWith("unverified/", first.Identity,
+                StringComparison.Ordinal);
+        }
+    }
+
     [Theory]
     [InlineData("")]
     [InlineData("plain")]
@@ -57,11 +82,10 @@ public sealed class WindowsProcessExecutorTests : IDisposable
         using var sentinel = File.OpenHandle(sentinelPath, FileMode.Create, FileAccess.Write, FileShare.ReadWrite);
         Assert.True(SetHandleInformation(sentinel, 1, 1));
         var value = sentinel.DangerousGetHandle().ToInt64().ToString(System.Globalization.CultureInfo.InvariantCulture);
-        var script = "$h=[Microsoft.Win32.SafeHandles.SafeFileHandle]::new([IntPtr]::new([long]$args[0]),$false);" +
-                     "try{$s=[IO.FileStream]::new($h,[IO.FileAccess]::Write);$s.WriteByte(88);$s.Flush()}catch{}";
         using var executor = CreateExecutor();
-        var handle = await executor.StartAsync(Request(PowerShell(),
-            ["-NoProfile", "-NonInteractive", "-Command", script, value]), default);
+        var handle = await executor.StartAsync(Request(
+            Path.Combine(Environment.SystemDirectory, "cmd.exe"),
+            ["/d", "/c", $"echo X >&{value}"]), default);
         await WaitForExit(executor, handle);
         Assert.Equal(0, new FileInfo(sentinelPath).Length);
     }
@@ -71,8 +95,11 @@ public sealed class WindowsProcessExecutorTests : IDisposable
     {
         if (!OperatingSystem.IsWindows()) return;
         using var executor = CreateExecutor();
-        var request = Request(PowerShell(), ["-NoProfile", "-NonInteractive", "-Command", "[Console]::Out.Write('x'*2000000)"])
-            with { MaxOutputBytes = 32 * 1024 };
+        var request = Request(
+            Path.Combine(Environment.SystemDirectory, "cmd.exe"),
+            ["/d", "/c", "for /L %i in (1,1,10000) do @echo xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"])
+            with
+        { MaxOutputBytes = 32 * 1024 };
         var handle = await executor.StartAsync(request, default);
         await WaitForExit(executor, handle);
         var journal = new ExecutionJournal(Path.Combine(directory, "journal.db"));
@@ -83,21 +110,56 @@ public sealed class WindowsProcessExecutorTests : IDisposable
     }
 
     [Fact]
-    public async Task Cancellation_terminates_complete_process_tree()
+    public async Task AppContainer_child_process_escape_fails_closed()
     {
         if (!OperatingSystem.IsWindows()) return;
         using var executor = CreateExecutor();
-        var childFile = Path.Combine(directory, "child.pid");
-        var script = $"$p=Start-Process '{Path.Combine(Environment.SystemDirectory, "ping.exe")}' " +
-                     $"-ArgumentList '127.0.0.1','-n','120' -WindowStyle Hidden -PassThru; " +
-                     $"Set-Content -LiteralPath '{childFile}' $p.Id; Start-Sleep 120";
-        var handle = await executor.StartAsync(Request(PowerShell(), ["-NoProfile", "-NonInteractive", "-Command", script]), default);
-        Assert.True(SpinWait.SpinUntil(() => File.Exists(childFile), TimeSpan.FromSeconds(10)));
-        var childPid = int.Parse((await File.ReadAllTextAsync(childFile)).Trim());
-        await executor.CancelAsync(handle, TimeSpan.FromMilliseconds(100), default);
-        Assert.True(SpinWait.SpinUntil(() => !IsRunning(childPid), TimeSpan.FromSeconds(10)));
+        var startedFile = Path.Combine(directory, "child.started");
+        var escapedFile = Path.Combine(directory, "child.escaped");
+        var childScript = Path.Combine(directory, "child.cmd");
+        await File.WriteAllTextAsync(
+            childScript,
+            "@echo started>%1\r\n" +
+            "@ping 127.0.0.1 -n 8 >nul\r\n" +
+            "@echo escaped>%2\r\n");
+        var command =
+            $"cmd.exe /d /c {childScript} {startedFile} {escapedFile}";
+        var handle = await executor.StartAsync(Request(
+            Path.Combine(Environment.SystemDirectory, "cmd.exe"),
+            ["/d", "/c", command]), default);
+        await WaitForExit(executor, handle);
+        var standardError = await executor.ReadOutputAsync(
+            handle,
+            "stderr",
+            0,
+            4096,
+            default);
+        Assert.Contains(
+            "Access is denied",
+            System.Text.Encoding.UTF8.GetString(standardError.Data.Span),
+            StringComparison.OrdinalIgnoreCase);
+        Assert.False(File.Exists(startedFile));
+        Assert.False(File.Exists(escapedFile));
     }
 
+    [Fact]
+    public async Task Cancellation_terminates_the_atomic_Job_root()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        using var executor = CreateExecutor();
+        var handle = await executor.StartAsync(Request(
+            Path.Combine(Environment.SystemDirectory, "ping.exe"),
+            ["127.0.0.1", "-n", "120"]), default);
+
+        await executor.CancelAsync(
+            handle,
+            TimeSpan.FromMilliseconds(100),
+            default);
+
+        Assert.True(SpinWait.SpinUntil(
+            () => !IsRunning(handle.ProcessId),
+            TimeSpan.FromSeconds(10)));
+    }
     [Fact]
     public async Task Recovery_rejects_pid_creation_time_mismatch()
     {
@@ -126,6 +188,45 @@ public sealed class WindowsProcessExecutorTests : IDisposable
         Assert.False(error.IsAmbiguous);
     }
 
+    [Fact]
+    public async Task Unverified_boot_identity_mismatch_requires_ambiguous_reconciliation()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var journal = new ExecutionJournal(
+            Path.Combine(directory, "unverified-boot.db"));
+        var id = TaskAttemptId.New();
+        journal.InsertPlanned(new(
+            id,
+            1,
+            null,
+            null,
+            $@"Local\Steward.{id.Value:N}.1",
+            "prior-boot",
+            LaunchPhase.Planned,
+            "launching",
+            Path.Combine(directory, "out"),
+            Path.Combine(directory, "err"),
+            0,
+            0,
+            false,
+            100));
+        using var executor = new WindowsProcessExecutor(
+            journal,
+            keeper,
+            nodeIncarnationId,
+            "current-boot",
+            bootIdentityVerified: false);
+
+        var error = await Assert.ThrowsAsync<ExecutionRecoveryException>(
+            () => executor.RecoverAsync(
+                id,
+                1,
+                "current-boot",
+                default).AsTask());
+
+        Assert.True(error.IsAmbiguous);
+    }
+
     [Theory]
     [InlineData(LaunchBoundary.JobRetained, false)]
     [InlineData(LaunchBoundary.ProcessCreated, true)]
@@ -135,7 +236,9 @@ public sealed class WindowsProcessExecutorTests : IDisposable
     {
         if (!OperatingSystem.IsWindows()) return;
         var journal = new ExecutionJournal(Path.Combine(directory, $"{boundary}.db"));
-        var request = Request(PowerShell(), ["-NoProfile", "-NonInteractive", "-Command", "Start-Sleep 60"]);
+        var request = Request(
+            Path.Combine(Environment.SystemDirectory, "ping.exe"),
+            ["127.0.0.1", "-n", "120"]);
         using (var crashing = new WindowsProcessExecutor(journal, keeper, nodeIncarnationId, "boot", new CrashAt(boundary)))
             await Assert.ThrowsAsync<InjectedLaunchCrashException>(() => crashing.StartAsync(request, default).AsTask());
 
@@ -160,8 +263,9 @@ public sealed class WindowsProcessExecutorTests : IDisposable
         if (!OperatingSystem.IsWindows()) return;
         var journal = new ExecutionJournal(Path.Combine(directory, "monitor.db"));
         using var executor = new WindowsProcessExecutor(journal, keeper, nodeIncarnationId, "boot", spoolFiles: new FailingSpoolFiles());
-        var handle = await executor.StartAsync(Request(PowerShell(),
-            ["-NoProfile", "-NonInteractive", "-Command", "Start-Sleep 60"]), default);
+        var handle = await executor.StartAsync(Request(
+            Path.Combine(Environment.SystemDirectory, "ping.exe"),
+            ["127.0.0.1", "-n", "120"]), default);
         Assert.True(SpinWait.SpinUntil(() => journal.Get(handle.AttemptId, 1)!.FailureDetail is not null, TimeSpan.FromSeconds(5)));
         Assert.True(SpinWait.SpinUntil(() => !IsRunning(handle.ProcessId), TimeSpan.FromSeconds(5)));
         var entry = journal.Get(handle.AttemptId, 1)!;
@@ -202,7 +306,9 @@ public sealed class WindowsProcessExecutorTests : IDisposable
         var journal = new ExecutionJournal(Path.Combine(directory, "journal.db"));
         IExecutionHandle handle;
         using (var first = new WindowsProcessExecutor(journal, keeper, nodeIncarnationId, "boot"))
-            handle = await first.StartAsync(Request(PowerShell(), ["-NoProfile", "-NonInteractive", "-Command", "Start-Sleep 60"]), default);
+            handle = await first.StartAsync(Request(
+            Path.Combine(Environment.SystemDirectory, "ping.exe"),
+            ["127.0.0.1", "-n", "120"]), default);
         Assert.False(keeper.SurvivesClientRestart);
         using var replacement = new WindowsProcessExecutor(journal, keeper, nodeIncarnationId, "boot");
         var recovered = await replacement.RecoverAsync(handle.AttemptId, handle.Generation, "boot", default);
@@ -213,12 +319,28 @@ public sealed class WindowsProcessExecutorTests : IDisposable
     private WindowsProcessExecutor CreateExecutor() =>
         new(new ExecutionJournal(Path.Combine(directory, "journal.db")), keeper, nodeIncarnationId, "boot");
 
-    private ProcessLaunchRequest Request(string executable, IReadOnlyList<string>? arguments = null) =>
-        new(TaskAttemptId.New(), 1, executable, arguments ?? [], directory, Path.Combine(directory, "spool"),
-            1024 * 1024, 0);
-
-    private static string PowerShell() =>
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "WindowsPowerShell", "v1.0", "powershell.exe");
+    private ProcessLaunchRequest Request(
+        string executable,
+        IReadOnlyList<string>? arguments = null)
+    {
+        var attemptId = TaskAttemptId.New();
+        return new ProcessLaunchRequest(
+            attemptId,
+            1,
+            executable,
+            arguments ?? [],
+            directory,
+            Path.Combine(directory, "spool"),
+            1024 * 1024,
+            0,
+            Isolation: new ProcessIsolationProfile(
+                1,
+                ProcessIsolationCapability.Process,
+                Path.GetDirectoryName(directory)!,
+                directory,
+                attemptId,
+                1));
+    }
 
     private static async Task WaitForExit(IProcessExecutor executor, IExecutionHandle handle)
     {

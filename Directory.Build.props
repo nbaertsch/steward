@@ -8,5 +8,7 @@
     <Nullable>enable</Nullable>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <WindowsSdkPackageVersion>10.0.26100.87</WindowsSdkPackageVersion>
+    <MicrosoftDataSqlitePackageVersion>10.0.4</MicrosoftDataSqlitePackageVersion>
+    <SQLitePCLRawPackageVersion>3.0.5</SQLitePCLRawPackageVersion>
   </PropertyGroup>
 </Project>

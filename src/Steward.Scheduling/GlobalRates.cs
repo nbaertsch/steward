@@ -79,8 +79,11 @@ public sealed class SqliteGlobalRateStateStore : IGlobalRateStateStore
         Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
         _connectionString = new SqliteConnectionStringBuilder
         {
-            DataSource = fullPath, Mode = SqliteOpenMode.ReadWriteCreate,
-            Cache = SqliteCacheMode.Shared, Pooling = true, DefaultTimeout = 30
+            DataSource = fullPath,
+            Mode = SqliteOpenMode.ReadWriteCreate,
+            Cache = SqliteCacheMode.Shared,
+            Pooling = true,
+            DefaultTimeout = 30
         }.ToString();
         Initialize();
     }

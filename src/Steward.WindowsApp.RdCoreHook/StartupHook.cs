@@ -155,18 +155,18 @@ public static class StartupHook
         catch (Exception exception)
         {
             var root = exception is TargetInvocationException
-                {
-                    InnerException: { } inner
-                }
+            {
+                InnerException: { } inner
+            }
                 ? inner
                 : exception;
             Record(
                 "managed-plugin-failed-" +
                 root.GetType().Name +
                 (root is FileNotFoundException
-                    {
-                        FileName: { Length: > 0 } fileName
-                    }
+                {
+                    FileName: { Length: > 0 } fileName
+                }
                     ? "-" + new AssemblyName(fileName).Name
                     : root is FileLoadException
                     {

@@ -289,16 +289,11 @@ internal sealed class ClientDvcBroker : IAsyncDisposable
                     CancellationTokenSource.CreateLinkedTokenSource(
                         _lifetime.Token);
                 routeTimeout.CancelAfter(RouteWaitTimeout);
-                var request = new byte[
-                    RdpDvcBrokerRoutingProtocol.RequestSize];
-                await RdpDvcBrokerRoutingProtocol.ReadExactlyAsync(
-                        pipe,
-                        request,
-                        routeTimeout.Token)
-                    .ConfigureAwait(false);
                 var route =
-                    RdpDvcBrokerRoutingProtocol.DecodeRequest(
-                        request);
+                    await RdpDvcBrokerRoutingProtocol.ReadRequestAsync(
+                            pipe,
+                            routeTimeout.Token)
+                        .ConfigureAwait(false);
                 attachment = await ReserveAttachmentAsync(
                         route,
                         routeTimeout.Token)

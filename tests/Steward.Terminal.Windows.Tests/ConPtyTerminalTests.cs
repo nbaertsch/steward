@@ -1,6 +1,11 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Security.Principal;
 using System.Text;
+using Microsoft.Win32.SafeHandles;
 using Steward.Domain;
+using Steward.Runtime.Windows;
+using Steward.Tasks.Abstractions;
 using Steward.Terminal.Abstractions;
 using Steward.Terminal.Windows;
 
@@ -46,11 +51,177 @@ public sealed class ConPtyTerminalTests : IAsyncLifetime
             await service.CloseAsync(new(request.Authority.SessionId, Context(request.Authority),
                 NewRequestId(), latest.Revision, TimeSpan.Zero));
         var transcript = service.ReadRetainedTranscript(request.Authority.SessionId, Context(request.Authority));
-        var output = Encoding.UTF8.GetString(transcript.Where(record => record.Direction == "output" &&
-            record.Content is not null).SelectMany(record => record.Content!).ToArray());
+        var output = Encoding.UTF8.GetString([.. transcript.Where(record => record.Direction == "output" &&
+            record.Content is not null).SelectMany(record => record.Content!)]);
         Assert.Contains(token, output, StringComparison.Ordinal);
     }
 
+    [Fact(Timeout = 30_000)]
+    public async Task Terminal_receives_only_the_typed_clean_environment()
+    {
+        var name = "STEWARD_TERMINAL_PARENT_SECRET";
+        var prior = Environment.GetEnvironmentVariable(name);
+        Environment.SetEnvironmentVariable(name, "must-not-inherit");
+        try
+        {
+            await using var service = Service();
+            var request = Request(TerminalTranscriptMode.Full) with
+            {
+                ShellKind = TerminalShellKind.CommandPrompt,
+                ShellExecutable = CommandPrompt(),
+                Arguments =
+                [
+                    "/D", "/Q", "/K",
+                    $"echo %{name}%"
+                ]
+            };
+
+            await service.OpenAsync(request, Context(request.Authority));
+
+            var observed = SpinWait.SpinUntil(
+                () => TranscriptText(service, request).Contains(
+                    "%STEWARD_TERMINAL_PARENT_SECRET%", StringComparison.Ordinal),
+                TimeSpan.FromSeconds(10));
+            var transcript = TranscriptText(service, request);
+            Assert.True(observed, transcript);
+            Assert.DoesNotContain(
+                "must-not-inherit",
+                transcript,
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(name, prior);
+        }
+    }
+    [Fact(Timeout = 30_000)]
+    public async Task Terminal_child_has_native_restricted_AppContainer_token_for_its_attempt()
+    {
+        var workspace = Path.Combine(directory, "native-token");
+        Directory.CreateDirectory(workspace);
+        await using var service = Service();
+        var seed = Request(TerminalTranscriptMode.None);
+        var request = seed with
+        {
+            Authority = seed.Authority with
+            {
+                WorkspaceRoot = workspace,
+                Task = new(TaskAttemptId.New(), 3)
+            },
+            WorkingDirectory = workspace,
+            Arguments = ["-NoLogo", "-NoProfile", "-Command", "Start-Sleep 30"]
+        };
+
+        var opened = await service.OpenAsync(request, Context(request.Authority));
+        using var token = OpenToken(opened.ProcessId!.Value);
+        var expected = WindowsWorkloadIsolation.Describe(TerminalIsolation(request));
+
+        Assert.Equal(1, ReadTokenInt32(token, TokenIsAppContainer));
+        Assert.Equal(expected.RestrictedSid, ReadAppContainerSid(token));
+        Assert.Equal(0, ReadTokenInt32(token, TokenCapabilities));
+    }
+
+    [Fact(Timeout = 30_000)]
+    public async Task Terminal_authority_can_use_only_workspace_and_ConPty_handles()
+    {
+        var workspace = Path.Combine(directory, "authority-workspace");
+        var sibling = Path.Combine(directory, "sibling-workspace");
+        var identity = Path.Combine(directory, "endpoint-identity");
+        var trust = Path.Combine(directory, "control-trust");
+        var update = Path.Combine(directory, "update-state");
+        var maintenance = Path.Combine(directory, "maintenance-state");
+        foreach (var path in new[] { workspace, sibling, identity, trust, update, maintenance })
+            Directory.CreateDirectory(path);
+        foreach (var protectedRoot in new[] { sibling, identity, trust, update, maintenance })
+        {
+            await File.WriteAllTextAsync(Path.Combine(protectedRoot, "secret.txt"), "forbidden");
+            WindowsWorkloadIsolation.Prepare(new(
+                1,
+                ProcessIsolationCapability.Process,
+                directory,
+                protectedRoot,
+                TaskAttemptId.New(),
+                1));
+        }
+
+        var inheritedPath = Path.Combine(directory, "inherited-handle.txt");
+        using var inherited = File.OpenHandle(
+            inheritedPath,
+            FileMode.Create,
+            FileAccess.Write,
+            FileShare.ReadWrite);
+        Assert.True(SetHandleInformation(inherited, 1, 1));
+        var inheritedValue = inherited.DangerousGetHandle().ToInt64()
+            .ToString(System.Globalization.CultureInfo.InvariantCulture);
+        var parentSecret = "STEWARD_TERMINAL_AUTHORITY_PARENT_SECRET";
+        var previousSecret = Environment.GetEnvironmentVariable(parentSecret);
+        Environment.SetEnvironmentVariable(parentSecret, "must-not-inherit");
+        var pipeName = "Steward.Maintenance." + Guid.NewGuid().ToString("N");
+        await using var pipe = new System.IO.Pipes.NamedPipeServerStream(
+            pipeName,
+            System.IO.Pipes.PipeDirection.InOut,
+            1,
+            System.IO.Pipes.PipeTransmissionMode.Byte,
+            System.IO.Pipes.PipeOptions.Asynchronous |
+            System.IO.Pipes.PipeOptions.CurrentUserOnly);
+        try
+        {
+            var checks = new[]
+            {
+                $"try {{ Set-Content -LiteralPath '{Path.Combine(workspace, "allowed.txt")}' allowed -ErrorAction Stop; 'workspace-allowed' }} catch {{ 'workspace-denied' }}",
+                DeniedPowerShellFileCheck("sibling", Path.Combine(sibling, "secret.txt")),
+                DeniedPowerShellFileCheck("identity", Path.Combine(identity, "secret.txt")),
+                DeniedPowerShellFileCheck("trust", Path.Combine(trust, "secret.txt")),
+                DeniedPowerShellFileCheck("update", Path.Combine(update, "secret.txt")),
+                DeniedPowerShellFileCheck("maintenance", Path.Combine(maintenance, "secret.txt")),
+                $"try {{ $p=[IO.Pipes.NamedPipeClientStream]::new('.', '{pipeName}', [IO.Pipes.PipeDirection]::Out); $p.Connect(500); $p.Dispose(); 'pipe-leaked' }} catch {{ 'pipe-denied' }}",
+                $"if ($env:{parentSecret}) {{ 'environment-leaked' }} else {{ 'environment-denied' }}",
+                $"try {{ $h=[Microsoft.Win32.SafeHandles.SafeFileHandle]::new([IntPtr]{inheritedValue}, $false); $s=[IO.FileStream]::new($h,[IO.FileAccess]::Write); $s.WriteByte(88); $s.Dispose(); $h.Dispose(); 'handle-leaked' }} catch {{ 'handle-denied' }}",
+                "'conpty-available'"
+            };
+            await using var service = Service();
+            var seed = Request(TerminalTranscriptMode.Full);
+            var request = seed with
+            {
+                Authority = seed.Authority with { WorkspaceRoot = workspace },
+                WorkingDirectory = workspace,
+                Arguments = ["-NoLogo", "-NoProfile", "-NoExit", "-Command", string.Join("; ", checks)]
+            };
+            var opened = await service.OpenAsync(
+                request, Context(request.Authority));
+            using var childToken = OpenToken(opened.ProcessId!.Value);
+            var expectedAuthority = WindowsWorkloadIsolation.Describe(
+                TerminalIsolation(request));
+            Assert.Equal(1, ReadTokenInt32(childToken, TokenIsAppContainer));
+            Assert.Equal(
+                expectedAuthority.RestrictedSid,
+                ReadAppContainerSid(childToken));
+            Assert.Equal(0, ReadTokenInt32(childToken, TokenCapabilities));
+            Assert.True(SpinWait.SpinUntil(
+                () => TranscriptText(service, request).Contains(
+                    "conpty-available", StringComparison.Ordinal),
+                TimeSpan.FromSeconds(10)),
+                TranscriptText(service, request));
+            var transcript = TranscriptText(service, request);
+
+            Assert.Contains("workspace-allowed", transcript, StringComparison.Ordinal);
+
+            Assert.Contains("sibling-denied", transcript, StringComparison.Ordinal);
+            Assert.Contains("identity-denied", transcript, StringComparison.Ordinal);
+            Assert.Contains("trust-denied", transcript, StringComparison.Ordinal);
+            Assert.Contains("update-denied", transcript, StringComparison.Ordinal);
+            Assert.Contains("maintenance-denied", transcript, StringComparison.Ordinal);
+            Assert.Contains("pipe-denied", transcript, StringComparison.Ordinal);
+            Assert.Contains("environment-denied", transcript, StringComparison.Ordinal);
+            Assert.Contains("handle-denied", transcript, StringComparison.Ordinal);
+            Assert.Contains("conpty-available", transcript, StringComparison.Ordinal);
+            Assert.Equal(0, new FileInfo(inheritedPath).Length);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(parentSecret, previousSecret);
+        }
+    }
     [Fact(Timeout = 30_000)]
     public async Task Input_and_output_are_bounded()
     {
@@ -137,6 +308,7 @@ public sealed class ConPtyTerminalTests : IAsyncLifetime
                 Arguments = ["-NoLogo", "-NoProfile", "-Command", script]
             };
             await service.OpenAsync(request, Context(request.Authority));
+
             Assert.True(SpinWait.SpinUntil(() => File.Exists(sentinel), TimeSpan.FromSeconds(15)));
             Assert.True(SpinWait.SpinUntil(() =>
                 noReaderJournal.Get(request.Authority.SessionId).OutputSequence > 2, TimeSpan.FromSeconds(10)));
@@ -167,7 +339,7 @@ public sealed class ConPtyTerminalTests : IAsyncLifetime
         var second = await secondTask;
         Assert.NotEmpty(first);
         Assert.Equal(first.Select(item => item.Sequence), second.Select(item => item.Sequence));
-        Assert.Contains(token, Encoding.UTF8.GetString(first.SelectMany(item => item.Data.ToArray()).ToArray()),
+        Assert.Contains(token, Encoding.UTF8.GetString([.. first.SelectMany(item => item.Data.ToArray())]),
             StringComparison.Ordinal);
         var last = first[^1];
         var follow = read with
@@ -259,12 +431,20 @@ public sealed class ConPtyTerminalTests : IAsyncLifetime
         await using var service = new TerminalSessionService(journal, host, node, "boot-" + Guid.NewGuid().ToString("N"),
             options: new(AuthorityMonitorInterval: TimeSpan.FromSeconds(1)),
             currentRevocationRevision: () => Volatile.Read(ref revision), timeProvider: clock);
+        var childFile = Path.Combine(directory, "revoked-child.pid");
+        var script = $"$p=Start-Process '{PowerShell()}' " +
+                     "-ArgumentList '-NoLogo','-NoProfile','-Command','Start-Sleep 120' -PassThru; " +
+                     $"Set-Content -LiteralPath '{childFile}' $p.Id; Wait-Process $p";
         var request = Request(TerminalTranscriptMode.None) with
         {
-            Arguments = ["-NoLogo", "-NoProfile", "-Command", "Start-Sleep 30"]
+            Arguments = ["-NoLogo", "-NoProfile", "-Command", script]
         };
         var opened = await service.OpenAsync(request, Context(request.Authority));
         Assert.Equal(TerminalSessionState.Open, opened.State);
+        var childPid = 0;
+        Assert.True(SpinWait.SpinUntil(
+            () => TryReadProcessId(childFile, out childPid),
+            TimeSpan.FromSeconds(10)));
         Volatile.Write(ref revision, 1);
         clock.Advance(TimeSpan.FromSeconds(1));
         Assert.True(SpinWait.SpinUntil(() =>
@@ -274,6 +454,7 @@ public sealed class ConPtyTerminalTests : IAsyncLifetime
                    snapshot.InterruptionReason == "authority-revoked";
         }, TimeSpan.FromSeconds(10)));
         Assert.True(SpinWait.SpinUntil(() => !IsRunning(opened.ProcessId!.Value), TimeSpan.FromSeconds(10)));
+        Assert.True(SpinWait.SpinUntil(() => !IsRunning(childPid), TimeSpan.FromSeconds(10)));
     }
 
     private TerminalSessionService Service(
@@ -335,11 +516,10 @@ public sealed class ConPtyTerminalTests : IAsyncLifetime
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe");
 
     private static string TranscriptText(TerminalSessionService service, TerminalOpenRequest request) =>
-        Encoding.UTF8.GetString(service.ReadRetainedTranscript(
+        Encoding.UTF8.GetString([.. service.ReadRetainedTranscript(
                 request.Authority.SessionId, Context(request.Authority))
             .Where(record => record.Direction == "output" && record.Content is not null)
-            .SelectMany(record => record.Content!)
-            .ToArray());
+            .SelectMany(record => record.Content!)]);
 
     private static async Task<List<TerminalOutput>> ReadAllAsync(
         ITerminalSessionService service,
@@ -381,7 +561,7 @@ public sealed class ConPtyTerminalTests : IAsyncLifetime
 
     private sealed class ManualTimeProvider(DateTimeOffset initial) : TimeProvider
     {
-        private readonly object gate = new();
+        private readonly Lock gate = new();
         private readonly List<ManualTimer> timers = [];
         private DateTimeOffset now = initial;
 
@@ -414,7 +594,7 @@ public sealed class ConPtyTerminalTests : IAsyncLifetime
             lock (gate)
             {
                 now += duration;
-                snapshot = timers.ToArray();
+                snapshot = [.. timers];
             }
             foreach (var timer in snapshot)
                 timer.FireIfDue(now);
@@ -427,7 +607,7 @@ public sealed class ConPtyTerminalTests : IAsyncLifetime
             TimeSpan dueTime,
             TimeSpan period) : ITimer
         {
-            private readonly object gate = new();
+            private readonly Lock gate = new();
             private DateTimeOffset due = owner.Now + dueTime;
             private TimeSpan interval = period;
             private bool disposed;
@@ -472,6 +652,116 @@ public sealed class ConPtyTerminalTests : IAsyncLifetime
         }
     }
 
+    private const int TokenIsAppContainer = 29;
+    private const int TokenCapabilities = 30;
+    private const int TokenAppContainerSid = 31;
+
+    private static ProcessIsolationProfile TerminalIsolation(
+        TerminalOpenRequest request) => new(
+        1,
+        ProcessIsolationCapability.Terminal,
+        Directory.GetParent(request.Authority.WorkspaceRoot)!.FullName,
+        request.Authority.WorkspaceRoot,
+        request.Authority.Task?.TaskAttemptId ??
+            new TaskAttemptId(request.Authority.SessionId.Value),
+        request.Authority.Task?.Generation ?? 1);
+
+    private static string DeniedPowerShellFileCheck(string name, string path) =>
+        $"try {{ Get-Content -LiteralPath '{path}' -ErrorAction Stop | Out-Null; '{name}-leaked' }} catch {{ '{name}-denied' }}";
+
+    private static SafeFileHandle OpenToken(int processId)
+    {
+        using var process = OpenProcess(0x1000, false, checked((uint)processId));
+        Assert.False(process.IsInvalid);
+        Assert.True(OpenProcessToken(process, 0x0008, out var token));
+        return token;
+    }
+
+    private static int ReadTokenInt32(SafeFileHandle token, int informationClass)
+    {
+        var pointer = ReadTokenInformation(token, informationClass);
+        try
+        {
+            return Marshal.ReadInt32(pointer);
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(pointer);
+        }
+    }
+
+    private static string ReadAppContainerSid(SafeFileHandle token)
+    {
+        var pointer = ReadTokenInformation(token, TokenAppContainerSid);
+        try
+        {
+            var sid = Marshal.ReadIntPtr(pointer);
+            Assert.NotEqual(IntPtr.Zero, sid);
+            return new SecurityIdentifier(sid).Value;
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(pointer);
+        }
+    }
+
+    private static IntPtr ReadTokenInformation(
+        SafeFileHandle token,
+        int informationClass)
+    {
+        _ = GetTokenInformation(
+            token,
+            informationClass,
+            IntPtr.Zero,
+            0,
+            out var required);
+        Assert.True(required > 0);
+        var pointer = Marshal.AllocHGlobal(checked((int)required));
+        if (!GetTokenInformation(
+                token,
+                informationClass,
+                pointer,
+                required,
+                out _))
+        {
+            Marshal.FreeHGlobal(pointer);
+            throw new System.ComponentModel.Win32Exception(
+                Marshal.GetLastWin32Error());
+        }
+        return pointer;
+    }
+
+#pragma warning disable SYSLIB1054
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern SafeFileHandle OpenProcess(
+        uint desiredAccess,
+        [MarshalAs(UnmanagedType.Bool)] bool inheritHandle,
+        uint processId);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool OpenProcessToken(
+        SafeFileHandle process,
+        uint desiredAccess,
+        out SafeFileHandle token);
+
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetTokenInformation(
+        SafeFileHandle token,
+        int tokenInformationClass,
+        IntPtr tokenInformation,
+        uint tokenInformationLength,
+        out uint returnLength);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetHandleInformation(
+        SafeFileHandle handle,
+        uint mask,
+        uint flags);
+#pragma warning restore SYSLIB1054
     public Task DisposeAsync()
     {
         try { Directory.Delete(directory, true); }

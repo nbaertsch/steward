@@ -417,10 +417,10 @@ public sealed class SchedulingTests
         var scheduler = new CompositeScheduler(store, allocator);
         var plan = Plan(Id<WorkloadId>(60), Id<PlanRevisionId>(61),
             Enumerable.Range(1, 5).Select(i => Node(60 + i) with
-                {
-                    ExternalRates = [new("partitioned", 2)],
-                    IdentityGrantIds = [Id<IdentityGrantId>(600 + i)]
-                }).ToArray());
+            {
+                ExternalRates = [new("partitioned", 2)],
+                IdentityGrantIds = [Id<IdentityGrantId>(600 + i)]
+            }).ToArray());
         var now = DateTimeOffset.UtcNow;
         await allocator.ConfigureAsync("partitioned", 10, 0, 0, now);
         await scheduler.RegisterAsync(plan);

@@ -1,4 +1,6 @@
+using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Steward.Domain;
 
 namespace Steward.Contracts;
@@ -12,11 +14,120 @@ public sealed record ContractEnvelope<T>(
     long Revision,
     T Payload);
 
-public sealed record ExtensionMetadataDto(
-    string Kind,
-    string Version,
-    JsonElement Data);
+[JsonConverter(typeof(ExtensionMetadataDtoJsonConverter))]
+public sealed class ExtensionMetadataDto : IEquatable<ExtensionMetadataDto>
+{
+    private const int MaximumDataBytes = 4 * 1024 * 1024;
+    private readonly string dataJson;
 
+    private ExtensionMetadataDto(string kind, string version, string dataJson)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(kind);
+        ArgumentException.ThrowIfNullOrWhiteSpace(version);
+        if (Encoding.UTF8.GetByteCount(dataJson) > MaximumDataBytes)
+            throw new ArgumentException(
+                "Extension metadata exceeds its size bound.",
+                nameof(dataJson));
+        using var document = JsonDocument.Parse(dataJson);
+        Kind = kind;
+        Version = version;
+        this.dataJson = document.RootElement.GetRawText();
+    }
+
+    public string Kind { get; }
+    public string Version { get; }
+    public int DataByteCount => Encoding.UTF8.GetByteCount(dataJson);
+    public bool HasData => dataJson != "null";
+    public string DataHash => Convert.ToHexString(
+        System.Security.Cryptography.SHA256.HashData(
+            Encoding.UTF8.GetBytes(dataJson)));
+
+    public static ExtensionMetadataDto Create<T>(
+        string kind,
+        string version,
+        T data,
+        JsonSerializerOptions? options = null) =>
+        new(kind, version, JsonSerializer.Serialize(data, options));
+
+    public T? DeserializeData<T>(JsonSerializerOptions? options = null) =>
+        JsonSerializer.Deserialize<T>(dataJson, options);
+
+    public bool Equals(ExtensionMetadataDto? other) =>
+        other is not null &&
+        string.Equals(Kind, other.Kind, StringComparison.Ordinal) &&
+        string.Equals(Version, other.Version, StringComparison.Ordinal) &&
+        string.Equals(dataJson, other.dataJson, StringComparison.Ordinal);
+
+    public override bool Equals(object? value) =>
+        value is ExtensionMetadataDto other && Equals(other);
+
+    public override int GetHashCode() =>
+        HashCode.Combine(
+            StringComparer.Ordinal.GetHashCode(Kind),
+            StringComparer.Ordinal.GetHashCode(Version),
+            StringComparer.Ordinal.GetHashCode(dataJson));
+
+    internal string DataJson => dataJson;
+
+    internal static ExtensionMetadataDto FromJson(
+        string kind,
+        string version,
+        string dataJson) => new(kind, version, dataJson);
+}
+
+internal sealed class ExtensionMetadataDtoJsonConverter
+    : JsonConverter<ExtensionMetadataDto>
+{
+    public override ExtensionMetadataDto Read(
+        ref Utf8JsonReader reader,
+        Type typeToConvert,
+        JsonSerializerOptions options)
+    {
+        using var document = JsonDocument.ParseValue(ref reader);
+        var root = document.RootElement;
+        if (!TryGetProperty(root, "kind", out var kind) ||
+            !TryGetProperty(root, "version", out var version) ||
+            !TryGetProperty(root, "data", out var data) ||
+            kind.ValueKind != JsonValueKind.String ||
+            version.ValueKind != JsonValueKind.String)
+            throw new JsonException("Extension metadata is invalid.");
+        return ExtensionMetadataDto.FromJson(
+            kind.GetString()!,
+            version.GetString()!,
+            data.GetRawText());
+    }
+
+    public override void Write(
+        Utf8JsonWriter writer,
+        ExtensionMetadataDto value,
+        JsonSerializerOptions options)
+    {
+        writer.WriteStartObject();
+        writer.WriteString("kind", value.Kind);
+        writer.WriteString("version", value.Version);
+        writer.WritePropertyName("data");
+        using var document = JsonDocument.Parse(value.DataJson);
+        document.RootElement.WriteTo(writer);
+        writer.WriteEndObject();
+    }
+
+    private static bool TryGetProperty(
+        JsonElement value,
+        string name,
+        out JsonElement property)
+    {
+        foreach (var candidate in value.EnumerateObject())
+        {
+            if (candidate.Name.Equals(name, StringComparison.OrdinalIgnoreCase))
+            {
+                property = candidate.Value;
+                return true;
+            }
+        }
+        property = default;
+        return false;
+    }
+}
 public sealed record ResourceRequirementsDto(
     decimal CpuCores,
     long MemoryBytes,

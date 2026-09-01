@@ -135,6 +135,123 @@ public sealed class ClientDvcBrokerRoutingTests
     }
 
     [Fact]
+    public async Task V2_route_uses_generation_attempt_and_authenticated_client_hello()
+    {
+        var pipeName = $"Steward.Routing.V2.{Guid.NewGuid():N}";
+        await using var broker = new ClientDvcBroker(_ => { }, pipeName);
+        var secret = RandomNumberGenerator.GetBytes(32);
+        var identity = new RdpDvcCarrierAttemptIdentity(
+            Guid.NewGuid(),
+            HostId.New(),
+            NodeIncarnationId.New(),
+            73,
+            Guid.NewGuid(),
+            42);
+        var nodeChallenge = RandomNumberGenerator.GetBytes(32);
+        var clientHello = RdpDvcCarrierProtocolV2.CreateClientHello(
+            identity,
+            nodeChallenge,
+            secret);
+        var authentication = new RdpDvcAuthenticationOptions(
+            new(
+                identity.SessionId,
+                identity.HostId.Value,
+                identity.NodeIncarnationId.Value,
+                identity.RdpSessionId,
+                identity.AttemptId),
+            secret);
+        var clientPdu = RdpDvcMessageCodec.Encode(
+            new(
+                RdpDvcMessageKind.Ping,
+                StewardRdpDvc.ProtocolVersion,
+                identity.SessionId,
+                identity.HostId.Value,
+                identity.NodeIncarnationId.Value,
+                identity.RdpSessionId,
+                identity.AttemptId,
+                1,
+                DateTimeOffset.UtcNow.UtcTicks,
+                clientHello),
+            secret);
+        var channel = new CapturingClientChannel();
+        var attachment = broker.TryAttach(channel);
+        Assert.NotNull(attachment);
+        Assert.True(attachment.ReceiveFragment(clientPdu));
+        var expectedRouteIdentity = new RdpDvcConnectionIdentity(
+            identity.SessionId,
+            identity.HostId.Value,
+            identity.NodeIncarnationId.Value,
+            0,
+            identity.ReconnectGeneration,
+            identity.AttemptId)
+        {
+            RouteId = identity.RouteId
+        };
+        var expectedRoute =
+            RdpDvcBrokerRoutingProtocol.CreateReconnectRoute(
+                expectedRouteIdentity,
+                secret);
+        Assert.Equal(
+            expectedRoute,
+            RdpDvcBrokerRoutingProtocol.DecodeRequest(
+                RdpDvcBrokerRoutingProtocol.EncodeRequest(expectedRoute)));
+        Assert.True(
+            RdpDvcBrokerRoutingProtocol.TryReadUntrustedCandidateRoute(
+                clientPdu,
+                out var candidate));
+        Assert.True(
+            candidate.MatchesRequest(expectedRoute),
+            candidate.DescribeMatch(expectedRoute)); var source = new RdpDvcCarrierV2NamedPipeWireChannelSource(
+            new(
+                identity.SessionId,
+                identity.HostId,
+                identity.NodeIncarnationId,
+                identity.ReconnectGeneration,
+                identity.AttemptId,
+                ExpectedRdpSessionId: null),
+            secret,
+            pipeName,
+            TimeSpan.FromSeconds(5));
+
+        var opened = await source.OpenChannelAsync();
+        Assert.Equal(identity.RdpSessionId, opened.RdpSessionId);
+        Assert.Equal(identity, source.SelectedIdentity);
+        var responding = RdpDvcCarrierHandshakeV2.RespondAsync(
+                opened,
+                identity,
+                secret,
+                TimeSpan.FromSeconds(5))
+            .AsTask();
+        var serverPdu = await channel.ReadWriteAsync();
+        var serverMessage = RdpDvcMessageCodec.Decode(
+            serverPdu,
+            authentication);
+        var finish = RdpDvcCarrierProtocolV2.CreateFinish(
+            identity,
+            clientHello,
+            serverMessage.Payload.Span,
+            secret);
+        var finishPdu = RdpDvcMessageCodec.Encode(
+            new(
+                RdpDvcMessageKind.Data,
+                StewardRdpDvc.ProtocolVersion,
+                identity.SessionId,
+                identity.HostId.Value,
+                identity.NodeIncarnationId.Value,
+                identity.RdpSessionId,
+                identity.AttemptId,
+                2,
+                DateTimeOffset.UtcNow.UtcTicks,
+                finish),
+            secret);
+        Assert.True(attachment.ReceiveFragment(finishPdu));
+
+        await using var connected = await responding;
+        Assert.Equal(
+            identity,
+            connected.Authentication.Identity);
+    }
+    [Fact]
     public void Routed_source_requires_exact_nonce_but_allows_wts_wildcard()
     {
         var route = Route.Create(61);

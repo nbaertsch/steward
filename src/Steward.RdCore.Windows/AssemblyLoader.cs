@@ -6,14 +6,14 @@ using System.Security.Cryptography;
 
 namespace Steward.RdCore.Windows;
 
-public interface IRdCoreAssemblyLoader : IDisposable
+internal interface IRdCoreAssemblyLoader : IDisposable
 {
     bool IsCollectible { get; }
 
     Assembly LoadProjectedAssembly();
 }
 
-public sealed class CollectibleRdCoreAssemblyLoader : AssemblyLoadContext,
+internal sealed class CollectibleRdCoreAssemblyLoader : AssemblyLoadContext,
     IRdCoreAssemblyLoader
 {
     private const uint LoadLibrarySearchDllLoadDir = 0x00000100;

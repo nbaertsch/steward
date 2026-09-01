@@ -22,8 +22,11 @@ public static class CliApplication
         TextWriter output,
         TextWriter error,
         CancellationToken cancellationToken,
-        HttpMessageHandler? handler = null,
-        object? devBoxCommands = null)
+        HttpMessageHandler? handler = null
+#if WINDOWS
+        , IDevBoxCommandService? devBoxCommands = null
+#endif
+        )
     {
         try
         {
@@ -155,17 +158,17 @@ public static class CliApplication
                     cancellationToken);
 
             case "workload-create":
-            {
-                var plannerData = ParseJson(Required(values, "planner-data"));
-                return await control.CreateWorkloadAsync(
-                    new(
-                        Required(values, "type"),
-                        Required(values, "planner-kind"),
-                        Required(values, "planner-version"),
-                        plannerData,
-                        values.GetValueOrDefault("idempotency-key")),
-                    cancellationToken);
-            }
+                {
+                    var plannerData = ParseJson(Required(values, "planner-data"));
+                    return await control.CreateWorkloadAsync(
+                        new(
+                            Required(values, "type"),
+                            Required(values, "planner-kind"),
+                            Required(values, "planner-version"),
+                            plannerData,
+                            values.GetValueOrDefault("idempotency-key")),
+                        cancellationToken);
+                }
 
             case "workload-submit-harbor":
             case "workload-submit-saber":
@@ -219,14 +222,14 @@ public static class CliApplication
                 return await control.GetArtifactAsync(
                     ParseId<PortableObjectId>(values, "id"), cancellationToken);
             case "artifact-download":
-            {
-                var result = await control.DownloadArtifactAsync(
-                    ParseId<PortableObjectId>(values, "id"),
-                    Path.GetFullPath(BoundedText(values, "output", 32_767)),
-                    BoundedLong(values, "max-bytes", 256L * 1024 * 1024, 1, 1024L * 1024 * 1024),
-                    cancellationToken);
-                return JsonSerializer.SerializeToElement(result, StewardJson.Options);
-            }
+                {
+                    var result = await control.DownloadArtifactAsync(
+                        ParseId<PortableObjectId>(values, "id"),
+                        Path.GetFullPath(BoundedText(values, "output", 32_767)),
+                        BoundedLong(values, "max-bytes", 256L * 1024 * 1024, 1, 1024L * 1024 * 1024),
+                        cancellationToken);
+                    return JsonSerializer.SerializeToElement(result, StewardJson.Options);
+                }
 
             case "pool-list":
                 return await control.ListPoolsAsync(cancellationToken);
@@ -327,42 +330,42 @@ public static class CliApplication
                 return await control.IssueTerminalAuthorityAsync(
                     ParseJsonFile<IssueTerminalAuthorityRequest>(values), cancellationToken);
             case "terminal-open":
-            {
-                var request = ParseJsonFile<TerminalOpenRequest>(values);
-                TerminalContractLimits.ValidateRequestId(request.RequestId);
-                return await control.OpenTerminalAsync(request, cancellationToken);
-            }
+                {
+                    var request = ParseJsonFile<TerminalOpenRequest>(values);
+                    TerminalContractLimits.ValidateRequestId(request.RequestId);
+                    return await control.OpenTerminalAsync(request, cancellationToken);
+                }
             case "terminal-get":
                 return await control.GetTerminalAsync(ParseTerminalId(values), cancellationToken);
             case "terminal-input":
-            {
-                var request = ParseJsonFile<TerminalInputRequest>(values);
-                TerminalContractLimits.ValidateRequestId(request.RequestId);
-                if (request.Data.Length > 65_536)
-                    throw new CliUsageException("Terminal input is limited to 65536 bytes per command.");
-                return await control.SendTerminalInputAsync(ParseTerminalId(values), request, cancellationToken);
-            }
+                {
+                    var request = ParseJsonFile<TerminalInputRequest>(values);
+                    TerminalContractLimits.ValidateRequestId(request.RequestId);
+                    if (request.Data.Length > 65_536)
+                        throw new CliUsageException("Terminal input is limited to 65536 bytes per command.");
+                    return await control.SendTerminalInputAsync(ParseTerminalId(values), request, cancellationToken);
+                }
             case "terminal-resize":
-            {
-                var request = ParseJsonFile<TerminalResizeRequest>(values);
-                TerminalContractLimits.ValidateRequestId(request.RequestId);
-                return await control.ResizeTerminalAsync(ParseTerminalId(values), request, cancellationToken);
-            }
+                {
+                    var request = ParseJsonFile<TerminalResizeRequest>(values);
+                    TerminalContractLimits.ValidateRequestId(request.RequestId);
+                    return await control.ResizeTerminalAsync(ParseTerminalId(values), request, cancellationToken);
+                }
             case "terminal-output":
-            {
-                var request = ParseJsonFile<TerminalOutputReadRequest>(values);
-                if (request.AfterSequence < 0 || request.AfterOffset < 0 ||
-                    request.MaximumItems is < 1 or > 50 ||
-                    request.MaximumBytes is < 1 or > 65_536)
-                    throw new CliUsageException("Terminal output cursor or page bound is invalid.");
-                return await control.ReadTerminalOutputAsync(ParseTerminalId(values), request, cancellationToken);
-            }
+                {
+                    var request = ParseJsonFile<TerminalOutputReadRequest>(values);
+                    if (request.AfterSequence < 0 || request.AfterOffset < 0 ||
+                        request.MaximumItems is < 1 or > 50 ||
+                        request.MaximumBytes is < 1 or > 65_536)
+                        throw new CliUsageException("Terminal output cursor or page bound is invalid.");
+                    return await control.ReadTerminalOutputAsync(ParseTerminalId(values), request, cancellationToken);
+                }
             case "terminal-close":
-            {
-                var request = ParseJsonFile<TerminalCloseRequest>(values);
-                TerminalContractLimits.ValidateRequestId(request.RequestId);
-                return await control.CloseTerminalAsync(ParseTerminalId(values), request, cancellationToken);
-            }
+                {
+                    var request = ParseJsonFile<TerminalCloseRequest>(values);
+                    TerminalContractLimits.ValidateRequestId(request.RequestId);
+                    return await control.CloseTerminalAsync(ParseTerminalId(values), request, cancellationToken);
+                }
             case "terminal-revoke":
                 return await control.RevokeTerminalAsync(ParseTerminalId(values), cancellationToken);
 
@@ -396,20 +399,20 @@ public static class CliApplication
     private static T ParseJson<T>(
             IReadOnlyDictionary<string, string> values,
             string name)
+    {
+        var json = Required(values, name);
+        if (json.Length > 65_536)
+            throw new CliUsageException($"--{name} must be at most 65536 characters.");
+        try
         {
-            var json = Required(values, name);
-            if (json.Length > 65_536)
-                throw new CliUsageException($"--{name} must be at most 65536 characters.");
-            try
-            {
-                return JsonSerializer.Deserialize<T>(json, StewardJson.Options)
-                    ?? throw new JsonException("JSON value was null.");
-            }
-            catch (JsonException exception)
-            {
-                throw new CliUsageException($"--{name} must be valid {typeof(T).Name} JSON: {exception.Message}");
-            }
+            return JsonSerializer.Deserialize<T>(json, StewardJson.Options)
+                ?? throw new JsonException("JSON value was null.");
         }
+        catch (JsonException exception)
+        {
+            throw new CliUsageException($"--{name} must be valid {typeof(T).Name} JSON: {exception.Message}");
+        }
+    }
 
     private static T ParseJsonFile<T>(IReadOnlyDictionary<string, string> values)
     {
@@ -440,23 +443,23 @@ public static class CliApplication
             IReadOnlyDictionary<string, string> values,
             string name)
             where T : struct, IStewardId
+    {
+        var text = Required(values, name);
+        try
         {
-            var text = Required(values, name);
-            try
-            {
-                var value = (T)Activator.CreateInstance(typeof(T), Guid.Parse(text))!;
-                if (value.Value == Guid.Empty) throw new FormatException();
-                return value;
-            }
-            catch (Exception exception) when (exception is FormatException or TargetInvocationException)
-            {
-                var typeName = typeof(T).Name;
-                if (typeName.EndsWith("Id", StringComparison.Ordinal))
-                    typeName = typeName[..^2];
-                throw new CliUsageException(
-                    $"--{name} must be a non-empty {typeName} GUID.");
-            }
+            var value = (T)Activator.CreateInstance(typeof(T), Guid.Parse(text))!;
+            if (value.Value == Guid.Empty) throw new FormatException();
+            return value;
         }
+        catch (Exception exception) when (exception is FormatException or TargetInvocationException)
+        {
+            var typeName = typeof(T).Name;
+            if (typeName.EndsWith("Id", StringComparison.Ordinal))
+                typeName = typeName[..^2];
+            throw new CliUsageException(
+                $"--{name} must be a non-empty {typeName} GUID.");
+        }
+    }
 
     private static T? OptionalId<T>(
             IReadOnlyDictionary<string, string> values,
@@ -468,28 +471,28 @@ public static class CliApplication
             IReadOnlyDictionary<string, string> values,
             string name,
             int maximum)
-        {
-            var value = Required(values, name);
-            if (value.Length > maximum)
-                throw new CliUsageException($"--{name} must be at most {maximum} characters.");
-            return value;
-        }
+    {
+        var value = Required(values, name);
+        if (value.Length > maximum)
+            throw new CliUsageException($"--{name} must be at most {maximum} characters.");
+        return value;
+    }
 
-        private static string? OptionalBoundedText(
-            IReadOnlyDictionary<string, string> values,
-            string name,
-            int maximum) =>
-            values.ContainsKey(name) ? BoundedText(values, name, maximum) : null;
+    private static string? OptionalBoundedText(
+        IReadOnlyDictionary<string, string> values,
+        string name,
+        int maximum) =>
+        values.ContainsKey(name) ? BoundedText(values, name, maximum) : null;
 
     private static bool Boolean(
             IReadOnlyDictionary<string, string> values,
             string name,
             bool defaultValue)
-        {
-            if (!values.TryGetValue(name, out var value)) return defaultValue;
-            return bool.TryParse(value, out var result)
-                ? result
-                : throw new CliUsageException($"--{name} must be true or false.");
+    {
+        if (!values.TryGetValue(name, out var value)) return defaultValue;
+        return bool.TryParse(value, out var result)
+            ? result
+            : throw new CliUsageException($"--{name} must be true or false.");
     }
 
     private static string Required(

@@ -200,7 +200,7 @@ public sealed class TaskTypeLifecycleTests : IDisposable
         Assert.Equal(expected, InterruptionPolicy.Resolve(interruptionClass, true, checkpoint));
 
     private TaskExecutionContext Context<T>(T definition) =>
-        new(TaskAttemptId.New(), 1, workspace, JsonSerializer.SerializeToElement(definition));
+        new(TaskAttemptId.New(), 1, workspace, TaskPayload.From(definition));
 
     private static IEnumerable<TaskCapabilities> Flags(TaskCapabilities value) =>
         Enum.GetValues<TaskCapabilities>().Where(flag => flag != TaskCapabilities.None && value.HasFlag(flag));

@@ -398,8 +398,7 @@ internal sealed class AuthenticatedRdpDvcStream : Stream
             if (_currentRead is null ||
                 _currentReadOffset == _currentRead.Length)
             {
-                var encoded = await RunWireAsync(
-                        token => _channel.ReadPduAsync(token).AsTask(),
+                var encoded = await _channel.ReadPduAsync(
                         cancellationToken)
                     .ConfigureAwait(false);
                 var message = RdpDvcMessageCodec.Decode(
@@ -503,26 +502,6 @@ internal sealed class AuthenticatedRdpDvcStream : Stream
         try
         {
             await action(timeout.Token).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException)
-            when (!cancellationToken.IsCancellationRequested)
-        {
-            throw new TimeoutException(
-                "The Steward DVC stream operation timed out.");
-        }
-    }
-
-    private async Task<T> RunWireAsync<T>(
-        Func<CancellationToken, Task<T>> action,
-        CancellationToken cancellationToken)
-    {
-        using var timeout =
-            CancellationTokenSource.CreateLinkedTokenSource(
-                cancellationToken);
-        timeout.CancelAfter(_options.WireOperationTimeout);
-        try
-        {
-            return await action(timeout.Token).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
             when (!cancellationToken.IsCancellationRequested)

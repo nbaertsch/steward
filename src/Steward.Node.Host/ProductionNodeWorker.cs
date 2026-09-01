@@ -1,5 +1,5 @@
-using Microsoft.Extensions.Options;
 using System.Text.Json;
+using Microsoft.Extensions.Options;
 using Steward.Domain;
 using Steward.Orchestration;
 using Steward.PortableState;
@@ -36,8 +36,8 @@ public sealed class ProductionNodeWorker(
             x.NodeIncarnationId == options.IncarnationId)
             ?? throw new InvalidOperationException(
                 "The Node has no matching Local Stack transport endpoint.");
-        var binding = endpoint.Transport.Data
-            .Deserialize<LocalDirectTransportBinding>()
+        var binding = endpoint.Transport
+            .DeserializeData<LocalDirectTransportBinding>()
             ?.Validate()
             ?? throw new InvalidDataException(
                 "The Node Local Stack transport binding is invalid.");

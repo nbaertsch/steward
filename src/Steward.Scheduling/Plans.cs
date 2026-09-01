@@ -49,9 +49,6 @@ public sealed class TaskInput
         return new(mediaType.ToLowerInvariant(), schemaVersion, Encoding.UTF8.GetString(buffer.ToArray()));
     }
 
-    public static TaskInput FromJsonElement(string mediaType, string schemaVersion, JsonElement value) =>
-        Parse(mediaType, schemaVersion, value.GetRawText());
-
     private static void WriteCanonical(Utf8JsonWriter writer, JsonElement element, int depth)
     {
         if (depth > MaximumDepth) throw new ArgumentException("Task input exceeds the JSON depth limit.", nameof(element));

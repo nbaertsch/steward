@@ -1,6 +1,6 @@
 # Validation matrix evidence
 
-## Date: 2026-08-29
+## Date: 2026-09-01
 ## Environment: Windows, .NET 10.0.400, Steward commit 55acd05
 
 ## Test suite summary
@@ -22,7 +22,7 @@
 | Steward.PortableState.Tests | 35 | Pass |
 | Steward.RdCore.Windows.Tests | 25 | Pass |
 | Steward.Rdp.Windows.Tests | 18 | Pass |
-| Steward.RdpDvc.LiveAcceptance | 10 | Pass |
+| Steward.RdpDvc.LiveAcceptance | 10 | Pass (offline/fake-backed test project; not live Dev Box evidence) |
 | Steward.Scheduling.Tests | 21 | Pass |
 | Steward.Terminal.Windows.Tests | 21 | Pass |
 | Steward.Transport.Tests | 16 | Pass |
@@ -46,8 +46,8 @@
 | V-10 | External target returns throttling | Covered | `Rate_bucket_and_retry_after_bound_allocation`, `Evaluation_runner_exposes_429_as_rate_feedback_not_case_failure`, `Evaluation_retry_after_fact_blocks_global_allocations_across_workloads` |
 | V-11 | Pool scale races and hard maximum | Covered | `Pool_provider_handles_resume_after_control_restart_without_duplicate_create`, `Placement_CAS_loser_returns_its_global_rate_claim`, `Pool_application_enforces_maximum_and_blocks_destructive_active_host_action` |
 | V-12 | Stop/replace/delete by interruption class | Covered | `HostSupportsProvisioningAndDrainedStop`, `DrainBlocksNonInterruptibleAndIncompletePortableState`, `ForcedDrainRequiresAndPreservesLossManifest` |
-| V-13 | Real Harbor locally and distributed | Covered | `ThreeHundred_cases_are_deterministic_and_use_bounded_aggregation` (harbor planner), `Deterministic_fake_runner_exercises_adapter_contract_without_live_harness`, harbor submission script validated against 36 real tasks |
-| V-14 | Real Saber locally and distributed | Covered | `Saber_uses_its_own_versioned_profile`, Saber evaluation adapter and planner have dedicated tests in EvaluationIntegrationTests |
+| V-13 | Real Harbor locally and distributed | **Not covered live** | Planner and deterministic fake-backed integration tests pass, and the submission script was validated structurally. No native three-node run has accepted the required 108 independently identified replicas. |
+| V-14 | Real Saber locally and distributed | **Not covered live** | Saber adapter and planner tests are offline/fake-backed. They do not constitute a native distributed Saber run. |
 | V-15 | Failed evaluation remediation by Agent | Covered | `Evaluation_runner_exposes_429_as_rate_feedback_not_case_failure`, agent notification/dispatch tests in AgentRuntimeTests and SecurityRegressionTests |
 | V-16 | Agent disconnect, reattach, migration | Covered | `MultiTurnContextIsRetainedAndNotificationsReplayAfterDisconnect`, `RestartRecoversQueueAndResponseExactly`, `CheckpointExcludesSecretsAndRestoreIncludesPendingTurn` |
 | V-17 | Credential expiry while Control unavailable | Covered | `IdentityRenewalModeReflectsOfflineCapability`, `Renewal_requires_connected_Control_and_returns_explicit_offline_disposition` |
@@ -60,3 +60,23 @@
 | V-24 | CLI, MCP, local RPC, Copilot | Covered | `Devbox_commands_use_native_service_without_control_http`, MCP server tests, CLI application tests |
 | V-25 | Clean Local Stack deployment | Narrowed | Static package/dependency/binding evidence complete (E-10 narrowed) |
 | V-26 | Dev Box enabled | Covered | `DevBox_composition_accepts_renewable_credential_injection_without_fixed_token`, 98 DevBox tests, Dev Box client/provider/discovery/identity tests |
+
+## Evidence classification and compatibility lane
+
+Passing unit, fake-backed integration, or a project named `LiveAcceptance`
+does not by itself establish local-live or Dev-Box-live evidence. Live claims
+require a recorded run against the named installed environment.
+
+The observed Windows App DVC path currently retains the quarantined
+startup-hook, Harmony, and native-shim compatibility lane. It is preserved for
+migration compatibility, is not represented as supported Microsoft integration,
+and may be removed only after an equivalent supported path passes the same live
+DVC, headlessness, reconnect, and rollback gates.
+
+## Steward 1.0.23 migration fixture status
+
+No authentic sanitized Steward 1.0.23 catalog/MSI release fixture is checked
+in. The release workflow requires the immutable external input
+`STEWARD_1_0_23_RELEASE_INPUT` in `owner/repository@tag#sha256` form and fails
+closed with a precise diagnostic when it is absent or mismatched. Existing
+receipt-only evidence is not represented as an installable release fixture.

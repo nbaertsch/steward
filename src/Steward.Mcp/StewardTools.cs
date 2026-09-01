@@ -3,8 +3,8 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using ModelContextProtocol.Server;
-using Steward.Application;
 using Steward.Agents;
+using Steward.Application;
 using Steward.Cli;
 using Steward.Contracts;
 using Steward.Domain;
@@ -127,22 +127,14 @@ public sealed class StewardTools(ControlClient control)
     [Description("Reconcile a pool from a bounded structured demand array. Requires configured local mutation-token authority.")]
     public Task<StewardToolResult> ReconcilePool(
         string poolId,
-        [Description("Structured array of at most 50 bounded PoolDemand objects.")] JsonElement demands,
+        [Description("Array of at most 50 bounded PoolDemand objects.")] IReadOnlyList<PoolDemand> demands,
         CancellationToken cancellationToken = default)
     {
         if (!PoolId.TryParse(poolId, out var id) ||
-            Encoding.UTF8.GetByteCount(demands.GetRawText()) > MaximumInputJsonLength)
+            demands.Count > MaximumPageSize)
             return Task.FromResult(StewardToolResult.Error("InvalidArgument"));
-        PoolDemand[] values;
-        try
-        {
-            values = demands.Deserialize<PoolDemand[]>(StewardJson.Options) ?? [];
-        }
-        catch (JsonException)
-        {
-            return Task.FromResult(StewardToolResult.Error("InvalidArgument"));
-        }
-        if (values.Length > MaximumPageSize || values.Any(value =>
+        var values = demands.ToArray();
+        if (values.Any(value =>
                 !Bounded(value.DemandId, 256) ||
                 value.AffinityKey is { } affinity && !Bounded(affinity, 256)))
             return Task.FromResult(StewardToolResult.Error("InvalidArgument"));
@@ -269,27 +261,15 @@ public sealed class StewardTools(ControlClient control)
     [Description("Request Agent migration using bounded structured checkpoint metadata. Embedded Git artifacts are limited to 16 KiB each; prefer durable references when Control adds them.")]
     public Task<StewardToolResult> MigrateAgent(
         string agentId,
-        [Description("Structured AgentMigrationRequest; not an unbounded raw byte blob.")] JsonElement request,
+        [Description("Bounded AgentMigrationRequest.")] AgentMigrationRequest request,
         CancellationToken cancellationToken = default)
     {
         if (!StewardAgentId.TryParse(agentId, out var id) ||
-            Encoding.UTF8.GetByteCount(request.GetRawText()) > MaximumInputJsonLength)
+            request.GitBundle.Content.Length > 16_384 ||
+            request.DirtyPatch.Content.Length > 16_384 ||
+            request.Lineage.Count > MaximumPageSize)
             return Task.FromResult(StewardToolResult.Error("InvalidArgument"));
-        AgentMigrationRequest value;
-        try
-        {
-            value = request.Deserialize<AgentMigrationRequest>(StewardJson.Options)
-                ?? throw new JsonException();
-        }
-        catch (JsonException)
-        {
-            return Task.FromResult(StewardToolResult.Error("InvalidArgument"));
-        }
-        if (value.GitBundle.Content.Length > 16_384 ||
-            value.DirtyPatch.Content.Length > 16_384 ||
-            value.Lineage.Count > MaximumPageSize)
-            return Task.FromResult(StewardToolResult.Error("InvalidArgument"));
-        return InvokeAsync(() => control.MigrateAgentAsync(id, value, cancellationToken));
+        return InvokeAsync(() => control.MigrateAgentAsync(id, request, cancellationToken));
     }
 
     [McpServerTool(Name = "read_notifications")]
@@ -375,13 +355,13 @@ public sealed class StewardTools(ControlClient control)
     [McpServerTool(Name = "open_terminal")]
     [Description("Open a terminal from a bounded structured TerminalOpenRequest and returned authority grant. Requires a stable requestId and mutation token.")]
     public Task<StewardToolResult> OpenTerminal(
-        JsonElement request, CancellationToken cancellationToken = default)
+        TerminalOpenRequest request,
+        CancellationToken cancellationToken = default)
     {
-        if (!TryTerminalRequest<TerminalOpenRequest>(request, out var value) ||
-            !ValidRequestId(value.RequestId))
+        if (!ValidRequestId(request.RequestId))
             return Task.FromResult(StewardToolResult.Error("InvalidArgument"));
         return AuthorizedMutationAsync(
-            () => control.OpenTerminalAsync(value, cancellationToken), cancellationToken);
+            () => control.OpenTerminalAsync(request, cancellationToken), cancellationToken);
     }
 
     [McpServerTool(Name = "get_terminal")]
@@ -666,9 +646,9 @@ public sealed class StewardTools(ControlClient control)
         value.Length <= maximum ? value : value[..maximum];
 }
 
-public sealed record StewardToolResult(bool Success, string Code, object? Result)
+public sealed record StewardToolResult(bool Success, string Code, SafeJsonView? Result)
 {
-    public static StewardToolResult Ok(object result) => new(true, "Ok", result);
+    public static StewardToolResult Ok(SafeJsonView result) => new(true, "Ok", result);
     public static StewardToolResult Error(string code) => new(false, code, null);
 }
 

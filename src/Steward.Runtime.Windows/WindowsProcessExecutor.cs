@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
 using System.Text;
 using Microsoft.Win32.SafeHandles;
 using Steward.Domain;
@@ -37,7 +38,7 @@ public interface ISpoolFileOperations
     void Trim(string path, long length);
 }
 
-public sealed class WindowsProcessExecutor : IProcessExecutor, IDisposable
+internal sealed class WindowsProcessExecutor : IProcessExecutor, IDisposable
 {
     private sealed class SystemSpoolFileOperations : ISpoolFileOperations
     {
@@ -58,16 +59,19 @@ public sealed class WindowsProcessExecutor : IProcessExecutor, IDisposable
 
         public IntPtr Pointer => attributeList;
 
-        public ProcessAttributeList(SafeFileHandle stdout, SafeFileHandle stderr, SafeFileHandle stdin, SafeFileHandle job)
+        public ProcessAttributeList(SafeFileHandle stdout, SafeFileHandle stderr, SafeFileHandle stdin, SafeFileHandle job, IntPtr securityCapabilities)
         {
+            var attributeCount = securityCapabilities == IntPtr.Zero ? 2 : 3;
             nuint size = 0;
-            _ = NativeMethods.InitializeProcThreadAttributeList(IntPtr.Zero, 2, 0, ref size);
+            _ = NativeMethods.InitializeProcThreadAttributeList(
+                IntPtr.Zero, attributeCount, 0, ref size);
             if (Marshal.GetLastWin32Error() != NativeMethods.ErrorInsufficientBuffer || size == 0)
                 throw new PlatformNotSupportedException("Extended process attribute lists are unavailable.");
             try
             {
                 attributeList = Marshal.AllocHGlobal(checked((int)size));
-                if (!NativeMethods.InitializeProcThreadAttributeList(attributeList, 2, 0, ref size))
+                if (!NativeMethods.InitializeProcThreadAttributeList(
+                        attributeList, attributeCount, 0, ref size))
                     NativeMethods.ThrowLastError(nameof(NativeMethods.InitializeProcThreadAttributeList));
                 initialized = true;
 
@@ -85,6 +89,18 @@ public sealed class WindowsProcessExecutor : IProcessExecutor, IDisposable
                         jobs, checked((nuint)IntPtr.Size), IntPtr.Zero, IntPtr.Zero))
                     throw new PlatformNotSupportedException(
                         $"PROC_THREAD_ATTRIBUTE_JOB_LIST is unavailable (Win32 {Marshal.GetLastWin32Error()}).");
+                if (securityCapabilities != IntPtr.Zero &&
+                    !NativeMethods.UpdateProcThreadAttribute(
+                        attributeList,
+                        0,
+                        NativeMethods.ProcThreadAttributeSecurityCapabilities,
+                        securityCapabilities,
+                        checked((nuint)Marshal.SizeOf<
+                            NativeMethods.SecurityCapabilities>()),
+                        IntPtr.Zero,
+                        IntPtr.Zero))
+                    NativeMethods.ThrowLastError(
+                        "PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES");
             }
             catch
             {
@@ -112,6 +128,7 @@ public sealed class WindowsProcessExecutor : IProcessExecutor, IDisposable
     private readonly NodeIncarnationId nodeIncarnationId;
     private readonly ILaunchBoundaryObserver? launchObserver;
     private readonly ISpoolFileOperations spoolFiles;
+    private readonly bool bootIdentityVerified;
     private readonly ConcurrentDictionary<(TaskAttemptId, int), ActiveExecution> active = new();
     private bool disposed;
 
@@ -121,24 +138,31 @@ public sealed class WindowsProcessExecutor : IProcessExecutor, IDisposable
         NodeIncarnationId nodeIncarnationId,
         string? bootId = null,
         ILaunchBoundaryObserver? launchObserver = null,
-        ISpoolFileOperations? spoolFiles = null)
+        ISpoolFileOperations? spoolFiles = null,
+        bool bootIdentityVerified = true)
     {
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Windows process execution requires Windows.");
         if (!OperatingSystem.IsWindowsVersionAtLeast(10))
             throw new PlatformNotSupportedException("Atomic Job-list process creation requires Windows 10 or later.");
         this.journal = journal;
         this.keeper = keeper;
-        this.bootId = bootId ?? CurrentBootId();
+        var detectedBoot = bootId is null
+            ? WindowsBootIdentity.Capture()
+            : null;
+        this.bootId = bootId ?? detectedBoot!.Identity;
         if (nodeIncarnationId.Value == Guid.Empty) throw new ArgumentException("Node incarnation is required.", nameof(nodeIncarnationId));
         this.nodeIncarnationId = nodeIncarnationId;
         this.launchObserver = launchObserver;
         this.spoolFiles = spoolFiles ?? new SystemSpoolFileOperations();
+        this.bootIdentityVerified = detectedBoot?.Verified ??
+            bootIdentityVerified;
     }
 
     public async ValueTask<IExecutionHandle> StartAsync(ProcessLaunchRequest request, CancellationToken cancellationToken)
     {
         Validate(request);
         cancellationToken.ThrowIfCancellationRequested();
+        WindowsWorkloadIsolation.Prepare(request.Isolation!);
         Directory.CreateDirectory(request.SpoolDirectory);
         EnsureDiskReserve(request.SpoolDirectory, checked(request.RequiredDiskReserveBytes + request.MaxOutputBytes));
         var stdout = Path.Combine(request.SpoolDirectory, $"{request.AttemptId}.{request.Generation}.stdout");
@@ -171,13 +195,24 @@ public sealed class WindowsProcessExecutor : IProcessExecutor, IDisposable
             retained = true;
             launchObserver?.Reached(LaunchBoundary.JobRetained);
             launchJob = keeper.Open(lease);
-            using var attributes = new ProcessAttributeList(stdoutFile, stderrFile, stdinFile, launchJob);
+            using var securityCapabilities =
+                WindowsWorkloadIsolation.CreateSecurityCapabilities(
+                    request.Isolation!);
+            using var attributes = new ProcessAttributeList(
+                stdoutFile,
+                stderrFile,
+                stdinFile,
+                launchJob,
+                securityCapabilities.Pointer);
+            using var desktop = WindowsWorkloadIsolation.CreateDesktop(
+                request.Isolation!);
             var startup = new NativeMethods.StartupInfoEx
             {
                 StartupInfo = new NativeMethods.StartupInfo
                 {
                     cb = (uint)Marshal.SizeOf<NativeMethods.StartupInfoEx>(),
                     dwFlags = 0x00000100,
+                    lpDesktop = desktop.Name,
                     hStdInput = stdinFile.DangerousGetHandle(),
                     hStdOutput = stdoutFile.DangerousGetHandle(),
                     hStdError = stderrFile.DangerousGetHandle()
@@ -186,12 +221,28 @@ public sealed class WindowsProcessExecutor : IProcessExecutor, IDisposable
             };
             var commandLine = (QuoteWindowsArgument(request.ApplicationPath) + " " +
                                string.Join(" ", request.Arguments.Select(QuoteWindowsArgument)) + "\0").ToCharArray();
-            if (!NativeMethods.CreateProcess(request.ApplicationPath, commandLine, IntPtr.Zero, IntPtr.Zero, true,
-                    NativeMethods.CreateSuspended | NativeMethods.CreateNoWindow | NativeMethods.CreateNewProcessGroup |
-                    NativeMethods.ExtendedStartupInfoPresent,
-                    IntPtr.Zero, request.WorkingDirectory, ref startup, out pi))
-                NativeMethods.ThrowLastError(nameof(NativeMethods.CreateProcess));
-
+            using var environment = WindowsWorkloadIsolation.AllocateEnvironment(
+                request.Isolation!,
+                request.ApplicationPath);
+            var creationFlags =
+                NativeMethods.CreateSuspended |
+                NativeMethods.CreateNoWindow |
+                NativeMethods.CreateNewProcessGroup |
+                NativeMethods.ExtendedStartupInfoPresent |
+                NativeMethods.CreateUnicodeEnvironment;
+            if (!NativeMethods.CreateProcess(
+                    request.ApplicationPath,
+                    commandLine,
+                    IntPtr.Zero,
+                    IntPtr.Zero,
+                    true,
+                    creationFlags,
+                    environment.Pointer,
+                    request.WorkingDirectory,
+                    ref startup,
+                    out pi))
+                NativeMethods.ThrowLastError(nameof(
+                    NativeMethods.CreateProcess));
             using var thread = new SafeFileHandle(pi.hThread, true);
             processHandle = new SafeFileHandle(pi.hProcess, true);
             pi.hProcess = IntPtr.Zero;
@@ -231,6 +282,9 @@ public sealed class WindowsProcessExecutor : IProcessExecutor, IDisposable
             if (pi.hProcess != IntPtr.Zero) new SafeFileHandle(pi.hProcess, true).Dispose();
             launchJob?.Dispose();
             if (retained) keeper.Release(lease);
+            WindowsWorkloadIsolation.Release(
+                request.AttemptId,
+                request.Generation);
             throw;
         }
     }
@@ -294,7 +348,9 @@ public sealed class WindowsProcessExecutor : IProcessExecutor, IDisposable
         var entry = journal.Get(attemptId, generation) ?? throw new KeyNotFoundException("Execution not journaled.");
         var lease = new JobLeaseIdentity(entry.JobName, attemptId, generation, nodeIncarnationId);
         if (!StringComparer.Ordinal.Equals(entry.BootId, currentBootId))
-            throw new ExecutionRecoveryException("Boot identity changed; apply the TaskType interruption class.", false);
+            throw new ExecutionRecoveryException(
+                "Boot identity changed; apply the TaskType interruption class.",
+                isAmbiguous: !bootIdentityVerified);
         if (entry.Phase != LaunchPhase.Planned)
         {
             if (entry.ProcessId is null || entry.ProcessCreationTimeUtcTicks is null)
@@ -305,6 +361,12 @@ public sealed class WindowsProcessExecutor : IProcessExecutor, IDisposable
                 throw new ExecutionRecoveryException("The journaled process no longer exists.", false);
             if (GetCreationTime(identityProcess) != entry.ProcessCreationTimeUtcTicks.Value)
                 throw new ExecutionRecoveryException("PID creation time does not match the immutable execution identity.", true);
+            if (!NativeMethods.GetExitCodeProcess(identityProcess, out var identityExitCode))
+                NativeMethods.ThrowLastError(nameof(NativeMethods.GetExitCodeProcess));
+            if (identityExitCode != NativeMethods.StillActive)
+                throw new ExecutionRecoveryException(
+                    "The journaled process has already exited.",
+                    false);
         }
         SafeFileHandle job;
         try { job = keeper.Open(lease); }
@@ -423,11 +485,8 @@ public sealed class WindowsProcessExecutor : IProcessExecutor, IDisposable
         return result.ToString();
     }
 
-    public static string CurrentBootId()
-    {
-        var boot = DateTimeOffset.UtcNow - TimeSpan.FromMilliseconds(Environment.TickCount64);
-        return new DateTimeOffset(boot.Year, boot.Month, boot.Day, boot.Hour, boot.Minute, 0, TimeSpan.Zero).ToString("O");
-    }
+    public static string CurrentBootId() =>
+        WindowsBootIdentity.Capture().Identity;
 
     private async Task MonitorOutputAsync(WindowsExecutionHandle handle, long maximum, CancellationToken cancellationToken)
     {
@@ -540,6 +599,18 @@ public sealed class WindowsProcessExecutor : IProcessExecutor, IDisposable
         if (request.GracefulSignal == GracefulSignal.CtrlBreak)
             throw new NotSupportedException("CTRL_BREAK delivery is not supported by this non-interactive executor.");
         if (!Path.IsPathFullyQualified(request.WorkingDirectory) || !Directory.Exists(request.WorkingDirectory)) throw new DirectoryNotFoundException(request.WorkingDirectory);
+        var isolation = request.Isolation ?? throw new WorkloadIsolationException(
+            "isolation.required",
+            "Every process workload requires a dedicated isolation profile.");
+        if (isolation.AttemptId != request.AttemptId ||
+            isolation.Generation != request.Generation)
+            throw new WorkloadIsolationException(
+                "isolation.identity-mismatch",
+                "Process and workload isolation identities do not match.");
+        WindowsWorkloadIsolation.ValidatePath(isolation, request.WorkingDirectory);
+        WindowsWorkloadIsolation.ValidatePath(isolation, request.SpoolDirectory);
+        if (request.StandardInputPath is not null)
+            WindowsWorkloadIsolation.ValidatePath(isolation, request.StandardInputPath);
         if (request.MaxOutputBytes <= 0) throw new ArgumentOutOfRangeException(nameof(request.MaxOutputBytes));
         if (request.RequiredDiskReserveBytes < 0) throw new ArgumentOutOfRangeException(nameof(request.RequiredDiskReserveBytes));
         if (request.StandardInputPath is not null &&
@@ -560,21 +631,27 @@ public sealed class WindowsProcessExecutor : IProcessExecutor, IDisposable
 
     private static void ApplyResourceLimits(SafeFileHandle job, ProcessResourceLimits? limits)
     {
-        if (limits is null) return;
-        if (limits.ProcessMemoryBytes <= 0 || limits.JobMemoryBytes <= 0 || limits.ActiveProcessLimit == 0)
-            throw new ArgumentOutOfRangeException(nameof(limits), "Configured resource limits must be positive.");
+        if (limits is not null &&
+            (limits.ProcessMemoryBytes <= 0 ||
+             limits.JobMemoryBytes <= 0 ||
+             limits.ActiveProcessLimit == 0))
+            throw new ArgumentOutOfRangeException(
+                nameof(limits),
+                "Configured resource limits must be positive.");
         var information = new NativeMethods.JobObjectExtendedLimitInformation();
-        if (limits.ProcessMemoryBytes is long processMemory)
+        information.BasicLimitInformation.LimitFlags =
+            NativeMethods.JobObjectLimitKillOnJobClose;
+        if (limits?.ProcessMemoryBytes is long processMemory)
         {
             information.BasicLimitInformation.LimitFlags |= NativeMethods.JobObjectLimitProcessMemory;
             information.ProcessMemoryLimit = checked((UIntPtr)(ulong)processMemory);
         }
-        if (limits.JobMemoryBytes is long jobMemory)
+        if (limits?.JobMemoryBytes is long jobMemory)
         {
             information.BasicLimitInformation.LimitFlags |= NativeMethods.JobObjectLimitJobMemory;
             information.JobMemoryLimit = checked((UIntPtr)(ulong)jobMemory);
         }
-        if (limits.ActiveProcessLimit is uint processCount)
+        if (limits?.ActiveProcessLimit is uint processCount)
         {
             information.BasicLimitInformation.LimitFlags |= NativeMethods.JobObjectLimitActiveProcess;
             information.BasicLimitInformation.ActiveProcessLimit = processCount;
@@ -598,6 +675,9 @@ public sealed class WindowsProcessExecutor : IProcessExecutor, IDisposable
         item.Job.Dispose();
         if (execution is WindowsExecutionHandle windows)
             keeper.Release(new JobLeaseIdentity(windows.JobName, execution.AttemptId, execution.Generation, nodeIncarnationId));
+        WindowsWorkloadIsolation.Release(
+            execution.AttemptId,
+            execution.Generation);
     }
 
     public void Dispose()

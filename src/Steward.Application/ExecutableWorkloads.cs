@@ -5,14 +5,14 @@ using Steward.Contracts;
 using Steward.Domain;
 using Steward.Orchestration;
 using Steward.Scheduling;
+using Steward.Tasks.Agent;
 using Steward.Tasks.Compose;
 using Steward.Tasks.Process;
-using Steward.Tasks.Agent;
 using Steward.Workloads.Evals;
 
 namespace Steward.Application;
 
-public sealed record SubmitWorkloadRequest(
+internal sealed record SubmitWorkloadRequest(
     string Kind,
     JsonElement Input,
     PoolId PoolId,
@@ -20,14 +20,14 @@ public sealed record SubmitWorkloadRequest(
     WorkloadId? WorkloadId = null,
     PlanRevisionId? PlanRevisionId = null);
 
-public sealed record GeneralTaskWorkloadInput(
+internal sealed record GeneralTaskWorkloadInput(
     JsonElement Definition,
     ResourceRequirements? Resources = null,
     IReadOnlyList<string>? RequiredHostCapabilities = null,
     HostId? RequiredHostId = null,
     int RetryCap = 0);
 
-public interface IWorkloadPlanFactory
+internal interface IWorkloadPlanFactory
 {
     string Kind { get; }
     WorkloadPlan Create(
@@ -36,7 +36,7 @@ public interface IWorkloadPlanFactory
         JsonElement input);
 }
 
-public sealed class WorkloadPlanFactoryRegistry
+internal sealed class WorkloadPlanFactoryRegistry
 {
     private readonly IReadOnlyDictionary<string, IWorkloadPlanFactory> factories;
 
@@ -59,12 +59,12 @@ public sealed class WorkloadPlanFactoryRegistry
     public IReadOnlyList<string> Kinds => factories.Keys.Order(StringComparer.Ordinal).ToArray();
 }
 
-public sealed record EvaluationSubmissionInput(
+internal sealed record EvaluationSubmissionInput(
     EvaluationWorkloadInput Workload,
     HarnessCommandProfile Harness,
     EvaluationSetupProfile Setup);
 
-public sealed class EvaluationWorkloadPlanFactory(string kind) : IWorkloadPlanFactory
+internal sealed class EvaluationWorkloadPlanFactory(string kind) : IWorkloadPlanFactory
 {
     public string Kind { get; } = !string.IsNullOrWhiteSpace(kind)
         ? kind : throw new ArgumentException("Planner kind is required.", nameof(kind));
@@ -132,7 +132,7 @@ public sealed class EvaluationWorkloadPlanFactory(string kind) : IWorkloadPlanFa
     }
 }
 
-public sealed class GeneralTaskWorkloadPlanFactory(string kind, bool compose) : IWorkloadPlanFactory
+internal sealed class GeneralTaskWorkloadPlanFactory(string kind, bool compose) : IWorkloadPlanFactory
 {
     private static readonly JsonSerializerOptions InputOptions = new(StewardJson.Options)
     {
@@ -183,7 +183,7 @@ public sealed class GeneralTaskWorkloadPlanFactory(string kind, bool compose) : 
             processCount: 1, containerCount: compose ? 1 : 0, concurrencyUnits: 1);
         var task = new TaskPlanNode(
             taskId, "task", type, "1.0", resources,
-            TaskInput.FromJsonElement("application/json", "1.0", normalizedDefinition),
+            TaskInput.Parse("application/json", "1.0", normalizedDefinition.GetRawText()),
             [], (request.RequiredHostCapabilities ?? []).ToHashSet(StringComparer.Ordinal),
             null, null, request.RequiredHostId, request.RetryCap,
             InterruptionClass.Restartable, [], "result");
@@ -220,7 +220,7 @@ public sealed class GeneralTaskWorkloadPlanFactory(string kind, bool compose) : 
     }
 }
 
-public sealed class AgentTurnWorkloadPlanFactory : IWorkloadPlanFactory
+internal sealed class AgentTurnWorkloadPlanFactory : IWorkloadPlanFactory
 {
     public string Kind => "steward-agent-turn";
     public WorkloadPlan Create(
@@ -235,18 +235,27 @@ public sealed class AgentTurnWorkloadPlanFactory : IWorkloadPlanFactory
             [new(taskId, "agent-turn", Kind, "1.0",
                 new ResourceRequirements(1, 512 * 1024 * 1024, 512 * 1024 * 1024,
                     processCount: 1, concurrencyUnits: 1),
-                TaskInput.FromJsonElement("application/json", "1.0", input),
+                TaskInput.Parse("application/json", "1.0", input.GetRawText()),
                 [], new HashSet<string>(), null, $"agent:{value.AgentId}", null, 1,
                 InterruptionClass.Restartable, [], $"agent-turn:{value.TurnId}")]);
     }
 }
 
-public sealed class ExecutableWorkloadApplicationService(
+internal sealed class ExecutableWorkloadApplicationService(
     ControlOrchestrator orchestrator,
     ControlNodeRegistrationStore nodes,
     WorkloadPlanFactoryRegistry planners,
-    HostPoolApplicationService? hostPools = null)
+    IHostPoolDemandReconciler? hostPools = null,
+    Action<string>? capacityReconciliationDiagnostic = null,
+    ControlNodeLivenessRegistry? liveness = null)
 {
+    private readonly Action<string>? reconciliationDiagnostic =
+        hostPools is null
+            ? capacityReconciliationDiagnostic
+            : capacityReconciliationDiagnostic ??
+              throw new ArgumentNullException(
+                  nameof(capacityReconciliationDiagnostic));
+
     public async Task<ContractEnvelope<WorkloadDto>> SubmitAsync(
         SubmitWorkloadRequest request,
         CancellationToken cancellationToken = default)
@@ -259,25 +268,53 @@ public sealed class ExecutableWorkloadApplicationService(
             $"plan:{request.IdempotencyKey}");
         var plan = planners.Resolve(request.Kind).Create(workloadId, revisionId, request.Input);
         var registrations = (await nodes.ListAsync(cancellationToken)).Where(x => x.Enabled).ToArray();
-        if (registrations.Length == 0)
-            throw new ApplicationContractException(
-                ProblemCodes.CapabilityUnavailable,
-                "No enabled Node capacity is registered.",
-                ProblemDisposition.RetrySafe);
+
         try
         {
             var scheduling = await orchestrator.RegisterAndScheduleAsync(
                 plan,
-                registrations.Where(x => x.PoolId == request.PoolId).Select(x => x.ToSnapshot()).ToArray(),
+                registrations
+                    .Where(x => x.PoolId == request.PoolId)
+                    .Select(x =>
+                    {
+                        var snapshot = x.ToSnapshot();
+                        return liveness is not null &&
+                               liveness.TryGetOnline(
+                                   x.HostId,
+                                   x.NodeIncarnationId,
+                                   out var observedAt)
+                            ? snapshot with
+                            {
+                                ObservedAt = observedAt,
+                                Available = true
+                            }
+                            : snapshot with { Available = false };
+                    })
+                    .ToArray(),
                 request.PoolId,
                 DateTimeOffset.UtcNow,
                 request.IdempotencyKey,
                 requestHash,
                 cancellationToken).ConfigureAwait(false);
             if (scheduling.PoolDemands.Count > 0 && hostPools is not null)
-                await hostPools.ReconcileAsync(
-                    request.PoolId, scheduling.PoolDemands, DateTimeOffset.UtcNow, cancellationToken)
-                    .ConfigureAwait(false);
+            {
+                try
+                {
+                    await hostPools.ReconcileAsync(
+                        request.PoolId,
+                        scheduling.PoolDemands,
+                        DateTimeOffset.UtcNow,
+                        cancellationToken).ConfigureAwait(false);
+                }
+                catch (Exception exception)
+                    when (exception is not
+                        (OutOfMemoryException or AccessViolationException))
+                {
+                    ReportReconciliationFailure(
+                        $"capacity-reconciliation-failed-" +
+                        $"{exception.GetType().Name}-0x{exception.HResult:X8}");
+                }
+            }
         }
         catch (IdentityResolutionException exception)
         {
@@ -286,8 +323,29 @@ public sealed class ExecutableWorkloadApplicationService(
                 exception.SafeDetail,
                 ProblemDisposition.RequiresNewUserIntent);
         }
-        return await orchestrator.Store.GetWorkloadAsync(workloadId, cancellationToken).ConfigureAwait(false)
+        return await orchestrator.Store.GetWorkloadAsync(
+                workloadId,
+                CancellationToken.None)
+            .ConfigureAwait(false)
             ?? throw new InvalidOperationException("Scheduled Workload snapshot was not committed.");
+    }
+
+    private void ReportReconciliationFailure(string code)
+    {
+        try
+        {
+            reconciliationDiagnostic?.Invoke(code);
+        }
+        catch (Exception exception)
+            when (exception is not
+                (OutOfMemoryException or AccessViolationException))
+        {
+            System.Diagnostics.Trace.TraceError(
+                "Executable Workload reconciliation diagnostic failed: {0}; {1}; 0x{2:X8}.",
+                code,
+                exception.GetType().Name,
+                exception.HResult);
+        }
     }
 
     private static void Validate(SubmitWorkloadRequest request)
@@ -305,7 +363,7 @@ public sealed class ExecutableWorkloadApplicationService(
 
     private static string HashRequest(SubmitWorkloadRequest request)
     {
-        var canonical = TaskInput.FromJsonElement("application/json", "1.0", request.Input).CanonicalJson;
+        var canonical = TaskInput.Parse("application/json", "1.0", request.Input.GetRawText()).CanonicalJson;
         return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(
             $"{request.Kind}\n{request.PoolId}\n{canonical}")));
     }

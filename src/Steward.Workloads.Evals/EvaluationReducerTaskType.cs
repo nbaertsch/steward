@@ -59,7 +59,7 @@ public sealed record EvaluationReducerOutcome(
     ImmutableArray<TaskEvent> Events,
     EvaluationReducerErrorCode? ErrorCode);
 
-public sealed class EvaluationReducerTaskType(IEvaluationResultStore store)
+internal sealed class EvaluationReducerTaskType(IEvaluationResultStore store)
     : TaskTypeBase, IRecoverableTaskType, ITaskOutputSource
 {
     private readonly ConcurrentDictionary<(TaskAttemptId, int), ReducerHandle> executions = new();
@@ -71,7 +71,7 @@ public sealed class EvaluationReducerTaskType(IEvaluationResultStore store)
         TaskCapabilities.Restart | TaskCapabilities.Cleanup;
     public override InterruptionClass InterruptionClass => InterruptionClass.Restartable;
 
-    public override ValidationResult Validate(JsonElement input)
+    public override ValidationResult Validate(TaskPayload input)
     {
         EvaluationReducerTaskDefinition? definition;
         try { definition = input.Deserialize<EvaluationReducerTaskDefinition>(JsonOptions); }

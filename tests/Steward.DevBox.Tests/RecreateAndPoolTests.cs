@@ -1,7 +1,7 @@
+using System.Text.Json;
 using Steward.Domain;
 using Steward.Providers.Abstractions;
 using Steward.Providers.DevBox;
-using System.Text.Json;
 
 namespace Steward.DevBox.Tests;
 

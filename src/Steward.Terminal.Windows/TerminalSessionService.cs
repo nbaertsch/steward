@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Threading.Channels;
 using Steward.Domain;
+using Steward.Tasks.Abstractions;
 using Steward.Terminal.Abstractions;
 
 namespace Steward.Terminal.Windows;
@@ -113,7 +114,8 @@ public sealed class TerminalSessionService : ITerminalSessionService, IAsyncDisp
         {
             var identity = await runtime.StartAsync(
                 new(request.Authority.SessionId, request.ShellKind, request.ShellExecutable, request.Arguments,
-                    working, request.Columns, request.Rows, request.Authority.MaximumOutputBytes,
+                    working, CreateIsolationProfile(request.Authority, root), request.Columns, request.Rows,
+                    request.Authority.MaximumOutputBytes,
                     request.Authority.ElevationGranted),
                 (data, token) => OnOutputAsync(request.Authority.SessionId, data, token),
                 reason => OnRuntimeCompletedAsync(request.Authority.SessionId, reason),
@@ -509,6 +511,25 @@ public sealed class TerminalSessionService : ITerminalSessionService, IAsyncDisp
         }
     }
 
+    private static ProcessIsolationProfile CreateIsolationProfile(
+        TerminalAuthority authority,
+        string workspace)
+    {
+        var root = Directory.GetParent(workspace)?.FullName ??
+            throw Problem(
+                TerminalProblemCode.PathRejected,
+                "Terminal workspace has no isolation root.",
+                TerminalProblemDisposition.Terminal,
+                false);
+        return new ProcessIsolationProfile(
+            1,
+            ProcessIsolationCapability.Terminal,
+            root,
+            workspace,
+            authority.Task?.TaskAttemptId ??
+                new TaskAttemptId(authority.SessionId.Value),
+            authority.Task?.Generation ?? 1);
+    }
     private void ValidateAuthority(
         TerminalAuthority authority,
         TerminalOperationContext context,
@@ -570,7 +591,8 @@ public sealed class TerminalSessionService : ITerminalSessionService, IAsyncDisp
                     .ConfigureAwait(false);
             }
             catch (Exception exception) when (exception is TerminalException or IOException or
-                System.ComponentModel.Win32Exception) { }
+                System.ComponentModel.Win32Exception)
+            { }
         }
         _ = journal.AppendEndOfStream(sessionId, UtcNow);
         journal.SetInterrupted(sessionId, reason, UtcNow);

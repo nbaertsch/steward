@@ -4,6 +4,8 @@ using System.Runtime.InteropServices;
 using System.Security.Principal;
 using System.Text;
 using Microsoft.Win32.SafeHandles;
+using Steward.Runtime.Windows;
+using Steward.Tasks.Abstractions;
 using Steward.Terminal.Abstractions;
 
 namespace Steward.Terminal.Windows;
@@ -36,6 +38,7 @@ internal sealed record ConPtyStartRequest(
     string Executable,
     IReadOnlyList<string> Arguments,
     string WorkingDirectory,
+    ProcessIsolationProfile Isolation,
     int Columns,
     int Rows,
     long MaximumOutputBytes,
@@ -63,26 +66,69 @@ internal sealed class ConPtyTerminalRuntime : IAsyncDisposable
     private sealed class AttributeList : IDisposable
     {
         private IntPtr list;
+        private IntPtr jobs;
+        private IntPtr handles;
         private bool initialized;
 
         internal IntPtr Pointer => list;
 
-        internal AttributeList(PseudoConsoleHandle pseudoConsole)
+        internal AttributeList(
+            PseudoConsoleHandle pseudoConsole,
+            SafeFileHandle job,
+            SafeFileHandle consoleInput,
+            SafeFileHandle consoleOutput,
+            WindowsWorkloadIsolation.SecurityCapabilitiesLease securityCapabilities)
         {
+            const int attributeCount = 4;
             nuint size = 0;
-            _ = ConPtyNativeMethods.InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref size);
+            _ = ConPtyNativeMethods.InitializeProcThreadAttributeList(
+                IntPtr.Zero,
+                attributeCount,
+                0,
+                ref size);
             if (Marshal.GetLastWin32Error() != ConPtyNativeMethods.ErrorInsufficientBuffer || size == 0)
                 throw new PlatformNotSupportedException("ConPTY process attributes are unavailable.");
             try
             {
                 list = Marshal.AllocHGlobal(checked((int)size));
-                if (!ConPtyNativeMethods.InitializeProcThreadAttributeList(list, 1, 0, ref size))
+                if (!ConPtyNativeMethods.InitializeProcThreadAttributeList(
+                        list,
+                        attributeCount,
+                        0,
+                        ref size))
                     ConPtyNativeMethods.ThrowLastError(nameof(ConPtyNativeMethods.InitializeProcThreadAttributeList));
                 initialized = true;
+                handles = Marshal.AllocHGlobal(checked(IntPtr.Size * 2));
+                Marshal.WriteIntPtr(handles, 0, consoleInput.DangerousGetHandle());
+                Marshal.WriteIntPtr(handles, IntPtr.Size, consoleOutput.DangerousGetHandle());
+                if (!ConPtyNativeMethods.UpdateProcThreadAttribute(
+                        list, 0, ConPtyNativeMethods.ProcThreadAttributeHandleList,
+                        handles, checked((nuint)(IntPtr.Size * 2)), IntPtr.Zero, IntPtr.Zero))
+                    ConPtyNativeMethods.ThrowLastError(
+                        "PROC_THREAD_ATTRIBUTE_HANDLE_LIST");
+
                 if (!ConPtyNativeMethods.UpdateProcThreadAttribute(
                         list, 0, ConPtyNativeMethods.ProcThreadAttributePseudoConsole,
                         pseudoConsole.DangerousGetHandle(), checked((nuint)IntPtr.Size), IntPtr.Zero, IntPtr.Zero))
                     ConPtyNativeMethods.ThrowLastError("PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE");
+
+                jobs = Marshal.AllocHGlobal(IntPtr.Size);
+                Marshal.WriteIntPtr(jobs, job.DangerousGetHandle());
+                if (!ConPtyNativeMethods.UpdateProcThreadAttribute(
+                        list, 0, ConPtyNativeMethods.ProcThreadAttributeJobList,
+                        jobs, checked((nuint)IntPtr.Size), IntPtr.Zero, IntPtr.Zero))
+                    ConPtyNativeMethods.ThrowLastError("PROC_THREAD_ATTRIBUTE_JOB_LIST");
+
+                if (!ConPtyNativeMethods.UpdateProcThreadAttribute(
+                        list,
+                        0,
+                        ConPtyNativeMethods.ProcThreadAttributeSecurityCapabilities,
+                        securityCapabilities.Pointer,
+                        securityCapabilities.Size,
+                        IntPtr.Zero,
+                        IntPtr.Zero))
+                    ConPtyNativeMethods.ThrowLastError(
+                        "PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES");
             }
             catch
             {
@@ -97,7 +143,13 @@ internal sealed class ConPtyTerminalRuntime : IAsyncDisposable
                 ConPtyNativeMethods.DeleteProcThreadAttributeList(list);
             if (list != IntPtr.Zero)
                 Marshal.FreeHGlobal(list);
+            if (jobs != IntPtr.Zero)
+                Marshal.FreeHGlobal(jobs);
+            if (handles != IntPtr.Zero)
+                Marshal.FreeHGlobal(handles);
             list = IntPtr.Zero;
+            jobs = IntPtr.Zero;
+            handles = IntPtr.Zero;
             initialized = false;
         }
     }
@@ -112,6 +164,7 @@ internal sealed class ConPtyTerminalRuntime : IAsyncDisposable
         internal required SafeFileHandle Process { get; init; }
         internal required SafeFileHandle Job { get; init; }
         internal required ConPtyProcessIdentity Identity { get; init; }
+        internal required ProcessIsolationProfile Isolation { get; init; }
         internal required CancellationTokenSource Lifetime { get; init; }
         internal required SemaphoreSlim InputLock { get; init; }
         internal required long MaximumOutputBytes { get; init; }
@@ -119,9 +172,12 @@ internal sealed class ConPtyTerminalRuntime : IAsyncDisposable
         internal Task? ProcessMonitor { get; set; }
         internal long OutputBytes;
         internal int Closed;
+        private int disposed;
 
         public async ValueTask DisposeAsync()
         {
+            if (Interlocked.Exchange(ref disposed, 1) != 0)
+                return;
             Lifetime.Cancel();
             Input.Dispose();
             PseudoConsole.Dispose();
@@ -130,6 +186,9 @@ internal sealed class ConPtyTerminalRuntime : IAsyncDisposable
             Output.Dispose();
             Process.Dispose();
             Job.Dispose();
+            WindowsWorkloadIsolation.Release(
+                Isolation.AttemptId,
+                Isolation.Generation);
             InputLock.Dispose();
             Lifetime.Dispose();
             await ValueTask.CompletedTask;
@@ -166,6 +225,7 @@ internal sealed class ConPtyTerminalRuntime : IAsyncDisposable
         ObjectDisposedException.ThrowIf(disposed, this);
         Validate(request);
         cancellationToken.ThrowIfCancellationRequested();
+        WindowsWorkloadIsolation.Prepare(request.Isolation);
         var elevated = IsCurrentProcessElevated();
         if (request.ElevationGranted && (!options.AllowElevatedServiceIdentity || !elevated))
             throw Problem(TerminalProblemCode.ElevationUnavailable,
@@ -180,6 +240,7 @@ internal sealed class ConPtyTerminalRuntime : IAsyncDisposable
         SafeFileHandle? job = null;
         ConPtyNativeMethods.ProcessInformation processInformation = default;
         ActiveSession? active = null;
+        var releaseIsolation = true;
         try
         {
             CreatePipe(out inputRead, out inputWrite, parentIsWrite: true);
@@ -199,35 +260,49 @@ internal sealed class ConPtyTerminalRuntime : IAsyncDisposable
                     checked((uint)Marshal.SizeOf<ConPtyNativeMethods.JobObjectExtendedLimitInformation>())))
                 ConPtyNativeMethods.ThrowLastError(nameof(ConPtyNativeMethods.SetInformationJobObject));
 
-            using var attributes = new AttributeList(pseudoConsole);
+            using var securityCapabilities =
+                WindowsWorkloadIsolation.CreateSecurityCapabilities(
+                    request.Isolation);
+            using var attributes = new AttributeList(
+                pseudoConsole,
+                job,
+                inputRead,
+                outputWrite,
+                securityCapabilities);
             var startup = new ConPtyNativeMethods.StartupInfoEx
             {
                 StartupInfo = new ConPtyNativeMethods.StartupInfo
                 {
-                    cb = checked((uint)Marshal.SizeOf<ConPtyNativeMethods.StartupInfoEx>())
+                    cb = checked((uint)Marshal.SizeOf<ConPtyNativeMethods.StartupInfoEx>()),
+                    dwFlags = ConPtyNativeMethods.StartfUseStdHandles,
+                    hStdInput = inputRead.DangerousGetHandle(),
+                    hStdOutput = outputWrite.DangerousGetHandle(),
+                    hStdError = outputWrite.DangerousGetHandle()
                 },
                 AttributeList = attributes.Pointer
             };
             var commandLine = BuildCommandLine(request.Executable, request.Arguments);
+            using var environment = WindowsWorkloadIsolation.AllocateEnvironment(
+                request.Isolation,
+                request.Executable);
             if (!ConPtyNativeMethods.CreateProcess(
-                    null, commandLine, IntPtr.Zero, IntPtr.Zero, false,
+                    request.Executable, commandLine, IntPtr.Zero, IntPtr.Zero, true,
                     ConPtyNativeMethods.CreateSuspended |
                     ConPtyNativeMethods.ExtendedStartupInfoPresent |
                     ConPtyNativeMethods.CreateUnicodeEnvironment,
-                    IntPtr.Zero, request.WorkingDirectory, ref startup, out processInformation))
+                    environment.Pointer, request.WorkingDirectory, ref startup, out processInformation))
                 ConPtyNativeMethods.ThrowLastError(nameof(ConPtyNativeMethods.CreateProcess));
             process = new SafeFileHandle(processInformation.Process, true);
             processInformation.Process = IntPtr.Zero;
             using var thread = new SafeFileHandle(processInformation.Thread, true);
             processInformation.Thread = IntPtr.Zero;
-            if (!ConPtyNativeMethods.AssignProcessToJobObject(job, process))
-                ConPtyNativeMethods.ThrowLastError(nameof(ConPtyNativeMethods.AssignProcessToJobObject));
-
+            var authority = WindowsWorkloadIsolation.Describe(
+                request.Isolation);
             var identity = new ConPtyProcessIdentity(
                 checked((int)processInformation.ProcessId),
                 GetCreationTime(process),
-                WindowsIdentity.GetCurrent().Name,
-                elevated);
+                authority.RestrictedSid,
+                request.ElevationGranted && elevated);
             if (ConPtyNativeMethods.ResumeThread(thread) == uint.MaxValue)
                 ConPtyNativeMethods.ThrowLastError(nameof(ConPtyNativeMethods.ResumeThread));
             active = new ActiveSession
@@ -240,6 +315,7 @@ internal sealed class ConPtyTerminalRuntime : IAsyncDisposable
                 Process = process,
                 Job = job,
                 Identity = identity,
+                Isolation = request.Isolation,
                 Lifetime = new CancellationTokenSource(),
                 InputLock = new SemaphoreSlim(1, 1),
                 MaximumOutputBytes = request.MaximumOutputBytes
@@ -251,6 +327,7 @@ internal sealed class ConPtyTerminalRuntime : IAsyncDisposable
             outputWrite = null;
             process = null;
             job = null;
+            releaseIsolation = false;
             if (!sessions.TryAdd(request.SessionId, active))
                 throw Problem(TerminalProblemCode.IdempotencyConflict, "Terminal runtime identity is already active.");
             active.Pump = PumpOutputAsync(request.SessionId, active, outputSink, completion);
@@ -269,8 +346,11 @@ internal sealed class ConPtyTerminalRuntime : IAsyncDisposable
         {
             if (process is not null && job is not null && !job.IsInvalid)
                 _ = ConPtyNativeMethods.TerminateJobObject(job, 0xE0000001);
-            if (active is not null && sessions.TryRemove(request.SessionId, out _))
+            if (active is not null)
+            {
+                _ = sessions.TryRemove(request.SessionId, out _);
                 await active.DisposeAsync().ConfigureAwait(false);
+            }
             throw;
         }
         finally
@@ -286,6 +366,10 @@ internal sealed class ConPtyTerminalRuntime : IAsyncDisposable
                 new SafeFileHandle(processInformation.Process, true).Dispose();
             if (processInformation.Thread != IntPtr.Zero)
                 new SafeFileHandle(processInformation.Thread, true).Dispose();
+            if (releaseIsolation)
+                WindowsWorkloadIsolation.Release(
+                    request.Isolation.AttemptId,
+                    request.Isolation.Generation);
         }
     }
 
@@ -461,7 +545,12 @@ internal sealed class ConPtyTerminalRuntime : IAsyncDisposable
         out SafeFileHandle write,
         bool parentIsWrite)
     {
-        if (!ConPtyNativeMethods.CreatePipe(out read, out write, IntPtr.Zero, 0))
+        var security = new ConPtyNativeMethods.SecurityAttributes
+        {
+            Length = checked((uint)Marshal.SizeOf<ConPtyNativeMethods.SecurityAttributes>()),
+            InheritHandle = true
+        };
+        if (!ConPtyNativeMethods.CreatePipe(out read, out write, ref security, 0))
             ConPtyNativeMethods.ThrowLastError(nameof(ConPtyNativeMethods.CreatePipe));
         var parent = parentIsWrite ? write : read;
         if (!ConPtyNativeMethods.SetHandleInformation(parent, ConPtyNativeMethods.HandleFlagInherit, 0))

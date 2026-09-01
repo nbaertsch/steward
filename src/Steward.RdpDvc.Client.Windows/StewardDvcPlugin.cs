@@ -22,7 +22,8 @@ internal sealed class StewardDvcPlugin(
     Action<string> log,
     Action? onTerminated = null) :
     IWTSPlugin,
-    IWTSListenerCallback
+    IWTSListenerCallback,
+    IEmbeddedDvcPlugin
 {
     internal StewardDvcPlugin(
         ClientDvcBroker broker,

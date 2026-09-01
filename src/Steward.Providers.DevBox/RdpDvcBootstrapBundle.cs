@@ -334,11 +334,11 @@ public sealed record RdpDvcBootstrapBundle(
         }
         using (archive)
         {
-        var files = new Dictionary<string, byte[]>(
-            StringComparer.Ordinal);
+            var files = new Dictionary<string, byte[]>(
+                StringComparer.Ordinal);
             long expandedBytes = 0;
             foreach (var entry in archive.Entries)
-        {
+            {
                 if (string.IsNullOrEmpty(entry.Name) ||
                     entry.Length < 0 ||
                     (expandedBytes += entry.Length) >
@@ -356,8 +356,8 @@ public sealed record RdpDvcBootstrapBundle(
                                 : MaximumPayloadFileBytes)))
                     throw new InvalidDataException(
                         "RDP DVC bootstrap archive contains an invalid entry.");
-        }
-        return files;
+            }
+            return files;
         }
     }
 

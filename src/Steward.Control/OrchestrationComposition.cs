@@ -64,6 +64,8 @@ public static class OrchestrationComposition
             new SqlitePoolStateStore(options.SchedulerDatabasePath));
         services.AddSingleton<PoolCoordinator>();
         services.AddSingleton<HostPoolApplicationService>();
+        services.AddSingleton<IHostPoolDemandReconciler>(provider =>
+            provider.GetRequiredService<HostPoolApplicationService>());
         services.AddSingleton(provider =>
             new CompositeScheduler(
                 provider.GetRequiredService<ISchedulerStateStore>(),
@@ -83,6 +85,7 @@ public static class OrchestrationComposition
                 rateAllocator: provider.GetRequiredService<GlobalRateAllocator>());
         });
         services.AddSingleton<ControlNodeRegistrationStore>();
+        services.AddSingleton<ControlNodeLivenessRegistry>();
         services.AddSingleton<ControlTerminalRouter>();
         services.AddSingleton<ControlTerminalRevocationStore>();
 
@@ -103,7 +106,19 @@ public static class OrchestrationComposition
             new GeneralTaskWorkloadPlanFactory("compose", compose: true),
             new AgentTurnWorkloadPlanFactory()
         ]));
-        services.AddSingleton<ExecutableWorkloadApplicationService>();
+        services.AddSingleton(provider =>
+            new ExecutableWorkloadApplicationService(
+                provider.GetRequiredService<ControlOrchestrator>(),
+                provider.GetRequiredService<ControlNodeRegistrationStore>(),
+                provider.GetRequiredService<WorkloadPlanFactoryRegistry>(),
+                provider.GetRequiredService<HostPoolApplicationService>(),
+                message => provider
+                    .GetRequiredService<
+                        ILogger<ExecutableWorkloadApplicationService>>()
+                    .LogError(
+                        "Executable Workload capacity reconciliation failed: {Code}",
+                        message),
+                provider.GetRequiredService<ControlNodeLivenessRegistry>()));
 
         var agentOptions = new AgentExecutionOptions();
         configuration.GetSection("Control:Agents").Bind(agentOptions);
@@ -137,6 +152,7 @@ public static class OrchestrationComposition
             services.AddSingleton<ControlPortableDownloadService>();
 
         services.AddHostedService<ControlOrchestrationInitializer>();
+        services.AddHostedService<ControlSchedulingReconciler>();
         return services;
     }
 }
@@ -149,4 +165,54 @@ public sealed class ControlOrchestrationInitializer(
 
     public Task StopAsync(CancellationToken cancellationToken) =>
         Task.CompletedTask;
+}
+public sealed class ControlSchedulingReconciler(
+    ControlOrchestrator orchestrator,
+    IHostPoolDemandReconciler hostPools,
+    ILogger<ControlSchedulingReconciler> logger) : BackgroundService
+{
+    private static readonly TimeSpan RepairInterval =
+        TimeSpan.FromSeconds(30);
+
+    protected override async Task ExecuteAsync(
+        CancellationToken stoppingToken)
+    {
+        using var timer = new PeriodicTimer(RepairInterval);
+        do
+        {
+            try
+            {
+                var now = DateTimeOffset.UtcNow;
+                var repair = await orchestrator.RepairSchedulingAsync(
+                        now,
+                        stoppingToken)
+                    .ConfigureAwait(false);
+                foreach (var pool in repair.PoolDemands)
+                    _ = await hostPools.ReconcileAsync(
+                            pool.PoolId,
+                            pool.Demands,
+                            now,
+                            stoppingToken)
+                        .ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+                when (stoppingToken.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (Exception exception)
+                when (exception is
+                    Microsoft.Data.Sqlite.SqliteException or
+                    IOException)
+            {
+                logger.LogWarning(
+                    "Scheduling repair deferred after transient {Type} " +
+                    "with HRESULT 0x{HResult:X8}.",
+                    exception.GetType().Name,
+                    exception.HResult);
+            }
+        }
+        while (await timer.WaitForNextTickAsync(stoppingToken)
+                   .ConfigureAwait(false));
+    }
 }

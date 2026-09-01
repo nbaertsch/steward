@@ -7,18 +7,18 @@ using Steward.Transport;
 
 namespace Steward.Orchestration;
 
-public sealed record TerminalWireRequest(
+internal sealed record TerminalWireRequest(
     string RequestId,
     string Operation,
     JsonElement Payload);
 public sealed record TerminalWireResponse(
     string RequestId,
     string Status,
-    JsonElement? Snapshot,
+    TerminalSessionSnapshot? Snapshot,
     IReadOnlyList<TerminalOutput>? Output,
     TerminalProblem? Problem);
 
-public static class TerminalWireCodec
+internal static class TerminalWireCodec
 {
     public const int MaximumBytes = 4 * 1024 * 1024 + 64 * 1024;
     private static readonly JsonSerializerOptions Options = CreateOptions();
@@ -121,7 +121,7 @@ public sealed class NodeTerminalCommandProcessor(
                     throw new InvalidDataException("Unknown terminal operation.");
             }
             response = new(request.RequestId, "ok",
-                snapshot is null ? null : TerminalWireCodec.Element(snapshot),
+                snapshot,
                 output, null);
         }
         catch (TerminalException exception)
@@ -173,10 +173,10 @@ public sealed class ControlTerminalRouter
         return new Detach(() => sessions.TryRemove(hostId, out _));
     }
 
-    public async Task<TerminalWireResponse> SendAsync(
+    public async Task<TerminalWireResponse> SendAsync<TPayload>(
         HostId hostId,
         string operation,
-        object payload,
+        TPayload payload,
         CancellationToken cancellationToken)
     {
         if (!sessions.TryGetValue(hostId, out var session))

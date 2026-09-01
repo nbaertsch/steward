@@ -182,8 +182,8 @@ public sealed record TerminalAuthority(
     bool ElevationRequested,
     bool ElevationGranted,
     long RevocationRevision,
-    TimeSpan OperationalReplayDuration = default,
-    long MaximumOperationalSpoolBytes = 0);
+    TimeSpan OperationalReplayDuration,
+    long MaximumOperationalSpoolBytes);
 
 public sealed record TerminalOpenRequest(
     string SchemaVersion,

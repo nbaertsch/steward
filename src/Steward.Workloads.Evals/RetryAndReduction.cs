@@ -109,7 +109,11 @@ public static class EvaluationResultReducer
             .ToImmutableArray();
         var hash = EvaluationHash.Sha256(EvaluationJson.Serialize(new
         {
-            first.HarnessVersion, first.Commit, first.DatasetHash, first.ModelProfile, cases = selected
+            first.HarnessVersion,
+            first.Commit,
+            first.DatasetHash,
+            first.ModelProfile,
+            cases = selected
         }));
         return new(first.HarnessVersion, first.Commit, first.DatasetHash, first.ModelProfile, selected, hash);
     }

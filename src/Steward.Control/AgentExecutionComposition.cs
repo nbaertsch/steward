@@ -5,12 +5,12 @@ using Steward.Agents;
 using Steward.Application;
 using Steward.Contracts;
 using Steward.Domain;
-using Steward.Persistence.Sqlite;
 using Steward.Orchestration;
+using Steward.Persistence.Sqlite;
 
 namespace Steward.Control;
 
-public sealed class AgentExecutionOptions
+internal sealed class AgentExecutionOptions
 {
     public bool Enabled { get; set; }
     public string Executable { get; set; } = string.Empty;
@@ -42,7 +42,7 @@ public sealed class AgentExecutionOptions
     }
 }
 
-public sealed record ValidatedAgentExecutionOptions(
+internal sealed record ValidatedAgentExecutionOptions(
     bool Enabled,
     string Executable,
     IReadOnlyList<string> Arguments,
@@ -53,25 +53,25 @@ public sealed record ValidatedAgentExecutionOptions(
     IReadOnlyList<string> DeclaredTools,
     IReadOnlyDictionary<string, string> EnvironmentManifest);
 
-public interface IOrchestrationAgentEventSource
+internal interface IOrchestrationAgentEventSource
 {
     Task<RemoteAgentEventPage> ReadEventsAsync(
         ManagedAgentExecution execution, long afterSequence, CancellationToken cancellationToken);
 }
 
-public sealed record RemoteAgentEvent(long NodeSequence, AgentRuntimeEvent Event);
-public sealed record RemoteAgentEventPage(
+internal sealed record RemoteAgentEvent(long NodeSequence, AgentRuntimeEvent Event);
+internal sealed record RemoteAgentEventPage(
     IReadOnlyList<RemoteAgentEvent> Events,
     TaskAttemptState? AttemptState,
     RecoveryCertainty? RecoveryCertainty,
     long PageCursor = 0);
-public sealed class RemoteAgentExecutionException(string code, string message)
+internal sealed class RemoteAgentExecutionException(string code, string message)
     : InvalidOperationException(message)
 {
     public string Code { get; } = code;
 }
 
-public sealed class ManagedRemoteAgentRuntime(
+internal sealed class ManagedRemoteAgentRuntime(
     IOrchestrationAgentEventSource source,
     ValidatedAgentExecutionOptions options) : IAgentRuntime
 {
@@ -118,7 +118,7 @@ public sealed class ManagedRemoteAgentRuntime(
     }
 }
 
-public sealed class OrchestrationAgentTaskDispatcher(
+internal sealed class OrchestrationAgentTaskDispatcher(
     ExecutableWorkloadApplicationService workloads,
     SqliteControlStore store,
     ControlOrchestrator orchestrator,
@@ -245,7 +245,7 @@ public sealed class OrchestrationAgentTaskDispatcher(
 
 }
 
-public sealed class AgentTurnBackgroundWorker(
+internal sealed class AgentTurnBackgroundWorker(
     IAgentStore store,
     StewardAgentService service,
     ValidatedAgentExecutionOptions options,

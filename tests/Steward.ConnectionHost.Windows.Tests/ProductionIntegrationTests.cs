@@ -147,6 +147,28 @@ public sealed class ProductionIntegrationTests
     }
 
     [Fact]
+    public async Task External_process_lease_is_not_confirmed_by_invalid_evidence()
+    {
+        var source = new FakeEvidenceSource(
+            CompleteExternalEvidence(),
+            mismatchedConnection: true);
+        var lease = new FakeExternallyProvenLease(
+            () => throw new InvalidOperationException(
+                "Invalid evidence must not confirm the lease."));
+        await using var runtime = new ProductionRdCoreConnectionRuntime(
+            new FakeLeaseFactory(lease),
+            source,
+            TimeSpan.FromSeconds(2));
+
+        await Assert.ThrowsAsync<InvalidDataException>(
+            () => runtime.ConnectAsync(
+                StartRequest(),
+                CancellationToken.None));
+
+        Assert.False(lease.Confirmed);
+    }
+
+    [Fact]
     public async Task Production_runtime_registers_ticket_before_rdcore_connect()
     {
         var source = new FakeEvidenceSource(
@@ -497,6 +519,163 @@ public sealed class ProductionIntegrationTests
         {
             Assert.Equal(ticket, expected);
             return ValueTask.CompletedTask;
+        }
+    }
+}
+public sealed class LocalCarrierReconnectSupervisorTests
+{
+    [Fact]
+    public async Task Clean_bridge_completion_reopens_two_fresh_carriers()
+    {
+        var initial = new FakeLocalCarrierAttempt();
+        var factory = new FakeLocalCarrierAttemptFactory();
+        await using var supervisor =
+            new RdpDvcLocalCarrierReconnectSupervisor(
+                initial,
+                factory,
+                _ => TimeSpan.FromMilliseconds(1),
+                (_, _) => Task.CompletedTask);
+
+        initial.Complete();
+        var second = await factory.WaitForAttemptAsync(1);
+        second.Complete();
+        var third = await factory.WaitForAttemptAsync(2);
+
+        Assert.NotSame(initial, second);
+        Assert.NotSame(second, third);
+        Assert.Equal(1, initial.DisposeCount);
+        Assert.Equal(1, second.DisposeCount);
+        Assert.False(supervisor.Completion.IsCompleted);
+    }
+
+    [Fact]
+    public async Task Recoverable_attempt_failure_isolated_to_its_supervisor()
+    {
+        var blockedInitial = new FakeLocalCarrierAttempt();
+        var recoveringInitial = new FakeLocalCarrierAttempt();
+        var blockedFactory = new FakeLocalCarrierAttemptFactory();
+        var recoveringFactory = new FakeLocalCarrierAttemptFactory(
+            new IOException("transient carrier close"));
+        var delays = 0;
+        await using var blocked =
+            new RdpDvcLocalCarrierReconnectSupervisor(
+                blockedInitial,
+                blockedFactory,
+                _ => TimeSpan.FromMilliseconds(1),
+                (_, _) => Task.CompletedTask);
+        await using var recovering =
+            new RdpDvcLocalCarrierReconnectSupervisor(
+                recoveringInitial,
+                recoveringFactory,
+                _ => TimeSpan.FromMilliseconds(1),
+                (_, _) =>
+                {
+                    Interlocked.Increment(ref delays);
+                    return Task.CompletedTask;
+                });
+
+        recoveringInitial.Complete();
+        _ = await recoveringFactory.WaitForAttemptAsync(2);
+
+        Assert.Equal(0, blockedFactory.ConnectCount);
+        Assert.False(blocked.Completion.IsCompleted);
+        Assert.True(delays >= 2);
+    }
+
+    [Fact]
+    public async Task Dispose_during_backoff_disposes_attempt_exactly_once()
+    {
+        var initial = new FakeLocalCarrierAttempt();
+        var factory = new FakeLocalCarrierAttemptFactory();
+        var delayStarted = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var supervisor = new RdpDvcLocalCarrierReconnectSupervisor(
+            initial,
+            factory,
+            _ => TimeSpan.FromSeconds(1),
+            async (_, cancellationToken) =>
+            {
+                delayStarted.TrySetResult();
+                await Task.Delay(
+                    Timeout.InfiniteTimeSpan,
+                    cancellationToken);
+            });
+        initial.Complete();
+        await delayStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        await supervisor.DisposeAsync();
+
+        Assert.Equal(1, initial.DisposeCount);
+        Assert.Equal(0, factory.ConnectCount);
+    }
+    private sealed class FakeLocalCarrierAttempt :
+        IRdpDvcLocalCarrierAttempt
+    {
+        private readonly TaskCompletionSource completion = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Task Completion => completion.Task;
+        public int DisposeCount { get; private set; }
+
+        public void Complete() => completion.TrySetResult();
+
+        public ValueTask DisposeAsync()
+        {
+            DisposeCount++;
+            completion.TrySetResult();
+            return ValueTask.CompletedTask;
+        }
+    }
+
+    private sealed class FakeLocalCarrierAttemptFactory :
+        IRdpDvcLocalCarrierAttemptFactory
+    {
+        private readonly Queue<Exception> failures;
+        private readonly List<FakeLocalCarrierAttempt> attempts = [];
+        private readonly SemaphoreSlim changed = new(0);
+        private readonly object gate = new();
+
+        public FakeLocalCarrierAttemptFactory(
+            params Exception[] failures)
+        {
+            this.failures = new(failures);
+        }
+
+        public int ConnectCount { get; private set; }
+
+        public Task<IRdpDvcLocalCarrierAttempt> ConnectAsync(
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            lock (gate)
+            {
+                ConnectCount++;
+                changed.Release();
+                if (failures.Count > 0)
+                    return Task.FromException<IRdpDvcLocalCarrierAttempt>(
+                        failures.Dequeue());
+                var attempt = new FakeLocalCarrierAttempt();
+                attempts.Add(attempt);
+                return Task.FromResult<IRdpDvcLocalCarrierAttempt>(
+                    attempt);
+            }
+        }
+
+        public async Task<FakeLocalCarrierAttempt> WaitForAttemptAsync(
+            int connectCount)
+        {
+            using var timeout = new CancellationTokenSource(
+                TimeSpan.FromSeconds(5));
+            while (true)
+            {
+                lock (gate)
+                {
+                    if (ConnectCount >= connectCount &&
+                        attempts.Count > 0)
+                        return attempts[^1];
+                }
+                await changed.WaitAsync(timeout.Token);
+            }
         }
     }
 }

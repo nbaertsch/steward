@@ -144,7 +144,7 @@ public sealed class TerminalSecurityTests : IAsyncLifetime
         return new(TerminalContractLimits.SchemaVersion, TerminalSessionId.New(), host, node, "actor",
             directory, null, now - TimeSpan.FromSeconds(1), now - TimeSpan.FromSeconds(1),
             now + TimeSpan.FromMinutes(5), TimeSpan.FromMinutes(10), 1024 * 1024, 1024 * 1024,
-            TerminalTranscriptMode.None, 0, TerminalFileTransferCapabilities.None, false, false, 0);
+            TerminalTranscriptMode.None, 0, TerminalFileTransferCapabilities.None, false, false, 0, TimeSpan.Zero, 0);
     }
 
     private TerminalOpenRequest Request(TerminalAuthority authority) =>

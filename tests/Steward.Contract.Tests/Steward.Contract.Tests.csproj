@@ -1,7 +1,7 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <IsPackable>false</IsPackable>
@@ -21,8 +21,45 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\..\src\Steward.Agents\Steward.Agents.csproj" />
+    <ProjectReference Include="..\..\src\Steward.Application\Steward.Application.csproj" />
+    <ProjectReference Include="..\..\src\Steward.Cli\Steward.Cli.csproj" />
+    <ProjectReference Include="..\..\src\Steward.ConnectionHost.Windows\Steward.ConnectionHost.Windows.csproj" />
     <ProjectReference Include="..\..\src\Steward.Contracts\Steward.Contracts.csproj" />
+    <ProjectReference Include="..\..\src\Steward.Control.Client\Steward.Control.Client.csproj" />
+    <ProjectReference Include="..\..\src\Steward.Control\Steward.Control.csproj" />
+    <ProjectReference Include="..\..\src\Steward.Desktop.Windows\Steward.Desktop.Windows.csproj" />
+    <ProjectReference Include="..\..\src\Steward.DevBox.Windows\Steward.DevBox.Windows.csproj" />
     <ProjectReference Include="..\..\src\Steward.Domain\Steward.Domain.csproj" />
+    <ProjectReference Include="..\..\src\Steward.Endpoint.Provisioner\Steward.Endpoint.Provisioner.csproj" />
+    <ProjectReference Include="..\..\src\Steward.HandleKeeper\Steward.HandleKeeper.csproj" />
+    <ProjectReference Include="..\..\src\Steward.Maintenance.Windows\Steward.Maintenance.Windows.csproj" />
+    <ProjectReference Include="..\..\src\Steward.Mcp\Steward.Mcp.csproj" />
+    <ProjectReference Include="..\..\src\Steward.Node.Host\Steward.Node.Host.csproj" />
+    <ProjectReference Include="..\..\src\Steward.Node\Steward.Node.csproj" />
+    <ProjectReference Include="..\..\src\Steward.Orchestration\Steward.Orchestration.csproj" />
+    <ProjectReference Include="..\..\src\Steward.Persistence.Sqlite\Steward.Persistence.Sqlite.csproj" />
+    <ProjectReference Include="..\..\src\Steward.PortableState\Steward.PortableState.csproj" />
+    <ProjectReference Include="..\..\src\Steward.Providers.Abstractions\Steward.Providers.Abstractions.csproj" />
+    <ProjectReference Include="..\..\src\Steward.Providers.DevBox\Steward.Providers.DevBox.csproj" />
+    <ProjectReference Include="..\..\src\Steward.RdCore.Windows\Steward.RdCore.Windows.csproj" />
+    <ProjectReference Include="..\..\src\Steward.Rdp.Windows\Steward.Rdp.Windows.csproj" />
+    <ProjectReference Include="..\..\src\Steward.RdpDvc.Client.Windows\Steward.RdpDvc.Client.Windows.csproj" />
+    <ProjectReference Include="..\..\src\Steward.RdpDvc.Server.Windows\Steward.RdpDvc.Server.Windows.csproj" />
+    <ProjectReference Include="..\..\src\Steward.Runtime.Windows\Steward.Runtime.Windows.csproj" />
+    <ProjectReference Include="..\..\src\Steward.Scheduling\Steward.Scheduling.csproj" />
+    <ProjectReference Include="..\..\src\Steward.Stack.Local\Steward.Stack.Local.csproj" />
+    <ProjectReference Include="..\..\src\Steward.Tasks.Abstractions\Steward.Tasks.Abstractions.csproj" />
+    <ProjectReference Include="..\..\src\Steward.Tasks.Agent\Steward.Tasks.Agent.csproj" />
+    <ProjectReference Include="..\..\src\Steward.Tasks.Compose\Steward.Tasks.Compose.csproj" />
+    <ProjectReference Include="..\..\src\Steward.Tasks.Process\Steward.Tasks.Process.csproj" />
+    <ProjectReference Include="..\..\src\Steward.Terminal.Abstractions\Steward.Terminal.Abstractions.csproj" />
+    <ProjectReference Include="..\..\src\Steward.Terminal.Windows\Steward.Terminal.Windows.csproj" />
+    <ProjectReference Include="..\..\src\Steward.Transport.Rdp.Endpoint.Windows\Steward.Transport.Rdp.Endpoint.Windows.csproj" />
+    <ProjectReference Include="..\..\src\Steward.Transport.Rdp.Windows\Steward.Transport.Rdp.Windows.csproj" />
+    <ProjectReference Include="..\..\src\Steward.Transport\Steward.Transport.csproj" />
+    <ProjectReference Include="..\..\src\Steward.WindowsApp.RdCoreHook\Steward.WindowsApp.RdCoreHook.csproj" />
+    <ProjectReference Include="..\..\src\Steward.Workloads.Evals\Steward.Workloads.Evals.csproj" />
   </ItemGroup>
 
 </Project>

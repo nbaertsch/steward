@@ -1,0 +1,93 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+      Name="Steward Endpoint"
+      Manufacturer="Steward Project"
+      Version="$(var.ProductVersion)"
+      UpgradeCode="{37C34E0A-E245-48A4-B07C-78E2955A7E65}"
+      Scope="perMachine">
+    <MajorUpgrade
+        DowngradeErrorMessage="A newer Steward Endpoint is already installed."
+        Schedule="afterInstallInitialize" />
+    <Property Id="STEWARD_CONFIG" Secure="yes" />
+    <Property Id="STEWARD_ATTESTATION" Secure="yes" />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+    <StandardDirectory Id="ProgramFiles6432Folder">
+      <Directory Id="INSTALLFOLDER"       Name="Steward">
+        <Files Include="$(var.PayloadDir)\**">
+          <Exclude Files="$(var.PayloadDir)\e_sqlite3.dll" />
+          <Exclude Files="$(var.PayloadDir)\Steward.Endpoint.Provisioner.exe" />
+          <Exclude Files="$(var.PayloadDir)\Steward.Maintenance.Windows.exe" />
+        </Files>
+        <Component>
+          <File
+              Source="$(var.PayloadDir)\e_sqlite3.dll"
+              DefaultLanguage="0" />
+        </Component>
+        <Component>
+          <File
+              Id="EndpointProvisionerExe"
+              Source="$(var.PayloadDir)\Steward.Endpoint.Provisioner.exe" />
+        </Component>
+        <Component Id="StewardMaintenanceServiceComponent">
+          <File
+              Id="StewardMaintenanceServiceExe"
+              Source="$(var.PayloadDir)\Steward.Maintenance.Windows.exe"
+              KeyPath="yes" />
+          <ServiceInstall
+              Id="StewardMaintenanceService"
+              Name="StewardMaintenance"
+              DisplayName="Steward Maintenance"
+              Description="Performs only authenticated typed Steward machine maintenance."
+              Arguments="--state-root &quot;[CommonAppDataFolder]Steward\Maintenance&quot;"
+              Type="ownProcess"
+              Start="auto"
+              ErrorControl="normal"
+              Account="LocalSystem"
+              Vital="yes" />
+          <ServiceControl
+              Id="StewardMaintenanceServiceControl"
+              Name="StewardMaintenance"
+              Start="install"
+              Stop="both"
+              Remove="uninstall"
+              Wait="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+    <CustomAction
+        Id="RollbackStewardEndpointProvisioning"
+        FileRef="EndpointProvisionerExe"
+        ExeCommand="--rollback-msi-transaction &quot;[ProductCode]&quot; --install-root &quot;[INSTALLFOLDER]&quot; --config &quot;[STEWARD_CONFIG]&quot; --state-root &quot;[CommonAppDataFolder]Steward\Endpoint&quot; --maintenance-state-root &quot;[CommonAppDataFolder]Steward\Maintenance&quot; --artifact-attestation &quot;[STEWARD_ATTESTATION]&quot;"
+        Execute="rollback"
+        Impersonate="no"
+        Return="check" />
+    <CustomAction
+        Id="ProvisionStewardEndpoint"
+        FileRef="EndpointProvisionerExe"
+        ExeCommand="--prepare-msi-transaction &quot;[ProductCode]&quot; --install-root &quot;[INSTALLFOLDER]&quot; --config &quot;[STEWARD_CONFIG]&quot; --state-root &quot;[CommonAppDataFolder]Steward\Endpoint&quot; --maintenance-state-root &quot;[CommonAppDataFolder]Steward\Maintenance&quot; --artifact-attestation &quot;[STEWARD_ATTESTATION]&quot;"
+        Execute="deferred"
+        Impersonate="no"
+        Return="check" />
+    <CustomAction
+        Id="CommitStewardEndpointProvisioning"
+        FileRef="EndpointProvisionerExe"
+        ExeCommand="--commit-msi-transaction &quot;[ProductCode]&quot; --install-root &quot;[INSTALLFOLDER]&quot; --config &quot;[STEWARD_CONFIG]&quot; --state-root &quot;[CommonAppDataFolder]Steward\Endpoint&quot; --maintenance-state-root &quot;[CommonAppDataFolder]Steward\Maintenance&quot; --artifact-attestation &quot;[STEWARD_ATTESTATION]&quot;"
+        Execute="commit"
+        Impersonate="no"
+        Return="check" />
+    <InstallExecuteSequence>
+      <Custom
+          Action="RollbackStewardEndpointProvisioning"
+          After="InstallFiles"
+          Condition="NOT REMOVE~=&quot;ALL&quot;" />
+      <Custom
+          Action="ProvisionStewardEndpoint"
+          After="RollbackStewardEndpointProvisioning"
+          Condition="NOT REMOVE~=&quot;ALL&quot;" />
+      <Custom
+          Action="CommitStewardEndpointProvisioning"
+          After="StartServices"
+          Condition="NOT REMOVE~=&quot;ALL&quot;" />
+    </InstallExecuteSequence>
+  </Package>
+</Wix>

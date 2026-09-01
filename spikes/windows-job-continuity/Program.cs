@@ -15,89 +15,89 @@ if (args.Length == 0)
 switch (args[0])
 {
     case "create":
-    {
-        var job = NativeMethods.CreateJobObject(IntPtr.Zero, JobName);
-        ThrowIfInvalid(job, nameof(NativeMethods.CreateJobObject));
-        using var child = StartChild();
-        Assign(job, child);
-        Console.WriteLine(child.Id);
-        NativeMethods.CloseHandle(job);
-        return 0;
-    }
+        {
+            var job = NativeMethods.CreateJobObject(IntPtr.Zero, JobName);
+            ThrowIfInvalid(job, nameof(NativeMethods.CreateJobObject));
+            using var child = StartChild();
+            Assign(job, child);
+            Console.WriteLine(child.Id);
+            NativeMethods.CloseHandle(job);
+            return 0;
+        }
 
     case "create-wait":
-    {
-        var job = NativeMethods.CreateJobObject(IntPtr.Zero, JobName);
-        ThrowIfInvalid(job, nameof(NativeMethods.CreateJobObject));
-        using var child = StartChild();
-        Assign(job, child);
-        File.WriteAllText(args[1], child.Id.ToString());
-        if (!SpinWait.SpinUntil(() => File.Exists(args[2]), TimeSpan.FromSeconds(30)))
         {
-            child.Kill(entireProcessTree: true);
-            throw new TimeoutException("Release file was not created.");
-        }
+            var job = NativeMethods.CreateJobObject(IntPtr.Zero, JobName);
+            ThrowIfInvalid(job, nameof(NativeMethods.CreateJobObject));
+            using var child = StartChild();
+            Assign(job, child);
+            File.WriteAllText(args[1], child.Id.ToString());
+            if (!SpinWait.SpinUntil(() => File.Exists(args[2]), TimeSpan.FromSeconds(30)))
+            {
+                child.Kill(entireProcessTree: true);
+                throw new TimeoutException("Release file was not created.");
+            }
 
-        NativeMethods.CloseHandle(job);
-        return 0;
-    }
+            NativeMethods.CloseHandle(job);
+            return 0;
+        }
 
     case "hold":
-    {
-        var job = NativeMethods.OpenJobObject(JobObjectAllAccess, false, JobName);
-        ThrowIfInvalid(job, nameof(NativeMethods.OpenJobObject));
-        File.WriteAllText(args[1], Environment.ProcessId.ToString());
-        if (!SpinWait.SpinUntil(() => File.Exists(args[2]), TimeSpan.FromMinutes(5)))
         {
-            throw new TimeoutException("Stop file was not created.");
-        }
+            var job = NativeMethods.OpenJobObject(JobObjectAllAccess, false, JobName);
+            ThrowIfInvalid(job, nameof(NativeMethods.OpenJobObject));
+            File.WriteAllText(args[1], Environment.ProcessId.ToString());
+            if (!SpinWait.SpinUntil(() => File.Exists(args[2]), TimeSpan.FromMinutes(5)))
+            {
+                throw new TimeoutException("Stop file was not created.");
+            }
 
-        NativeMethods.CloseHandle(job);
-        return 0;
-    }
+            NativeMethods.CloseHandle(job);
+            return 0;
+        }
 
     case "open":
-    {
-        var pid = int.Parse(args[1]);
-        var job = NativeMethods.OpenJobObject(JobObjectAllAccess, false, JobName);
-        ThrowIfInvalid(job, nameof(NativeMethods.OpenJobObject));
-        using var child = Process.GetProcessById(pid);
-        if (!NativeMethods.IsProcessInJob(child.Handle, job, out var isInJob))
         {
-            throw new Win32Exception(
-                Marshal.GetLastWin32Error(),
-                nameof(NativeMethods.IsProcessInJob));
-        }
+            var pid = int.Parse(args[1]);
+            var job = NativeMethods.OpenJobObject(JobObjectAllAccess, false, JobName);
+            ThrowIfInvalid(job, nameof(NativeMethods.OpenJobObject));
+            using var child = Process.GetProcessById(pid);
+            if (!NativeMethods.IsProcessInJob(child.Handle, job, out var isInJob))
+            {
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    nameof(NativeMethods.IsProcessInJob));
+            }
 
-        Console.WriteLine($"open=true; pid={pid}; isInJob={isInJob}");
-        NativeMethods.CloseHandle(job);
-        return isInJob ? 0 : 1;
-    }
+            Console.WriteLine($"open=true; pid={pid}; isInJob={isInJob}");
+            NativeMethods.CloseHandle(job);
+            return isInJob ? 0 : 1;
+        }
 
     case "terminate":
-    {
-        var job = NativeMethods.OpenJobObject(JobObjectAllAccess, false, JobName);
-        ThrowIfInvalid(job, nameof(NativeMethods.OpenJobObject));
-        if (!NativeMethods.TerminateJobObject(job, 1))
         {
-            throw new Win32Exception(
-                Marshal.GetLastWin32Error(),
-                nameof(NativeMethods.TerminateJobObject));
+            var job = NativeMethods.OpenJobObject(JobObjectAllAccess, false, JobName);
+            ThrowIfInvalid(job, nameof(NativeMethods.OpenJobObject));
+            if (!NativeMethods.TerminateJobObject(job, 1))
+            {
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    nameof(NativeMethods.TerminateJobObject));
+            }
+
+            NativeMethods.CloseHandle(job);
+            Console.WriteLine("terminated=true");
+            return 0;
         }
 
-        NativeMethods.CloseHandle(job);
-        Console.WriteLine("terminated=true");
-        return 0;
-    }
-
     case "kill":
-    {
-        using var process = Process.GetProcessById(int.Parse(args[1]));
-        process.Kill(entireProcessTree: true);
-        process.WaitForExit();
-        Console.WriteLine("killed=true");
-        return 0;
-    }
+        {
+            using var process = Process.GetProcessById(int.Parse(args[1]));
+            process.Kill(entireProcessTree: true);
+            process.WaitForExit();
+            Console.WriteLine("killed=true");
+            return 0;
+        }
 
     default:
         Console.Error.WriteLine($"Unknown mode: {args[0]}");

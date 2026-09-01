@@ -127,8 +127,8 @@ public sealed class StewardAgentService
                     new(AgentTerminalKind.Cancelled, null, "cancelled", null), CancellationToken.None)
                     .ConfigureAwait(false))
                     await _store.CancelAsync(agentId, turn.TurnId, CancellationToken.None).ConfigureAwait(false);
-            else
-                await _store.CancelAsync(agentId, turn.TurnId, CancellationToken.None).ConfigureAwait(false);
+                else
+                    await _store.CancelAsync(agentId, turn.TurnId, CancellationToken.None).ConfigureAwait(false);
             throw;
         }
         catch (Exception) when (!terminalReported)
@@ -139,9 +139,9 @@ public sealed class StewardAgentService
                     .ConfigureAwait(false))
                     await _store.FailAsync(agentId, turn.TurnId, "agent-runtime-failed", null, CancellationToken.None)
                         .ConfigureAwait(false);
-            else
-                await _store.FailAsync(agentId, turn.TurnId, "agent-runtime-failed", null, CancellationToken.None)
-                    .ConfigureAwait(false);
+                else
+                    await _store.FailAsync(agentId, turn.TurnId, "agent-runtime-failed", null, CancellationToken.None)
+                        .ConfigureAwait(false);
             return true;
         }
         finally

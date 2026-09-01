@@ -13,11 +13,72 @@ public sealed record ProtectedIdentityHandle(Guid HandleId, string Provider, Dat
     public override string ToString() => $"protected:{Provider}:{HandleId:D}";
 }
 
+[System.Text.Json.Serialization.JsonConverter(typeof(TaskPayloadJsonConverter))]
+public sealed record TaskPayload
+{
+    public const int MaximumUtf8Bytes = 64 * 1024;
+    public const int MaximumDepth = 64;
+
+    private TaskPayload(string canonicalJson) => CanonicalJson = canonicalJson;
+
+    public string CanonicalJson { get; }
+
+    public static TaskPayload Parse(string canonicalJson)
+    {
+        ArgumentNullException.ThrowIfNull(canonicalJson);
+        if (System.Text.Encoding.UTF8.GetByteCount(canonicalJson) > MaximumUtf8Bytes)
+            throw new ArgumentException(
+                "Task payload exceeds the UTF-8 size limit.",
+                nameof(canonicalJson));
+        using var document = JsonDocument.Parse(
+            canonicalJson,
+            new JsonDocumentOptions
+            {
+                MaxDepth = MaximumDepth,
+                CommentHandling = JsonCommentHandling.Disallow,
+                AllowTrailingCommas = false
+            });
+        if (document.RootElement.ValueKind == JsonValueKind.Undefined)
+            throw new ArgumentException(
+                "Task payload is undefined.",
+                nameof(canonicalJson));
+        return new TaskPayload(canonicalJson);
+    }
+
+    public static TaskPayload From<T>(
+        T value,
+        JsonSerializerOptions? options = null) =>
+        Parse(JsonSerializer.Serialize(value, options));
+
+    public T? Deserialize<T>(JsonSerializerOptions? options = null) =>
+        JsonSerializer.Deserialize<T>(CanonicalJson, options);
+}
+internal sealed class TaskPayloadJsonConverter
+    : System.Text.Json.Serialization.JsonConverter<TaskPayload>
+{
+    public override TaskPayload Read(
+        ref Utf8JsonReader reader,
+        Type typeToConvert,
+        JsonSerializerOptions options)
+    {
+        using var document = JsonDocument.ParseValue(ref reader);
+        return TaskPayload.Parse(document.RootElement.GetRawText());
+    }
+
+    public override void Write(
+        Utf8JsonWriter writer,
+        TaskPayload value,
+        JsonSerializerOptions options)
+    {
+        using var document = JsonDocument.Parse(value.CanonicalJson);
+        document.RootElement.WriteTo(writer);
+    }
+}
 public sealed record TaskExecutionContext(
     TaskAttemptId AttemptId,
     int Generation,
     string Workspace,
-    JsonElement Input,
+    TaskPayload Input,
     IReadOnlyList<ProtectedIdentityHandle>? IdentityHandles = null);
 
 public sealed record ValidationResult(bool IsValid, IReadOnlyList<string> Errors)
@@ -65,7 +126,7 @@ public interface ITaskType
     TaskTypeVersion Type { get; }
     TaskCapabilities Capabilities { get; }
     InterruptionClass InterruptionClass { get; }
-    ValidationResult Validate(JsonElement input);
+    ValidationResult Validate(TaskPayload input);
     ValueTask<ReadinessResult> ProbeReadinessAsync(TaskExecutionContext context, CancellationToken cancellationToken);
     ValueTask<SetupResult> SetupAsync(TaskExecutionContext context, CancellationToken cancellationToken);
     ValueTask<IExecutionHandle> StartAsync(TaskExecutionContext context, CancellationToken cancellationToken);
@@ -149,7 +210,7 @@ public abstract class TaskTypeBase : ITaskType
     public abstract TaskTypeVersion Type { get; }
     public abstract TaskCapabilities Capabilities { get; }
     public abstract InterruptionClass InterruptionClass { get; }
-    public abstract ValidationResult Validate(JsonElement input);
+    public abstract ValidationResult Validate(TaskPayload input);
 
     public virtual ValueTask<ReadinessResult> ProbeReadinessAsync(TaskExecutionContext context, CancellationToken cancellationToken) =>
         ValueTask.FromResult(new ReadinessResult(true));
@@ -175,7 +236,42 @@ public abstract class TaskTypeBase : ITaskType
         throw new NotSupportedException($"{Type} does not support {capability}.");
 }
 
-public sealed record ProcessLaunchRequest(
+public enum ProcessIsolationCapability
+{
+    Process,
+    Compose,
+    Evaluation,
+    Agent,
+    Terminal
+}
+
+public sealed record ProcessIsolationProfile(
+    int Version,
+    ProcessIsolationCapability Capability,
+    string WorkspaceRoot,
+    string Workspace,
+    TaskAttemptId AttemptId,
+    int Generation)
+{
+    public static ProcessIsolationProfile ForTask(
+        TaskExecutionContext context,
+        ProcessIsolationCapability capability)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        var root = Directory.GetParent(Path.GetFullPath(context.Workspace))
+            ?.FullName ?? throw new ArgumentException(
+                "Task workspace has no authority root.",
+                nameof(context));
+        return new ProcessIsolationProfile(
+            1,
+            capability,
+            root,
+            Path.GetFullPath(context.Workspace),
+            context.AttemptId,
+            context.Generation);
+    }
+}
+internal sealed record ProcessLaunchRequest(
     TaskAttemptId AttemptId,
     int Generation,
     string ApplicationPath,
@@ -187,7 +283,8 @@ public sealed record ProcessLaunchRequest(
     bool RequiresInteractiveSession = false,
     GracefulSignal? GracefulSignal = null,
     ProcessResourceLimits? ResourceLimits = null,
-    string? StandardInputPath = null);
+    string? StandardInputPath = null,
+    ProcessIsolationProfile? Isolation = null);
 
 public sealed record ProcessResourceLimits(long? ProcessMemoryBytes = null, long? JobMemoryBytes = null, uint? ActiveProcessLimit = null);
 
@@ -204,7 +301,7 @@ public interface IExecutionHandle
 public sealed record SpoolCursor(string Stream, string Path, long Offset, long Length, bool Truncated);
 public sealed record SpoolRead(SpoolCursor Cursor, ReadOnlyMemory<byte> Data);
 
-public interface IProcessExecutor
+internal interface IProcessExecutor
 {
     ValueTask<IExecutionHandle> StartAsync(ProcessLaunchRequest request, CancellationToken cancellationToken);
     ValueTask<ExecutionObservation> ObserveAsync(IExecutionHandle execution, CancellationToken cancellationToken);
@@ -226,7 +323,7 @@ public enum HostRuntimeCapabilities
 
 public sealed record HostRuntimeDescriptor(string Name, Version Version, HostRuntimeCapabilities Capabilities);
 
-public interface IHostRuntime
+internal interface IHostRuntime
 {
     HostRuntimeDescriptor Descriptor { get; }
     IProcessExecutor Processes { get; }

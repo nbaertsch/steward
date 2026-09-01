@@ -1,7 +1,7 @@
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
-using Steward.Contracts;
 using Steward.Agents;
+using Steward.Contracts;
 using Steward.Domain;
 using Steward.Orchestration;
 using Steward.Persistence.Sqlite;
@@ -46,6 +46,15 @@ public interface IProvisionedNodeEnrollmentWorkflow
         CancellationToken cancellationToken);
 }
 
+public interface IHostPoolDemandReconciler
+{
+    Task<PoolReconcileResult> ReconcileAsync(
+        PoolId poolId,
+        IReadOnlyList<PoolDemand> demands,
+        DateTimeOffset now,
+        CancellationToken cancellationToken = default);
+}
+
 public sealed class HostProviderRegistry(IEnumerable<KeyValuePair<string, IHostProvider>> providers)
     : IHostProviderRegistry
 {
@@ -65,7 +74,8 @@ public sealed class HostPoolApplicationService(
     ControlNodeRegistrationStore nodes,
     SqliteAgentStore? agentStore = null,
     IHostRecreateService? recreateService = null,
-    IProvisionedNodeEnrollmentWorkflow? enrollment = null)
+    IProvisionedNodeEnrollmentWorkflow? enrollment = null) :
+    IHostPoolDemandReconciler
 {
     private readonly SqliteProviderOperationStore providerOperations =
         new(controlStore);

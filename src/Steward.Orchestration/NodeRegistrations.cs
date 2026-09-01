@@ -50,8 +50,8 @@ public sealed record NodeEndpointRegistration(
     {
         if (string.IsNullOrWhiteSpace(Transport.Kind) || Transport.Kind.Length > 128 ||
             string.IsNullOrWhiteSpace(Transport.Version) || Transport.Version.Length > 64 ||
-            Transport.Data.ValueKind is JsonValueKind.Undefined or JsonValueKind.Null ||
-            Transport.Data.GetRawText().Length > 16 * 1024)
+            !Transport.HasData ||
+            Transport.DataByteCount > 16 * 1024)
             throw new ArgumentException("Node transport binding is invalid.");
         if (string.IsNullOrWhiteSpace(PeerIdentity) || PeerIdentity.Length > 256)
             throw new ArgumentException("Node peer identity is invalid.");
@@ -139,6 +139,33 @@ public sealed class ControlNodeRegistrationStore(SqliteControlStore controlStore
         command.Parameters.AddWithValue("$enabled", registration.Enabled);
         await command.ExecuteNonQueryAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);
+    }
+
+    public async Task TouchObservedAtAsync(
+        HostId hostId,
+        NodeIncarnationId nodeIncarnationId,
+        DateTimeOffset observedAt,
+        CancellationToken cancellationToken = default)
+    {
+        await using var connection = await controlStore.OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE orchestration_node_endpoints
+            SET observed_at=CASE
+              WHEN julianday(observed_at) < julianday($observed)
+                THEN $observed
+              ELSE observed_at
+            END
+            WHERE host_id=$host AND node_incarnation_id=$incarnation AND enabled=1
+            """;
+        command.Parameters.AddWithValue("$host", hostId.ToString());
+        command.Parameters.AddWithValue("$incarnation", nodeIncarnationId.ToString());
+        command.Parameters.AddWithValue(
+            "$observed",
+            observedAt.ToUniversalTime().ToString("O"));
+        if (await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) != 1)
+            throw new InvalidOperationException(
+                "Enabled Node registration does not match the authenticated session identity.");
     }
 
     public async Task<IReadOnlyList<NodeEndpointRegistration>> ListAsync(

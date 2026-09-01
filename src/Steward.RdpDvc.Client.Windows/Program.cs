@@ -104,7 +104,13 @@ internal static class ProgramEntry
                 AuthenticatedRdpDvcEvidencePublisher.FromProtectedFile(
                     evidencePipe,
                     evidenceKeyFile);
-            await using var broker = new ClientDvcBroker(log);
+            await using var broker = new ClientDvcBroker(
+                log,
+                embedding
+                    ? RdpDvcEmbeddingConfigurationStore
+                        .Load()
+                        .BrokerPipeName
+                    : null);
             var lifetime = new ComServerLifetime();
             var factory = new StewardClassFactory(
                 () =>

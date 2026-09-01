@@ -314,11 +314,17 @@ public sealed class RdpDvcProtocolTests
         var dvcConnections = await Task.WhenAll(
             RdpDvcStreamHandshake.InitiateAsync(
                     new(pair.First, 42),
-                    Options(authenticationKey, 42))
+                    Options(
+                        authenticationKey,
+                        42,
+                        TimeSpan.FromMilliseconds(50)))
                 .AsTask(),
             RdpDvcStreamHandshake.RespondAsync(
                     new(pair.Second, null),
-                    Options(authenticationKey))
+                    Options(
+                        authenticationKey,
+                        operationTimeout:
+                            TimeSpan.FromMilliseconds(50)))
                 .AsTask());
         using var controlKey =
             EcdsaEndpointSigningKey.Create("control");
@@ -335,13 +341,15 @@ public sealed class RdpDvcProtocolTests
             new(
                 TransportEndpointRole.Control,
                 controlKey,
-                controlExpected));
+                controlExpected,
+                OperationTimeout: TimeSpan.FromMilliseconds(50)));
         var nodeAcceptor = new SecureStreamConnectionAcceptor(
             new OneStreamAcceptor(dvcConnections[0].Stream),
             new(
                 TransportEndpointRole.Node,
                 nodeKey,
-                nodeExpected));
+                nodeExpected,
+                OperationTimeout: TimeSpan.FromMilliseconds(50)));
         var hello = Hello();
         var established = await Task.WhenAll(
             controlCarrier.ConnectAsync(hello).AsTask(),
@@ -356,12 +364,20 @@ public sealed class RdpDvcProtocolTests
             1,
             new byte[] { 4, 5, 6 });
 
-        await control.SendAsync(frame);
-        await foreach (var received in node.ReceiveAsync())
-        {
-            Assert.Equal(frame.Payload.ToArray(), received.Payload.ToArray());
-            break;
-        }
+        using var timeout = new CancellationTokenSource(
+            TimeSpan.FromSeconds(2));
+        await using var received = node
+            .ReceiveAsync(timeout.Token)
+            .GetAsyncEnumerator();
+        var waiting = received.MoveNextAsync().AsTask();
+        await Task.Delay(200, timeout.Token);
+
+        await control.SendAsync(frame, timeout.Token);
+
+        Assert.True(await waiting);
+        Assert.Equal(
+            frame.Payload.ToArray(),
+            received.Current.Payload.ToArray());
     }
 
     private static SessionHello Hello() =>
@@ -409,7 +425,8 @@ public sealed class RdpDvcProtocolTests
 
     private static RdpDvcAuthenticationOptions Options(
         byte[] key,
-        int? rdpSessionId = null) =>
+        int? rdpSessionId = null,
+        TimeSpan? operationTimeout = null) =>
         new(
             new(
                 SessionId,
@@ -419,7 +436,7 @@ public sealed class RdpDvcProtocolTests
             key,
             64 * 1024,
             TimeSpan.FromSeconds(2),
-            TimeSpan.FromSeconds(2));
+            operationTimeout ?? TimeSpan.FromSeconds(2));
 
     private static byte[] Key() =>
         Enumerable.Range(1, 32)

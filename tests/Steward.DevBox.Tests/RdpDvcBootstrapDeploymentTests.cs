@@ -1,6 +1,8 @@
+using System.ComponentModel;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Azure.Core;
 using Steward.Domain;
 using Steward.Providers.Abstractions;
@@ -54,17 +56,25 @@ public sealed class RdpDvcBootstrapDeploymentTests : IDisposable
     public void PlanBoundsAndSequencesTypedSystemTasks()
     {
         var bundle = Bundle();
-        var operation = DevBoxRdpDvcBootstrapPlan.Create(
-            Request(),
-            bundle);
+        var request = Request();
+        var operation = DevBoxRdpDvcBootstrapPlan.Create(request, bundle);
         var tasks = operation.Groups.SelectMany(group => group.Tasks).ToArray();
         var commands = tasks.Select(task => task.Parameters["command"]).ToArray();
+        var stagingRoot =
+            $"{bundle.ArchiveSha256}\\{request.OperationId.Value:N}";
 
         Assert.All(operation.Groups, group =>
+        {
             Assert.InRange(
                 group.Tasks.Count,
                 1,
-                DevBoxRdpDvcBootstrapPlan.MaximumTasksPerGroup));
+                DevBoxRdpDvcBootstrapPlan.MaximumTasksPerGroup);
+            Assert.InRange(
+                DevBoxCustomizationClient.MeasureApplyRequestBytes(
+                    group.Tasks),
+                1,
+                256 * 1024);
+        });
         Assert.InRange(
             operation.Groups.Count,
             1,
@@ -78,12 +88,37 @@ public sealed class RdpDvcBootstrapDeploymentTests : IDisposable
             Assert.True(task.Parameters["command"].Length <= 64 * 1024);
         });
         Assert.True(tasks.Length >= 2);
+        Assert.Contains(
+            "Register-ScheduledTask",
+            operation.Groups[^1].Tasks[0].Parameters["command"],
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "$encoded=((0..",
+            operation.Groups[^1].Tasks[^1].Parameters["command"],
+            StringComparison.Ordinal);
         Assert.All(
-            commands[..^1],
+            commands,
             command => Assert.Contains(
-                "$chunk='",
+                stagingRoot,
                 command,
                 StringComparison.Ordinal));
+        Assert.All(
+            commands[..^1],
+            command =>
+            {
+                Assert.Contains(
+                    "Register-ScheduledTask",
+                    command,
+                    StringComparison.Ordinal);
+                Assert.Contains(
+                    "-LogonType ServiceAccount",
+                    command,
+                    StringComparison.Ordinal);
+                Assert.Contains(
+                    "external chunk writer failed result=",
+                    command,
+                    StringComparison.Ordinal);
+            });
         var install = commands[^1];
         Assert.Contains(
             "$encoded=((0..",
@@ -120,6 +155,10 @@ public sealed class RdpDvcBootstrapDeploymentTests : IDisposable
             install,
             StringComparison.Ordinal);
         Assert.Contains(
+            "--reconnect-ledger-file",
+            install,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
             "--nonce-sequence-file",
             install,
             StringComparison.Ordinal);
@@ -182,6 +221,192 @@ public sealed class RdpDvcBootstrapDeploymentTests : IDisposable
     }
 
     [Fact]
+    public void EndpointRecoveryUsesVerifiedUserInstallAndDetachedLaunch()
+    {
+        var request = Request();
+        var bundle = Bundle();
+
+        var task =
+            DevBoxRdpDvcBootstrapPlan.CreateEndpointRecoveryTask(
+                request,
+                bundle);
+        var command = task.Parameters["command"];
+        var startupMatch = Regex.Match(
+            command,
+            @"WriteAllBytes\(\$startupPath,\[Convert\]::FromBase64String\('(?<value>[A-Za-z0-9+/=]+)'\)\)");
+        Assert.True(startupMatch.Success);
+        var startup = Encoding.UTF8.GetString(
+            Convert.FromBase64String(
+                startupMatch.Groups["value"].Value));
+
+        Assert.Equal(
+            DevBoxCustomizationExecutionAccount.System,
+            task.RunAs);
+        Assert.Equal(300, task.TimeoutInSeconds);
+        Assert.Contains(
+            "StewardNode\\rdp-dvc\\versions\\" +
+            bundle.Manifest.Version,
+            startup,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "$runDirectory=Join-Path $env:LOCALAPPDATA " +
+            "'StewardNode\\rdp-dvc\\runs\\",
+            startup,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "launcher.lock",
+            startup,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "RedirectStandardError $serverErr",
+            startup,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "Microsoft\\Windows\\Start Menu\\Programs\\Startup",
+            command,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "StewardRdpDvcEndpoint-",
+            command,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "$launchExit=[StewardSessionLauncher]::Run",
+            startup,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "--node-account",
+            startup,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "Register-ScheduledTask",
+            command,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "$keeperAction=New-ScheduledTaskAction -Execute $dotnet",
+            command,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "$taskAction=New-ScheduledTaskAction -Execute $dotnet",
+            command,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "HandleKeeper-",
+            command,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "-ExecutionTimeLimit ([TimeSpan]::Zero)",
+            command,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "-LogonType Interactive -RunLevel Limited",
+            command,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "S-1-5-21-*",
+            command,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "S-1-12-1-*",
+            command,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            Convert.ToBase64String(request.AuthenticationKey.Span),
+            command,
+            StringComparison.Ordinal);
+        Assert.True(command.Length <= 64 * 1024);
+    }
+
+    [Fact]
+    public void StagingProbeReportsOnlyOperationScopedChunkMetadata()
+    {
+        var request = Request();
+        var bundle = Bundle();
+
+        var task = DevBoxRdpDvcBootstrapPlan.CreateStagingProbeTask(
+            request,
+            bundle);
+        var command = task.Parameters["command"];
+
+        Assert.Equal(
+            DevBoxCustomizationExecutionAccount.System,
+            task.RunAs);
+        Assert.Contains(
+            "$env:ProgramData",
+            command,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            $"{bundle.ArchiveSha256}\\" +
+            request.OperationId.Value.ToString("N"),
+            command,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "STEWARD_RDP_DVC_STAGING_PROBE:",
+            command,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "expectedCount",
+            command,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "presentEncodedLength",
+            command,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            Convert.ToBase64String(bundle.Archive),
+            command,
+            StringComparison.Ordinal);
+        Assert.True(command.Length <= 64 * 1024);
+    }
+
+    [Fact]
+    public void NodeSessionTreatsClosedWindowsHandlesAsReconnectable()
+    {
+        Assert.True(DvcDisconnectClassifier.IsExpected(
+            new Win32Exception(12)));
+        Assert.True(DvcDisconnectClassifier.IsExpected(
+            new Win32Exception(233)));
+        Assert.False(DvcDisconnectClassifier.IsExpected(
+            new Win32Exception(5)));
+    }
+
+    [Theory]
+    [InlineData("Failed")]
+    [InlineData("TimedOut")]
+    [InlineData("failed")]
+    public void FailedFinalInstallerStatusesAreRecoverable(string taskStatus)
+    {
+        Assert.True(
+            DevBoxRdpDvcBootstrapRecovery.CanRecoverFinalInstaller(
+                "Failed",
+                [taskStatus]));
+        Assert.False(
+            DevBoxRdpDvcBootstrapRecovery.CanRecoverFinalInstaller(
+                "Succeeded",
+                [taskStatus]));
+        Assert.False(
+            DevBoxRdpDvcBootstrapRecovery.CanRecoverFinalInstaller(
+                "Failed",
+                [taskStatus, taskStatus]));
+    }
+
+    [Fact]
+    public void DispatchRestartIsAllowedOnlyBeforeStagingBegins()
+    {
+        Assert.True(
+            DevBoxRdpDvcBootstrapRecovery.CanRestartWithoutLosingStaging(
+                "operation-0000",
+                "operation-0000"));
+        Assert.False(
+            DevBoxRdpDvcBootstrapRecovery.CanRestartWithoutLosingStaging(
+                "other-operation-0001",
+                "operation-0000"));
+        Assert.True(
+            DevBoxRdpDvcBootstrapRecovery.CanRestartWithoutLosingStaging(
+                "operation-0014",
+                "operation-0000"));
+    }
+
+    [Fact]
     public void TransportIdentitiesAreEncodedAndAffectFingerprint()
     {
         using var node = ECDsa.Create(ECCurve.NamedCurves.nistP256);
@@ -231,6 +456,59 @@ public sealed class RdpDvcBootstrapDeploymentTests : IDisposable
         Assert.NotEqual(
             first.Intent.Fingerprint,
             changedKey.Intent.Fingerprint);
+    }
+
+    [Fact]
+    public void OperationsWithSameArchiveUseIsolatedStagingRoots()
+    {
+        var bundle = Bundle();
+        var firstRequest = Request();
+        var secondRequest = firstRequest with
+        {
+            OperationId = ProviderOperationId.New(),
+            IdempotencyKey = "bootstrap-attempt-2"
+        };
+
+        var firstCommands = DevBoxRdpDvcBootstrapPlan
+            .Create(firstRequest, bundle)
+            .Groups.SelectMany(group => group.Tasks)
+            .Select(task => task.Parameters["command"])
+            .ToArray();
+        var secondCommands = DevBoxRdpDvcBootstrapPlan
+            .Create(secondRequest, bundle)
+            .Groups.SelectMany(group => group.Tasks)
+            .Select(task => task.Parameters["command"])
+            .ToArray();
+        var firstRoot =
+            $"{bundle.ArchiveSha256}\\{firstRequest.OperationId.Value:N}";
+        var secondRoot =
+            $"{bundle.ArchiveSha256}\\{secondRequest.OperationId.Value:N}";
+
+        Assert.NotEqual(firstRoot, secondRoot);
+        Assert.All(
+            firstCommands,
+            command => Assert.Contains(
+                firstRoot,
+                command,
+                StringComparison.Ordinal));
+        Assert.All(
+            firstCommands,
+            command => Assert.DoesNotContain(
+                secondRoot,
+                command,
+                StringComparison.Ordinal));
+        Assert.All(
+            secondCommands,
+            command => Assert.Contains(
+                secondRoot,
+                command,
+                StringComparison.Ordinal));
+        Assert.All(
+            secondCommands,
+            command => Assert.DoesNotContain(
+                firstRoot,
+                command,
+                StringComparison.Ordinal));
     }
 
     [Fact]
@@ -464,12 +742,23 @@ public sealed class RdpDvcBootstrapDeploymentTests : IDisposable
                 new JsonSerializerOptions(JsonSerializerDefaults.Web)));
         var store = new DvcConnectionNonceSequenceStore(path);
 
-        var first = await store.ConsumeNextAsync(
+        var first = await store.PeekNextAsync(
             request.SessionId,
             request.HostId.Value,
             request.IncarnationId.Value,
             default);
-        var second = await store.ConsumeNextAsync(
+        var repeated = await store.PeekNextAsync(
+            request.SessionId,
+            request.HostId.Value,
+            request.IncarnationId.Value,
+            default);
+        await store.CommitAsync(
+            request.SessionId,
+            request.HostId.Value,
+            request.IncarnationId.Value,
+            first,
+            default);
+        var second = await store.PeekNextAsync(
             request.SessionId,
             request.HostId.Value,
             request.IncarnationId.Value,
@@ -477,10 +766,17 @@ public sealed class RdpDvcBootstrapDeploymentTests : IDisposable
 
         Assert.Equal(0, first.Index);
         Assert.Equal(request.ConnectionNonces[0], first.Nonce);
+        Assert.Equal(first, repeated);
         Assert.Equal(1, second.Index);
         Assert.Equal(request.ConnectionNonces[1], second.Nonce);
+        await store.CommitAsync(
+            request.SessionId,
+            request.HostId.Value,
+            request.IncarnationId.Value,
+            second,
+            default);
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            store.ConsumeNextAsync(
+            store.PeekNextAsync(
                 request.SessionId,
                 request.HostId.Value,
                 request.IncarnationId.Value,
@@ -493,18 +789,26 @@ public sealed class RdpDvcBootstrapDeploymentTests : IDisposable
         var directory = Path.Combine(_artifacts, "server-options");
         Directory.CreateDirectory(directory);
         var key = Path.Combine(directory, "key");
-        var nonces = Path.Combine(directory, "nonces.json");
+        var nodeKey = Path.Combine(directory, "node.pk8");
+        var controlKey = Path.Combine(directory, "control.spki");
         File.WriteAllBytes(key, new byte[32]);
-        File.WriteAllText(nonces, "{}");
+        using var node = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        using var control = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        File.WriteAllBytes(nodeKey, node.ExportPkcs8PrivateKey());
+        File.WriteAllBytes(controlKey, control.ExportSubjectPublicKeyInfo());
         var common = new[]
         {
             "--session-id", Guid.NewGuid().ToString(),
             "--host-id", Guid.NewGuid().ToString(),
             "--incarnation-id", Guid.NewGuid().ToString(),
             "--auth-key-file", key,
-            "--nonce-sequence-file", nonces,
+            "--reconnect-ledger-file", Path.Combine(directory, "reconnect.db"),
             "--readiness-receipt-file",
-            Path.Combine(directory, "readiness.json")
+            Path.Combine(directory, "endpoint-health.v2.json"),
+            "--node-signing-key-file", nodeKey,
+            "--node-identity", "node",
+            "--control-signing-key-file", controlKey,
+            "--control-identity", "control"
         };
 
         var parsed = ServerOptions.Parse(common);

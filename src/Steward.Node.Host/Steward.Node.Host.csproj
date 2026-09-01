@@ -7,6 +7,7 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.11" />
     <ProjectReference Include="..\Steward.Node\Steward.Node.csproj" />
+    <ProjectReference Include="..\Steward.Maintenance.Windows\Steward.Maintenance.Windows.csproj" />
     <ProjectReference Include="..\Steward.Orchestration\Steward.Orchestration.csproj" />
     <ProjectReference Include="..\Steward.Stack.Local\Steward.Stack.Local.csproj" />
     <ProjectReference Include="..\Steward.PortableState\Steward.PortableState.csproj" />

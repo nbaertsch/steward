@@ -40,7 +40,7 @@ public sealed record DesktopOptions(
             discover,
             Environment.GetEnvironmentVariable(
                 "STEWARD_CONNECTION_HOST_PIPE_NAME") is
-                { Length: > 0 } pipeName
+            { Length: > 0 } pipeName
                 ? pipeName
                 : "Steward.ConnectionHost.v1",
             Environment.GetEnvironmentVariable(

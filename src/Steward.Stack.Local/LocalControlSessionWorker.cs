@@ -1,5 +1,5 @@
-using System.Security.Cryptography;
 using System.Runtime.Versioning;
+using System.Security.Cryptography;
 using System.Text.Json;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -19,6 +19,7 @@ public sealed class LocalControlSessionWorker(
     ControlTerminalRevocationStore terminalRevocations,
     DirectSessionControlIdentityHandler identity,
     IEnumerable<IAuxiliaryTransportStreamHandler> auxiliaryHandlers,
+    ControlNodeLivenessRegistry liveness,
     ILogger<LocalControlSessionWorker> logger) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -80,8 +81,8 @@ public sealed class LocalControlSessionWorker(
         NodeEndpointRegistration endpoint,
         CancellationToken cancellationToken)
     {
-        var binding = endpoint.Transport.Data
-            .Deserialize<LocalDirectTransportBinding>()
+        var binding = endpoint.Transport
+            .DeserializeData<LocalDirectTransportBinding>()
             ?.Validate()
             ?? throw new InvalidDataException(
                 "Local Stack direct transport binding is invalid.");
@@ -103,7 +104,10 @@ public sealed class LocalControlSessionWorker(
         {
             try
             {
-                var hello = await HelloAsync(endpoint, cancellationToken);
+                var hello = await HelloAsync(
+                    endpoint,
+                    binding,
+                    cancellationToken);
                 if (binding.DialDirection ==
                     LocalDirectDialDirection.ControlDialsNode)
                 {
@@ -114,7 +118,10 @@ public sealed class LocalControlSessionWorker(
                         await using var connection = await carrier.ConnectAsync(
                             hello, cancellationToken);
                         failures = 0;
-                        await pump.RunSessionAsync(connection, cancellationToken);
+                        await RunAuthenticatedSessionAsync(
+                            endpoint,
+                            pump.RunSessionAsync(connection, cancellationToken),
+                            cancellationToken);
                     }
                     finally
                     {
@@ -129,7 +136,10 @@ public sealed class LocalControlSessionWorker(
                     await using var connection = await acceptor.AcceptAsync(
                         hello, cancellationToken);
                     failures = 0;
-                    await pump.RunSessionAsync(connection, cancellationToken);
+                    await RunAuthenticatedSessionAsync(
+                        endpoint,
+                        pump.RunSessionAsync(connection, cancellationToken),
+                        cancellationToken);
                 }
             }
             catch (OperationCanceledException)
@@ -158,14 +168,71 @@ public sealed class LocalControlSessionWorker(
         }
     }
 
+    private async Task RunAuthenticatedSessionAsync(
+        NodeEndpointRegistration endpoint,
+        Task session,
+        CancellationToken cancellationToken)
+    {
+        var observedAt = DateTimeOffset.UtcNow;
+        var leaseId = liveness.MarkOnline(
+            endpoint.HostId,
+            endpoint.NodeIncarnationId,
+            observedAt);
+        try
+        {
+            while (!session.IsCompleted)
+            {
+                observedAt = DateTimeOffset.UtcNow;
+                liveness.Refresh(
+                    endpoint.HostId,
+                    endpoint.NodeIncarnationId,
+                    leaseId,
+                    observedAt);
+                await registrations.TouchObservedAtAsync(
+                    endpoint.HostId,
+                    endpoint.NodeIncarnationId,
+                    observedAt,
+                    cancellationToken);
+                await orchestrator.ObserveHostAsync(
+                    endpoint.ToSnapshot() with
+                    {
+                        ObservedAt = observedAt,
+                        Available = true
+                    },
+                    observedAt,
+                    cancellationToken);
+                var delay = Task.Delay(
+                    TimeSpan.FromMinutes(1),
+                    cancellationToken);
+                if (await Task.WhenAny(session, delay).ConfigureAwait(false) ==
+                    session)
+                    break;
+                await delay.ConfigureAwait(false);
+            }
+            await session.ConfigureAwait(false);
+        }
+        finally
+        {
+            if (liveness.MarkOffline(
+                    endpoint.HostId,
+                    endpoint.NodeIncarnationId,
+                    leaseId))
+                await orchestrator.ObserveHostOfflineAsync(
+                    endpoint.HostId,
+                    endpoint.NodeIncarnationId,
+                    CancellationToken.None).ConfigureAwait(false);
+        }
+    }
+
     private async Task<SessionHello> HelloAsync(
         NodeEndpointRegistration endpoint,
+        LocalDirectTransportBinding binding,
         CancellationToken cancellationToken)
     {
         var cursor = await orchestrator.GetNodeCursorAsync(
             endpoint.NodeIncarnationId, cancellationToken);
         return new(
-            SessionId(endpoint),
+            binding.SessionId ?? SessionId(endpoint),
             endpoint.NodeIncarnationId,
             1,
             0,
@@ -198,7 +265,7 @@ public sealed class LocalControlSessionWorker(
     private static string Fingerprint(NodeEndpointRegistration endpoint) =>
         $"{endpoint.HostId}|{endpoint.NodeIncarnationId}|" +
         $"{endpoint.Transport.Kind}|{endpoint.Transport.Version}|" +
-        $"{endpoint.Transport.Data.GetRawText()}|" +
+        $"{endpoint.Transport.DataHash}|" +
         $"{endpoint.PeerIdentity}|{endpoint.PeerPublicKeyReference}";
 
     private static string BoundedDetail(string value)

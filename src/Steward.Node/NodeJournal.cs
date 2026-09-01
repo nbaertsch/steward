@@ -4,6 +4,7 @@ using System.Text.Json;
 using Microsoft.Data.Sqlite;
 using Steward.Contracts;
 using Steward.Domain;
+using Steward.Maintenance.Windows;
 using Steward.Transport;
 
 namespace Steward.Node;
@@ -20,6 +21,16 @@ public sealed record NodeIdentity(
 public sealed record JournaledFact(long Sequence, string FactType, string PayloadJson, DateTimeOffset ObservedAt);
 public sealed record CommandOutcome(string Status, string PayloadJson);
 public sealed record CommandReservation(bool IsNew, CommandOutcome Outcome);
+public sealed record JournaledMaintenanceDelivery(
+    HostId HostId,
+    NodeIncarnationId NodeIncarnationId,
+    MaintenanceDeliveryKey Key,
+    AuthenticatedMaintenanceRequest Request,
+    MaintenanceDeliveryState State,
+    MaintenanceResponse? LastResult);
+public sealed record MaintenanceInboxAcceptance(
+    bool IsNew,
+    JournaledMaintenanceDelivery Delivery);
 public sealed record JournaledAttemptContext(
     TaskAttemptId AttemptId,
     int Generation,
@@ -54,7 +65,7 @@ public sealed class UnsupportedJournalSchemaException(int found, int supported)
 
 public sealed class NodeJournal : IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 3;
+    public const int CurrentSchemaVersion = 4;
     private static readonly Guid UnverifiedProcessHostBootId = Guid.NewGuid();
     private readonly string _connectionString;
     private readonly SemaphoreSlim _mutex = new(1, 1);
@@ -135,6 +146,28 @@ public sealed class NodeJournal : IAsyncDisposable
                     context_json TEXT NOT NULL,
                     output_cursor INTEGER NOT NULL DEFAULT 0 CHECK(output_cursor >= 0),
                     created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS maintenance_inbox(
+                    request_id TEXT PRIMARY KEY,
+                    operation_id TEXT NOT NULL UNIQUE,
+                    operation_digest TEXT NOT NULL,
+                    host_id TEXT NOT NULL,
+                    node_incarnation_id TEXT NOT NULL,
+                    request_json TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    last_result_json TEXT,
+                    accepted_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS maintenance_result_outbox(
+                    request_id TEXT NOT NULL,
+                    operation_id TEXT NOT NULL,
+                    operation_digest TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    payload_hash TEXT NOT NULL,
+                    fact_sequence INTEGER NOT NULL UNIQUE,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(request_id,operation_id,operation_digest,status)
                 );
                 """, cancellationToken);
             if (schemaVersion < CurrentSchemaVersion)
@@ -387,10 +420,10 @@ public sealed class NodeJournal : IAsyncDisposable
         finally { _mutex.Release(); }
     }
 
-    public async Task<long> CompleteStartReservationAsync(
+    public async Task<long> CompleteStartReservationAsync<TPayload>(
         Guid reservationId,
         string factType,
-        object payload,
+        TPayload payload,
         DateTimeOffset observedAt,
         CancellationToken cancellationToken = default)
     {
@@ -698,7 +731,7 @@ public sealed class NodeJournal : IAsyncDisposable
         return outcome;
     }
 
-    public async Task<long> AppendFactAsync(string factType, object payload, DateTimeOffset observedAt, CancellationToken cancellationToken = default)
+    public async Task<long> AppendFactAsync<TPayload>(string factType, TPayload payload, DateTimeOffset observedAt, CancellationToken cancellationToken = default)
     {
         EnsureInitialized();
         var json = JsonSerializer.Serialize(payload, StewardJson.Options);
@@ -770,6 +803,413 @@ public sealed class NodeJournal : IAsyncDisposable
         return long.Parse((await ReadMetadataAsync(connection, "ack_cursor", cancellationToken)) ?? "0");
     }
 
+    public async Task<MaintenanceInboxAcceptance> AcceptMaintenanceAsync(
+        HostId hostId,
+        NodeIncarnationId nodeIncarnationId,
+        AuthenticatedMaintenanceRequest request,
+        long controlCursor,
+        CancellationToken cancellationToken = default)
+    {
+        EnsureInitialized();
+        ArgumentNullException.ThrowIfNull(request);
+        if (hostId == default ||
+            nodeIncarnationId != Identity.IncarnationId ||
+            controlCursor <= 0)
+            throw new ArgumentException(
+                "Maintenance inbox identity or cursor is invalid.");
+        var key = MaintenanceDeliveryKey.Create(request.Body);
+        var requestJson = Encoding.UTF8.GetString(
+            MaintenanceContract.Serialize(request));
+        await _mutex.WaitAsync(cancellationToken);
+        try
+        {
+            await using var connection = await OpenAsync(cancellationToken);
+            await using var transaction = connection.BeginTransaction(
+                deferred: false);
+            var matches = await ReadMaintenanceMatchesAsync(
+                connection,
+                transaction,
+                key,
+                cancellationToken);
+            if (matches.Count > 1)
+                throw new IdempotencyConflictException(
+                    "Request and operation identities belong to different maintenance deliveries.");
+            if (matches.Count == 1)
+            {
+                var existing = matches[0];
+                if (existing.Key != key ||
+                    existing.HostId != hostId ||
+                    existing.NodeIncarnationId != nodeIncarnationId)
+                    throw new IdempotencyConflictException(
+                        "Request or operation identity was reused with different immutable maintenance content.");
+                await AdvanceControlCursorAsync(
+                    connection,
+                    transaction,
+                    controlCursor,
+                    cancellationToken);
+                await transaction.CommitAsync(cancellationToken);
+                return new MaintenanceInboxAcceptance(false, existing);
+            }
+            var now = DateTimeOffset.UtcNow;
+            await ExecuteAsync(
+                connection,
+                transaction,
+                """
+                INSERT INTO maintenance_inbox(
+                    request_id,operation_id,operation_digest,host_id,
+                    node_incarnation_id,request_json,state,last_result_json,
+                    accepted_at,updated_at)
+                VALUES($request,$operation,$digest,$host,$incarnation,
+                    $request_json,$state,NULL,$at,$at)
+                """,
+                cancellationToken,
+                P("$request", key.RequestId.ToString("D")),
+                P("$operation", key.OperationId.ToString("D")),
+                P("$digest", key.OperationDigest.Sha256),
+                P("$host", hostId.ToString()),
+                P("$incarnation", nodeIncarnationId.ToString()),
+                P("$request_json", requestJson),
+                P("$state", MaintenanceDeliveryState.Accepted.ToString()),
+                P("$at", now.ToString("O")));
+            await AdvanceControlCursorAsync(
+                connection,
+                transaction,
+                controlCursor,
+                cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+            return new MaintenanceInboxAcceptance(
+                true,
+                new JournaledMaintenanceDelivery(
+                    hostId,
+                    nodeIncarnationId,
+                    key,
+                    request,
+                    MaintenanceDeliveryState.Accepted,
+                    null));
+        }
+        finally
+        {
+            _mutex.Release();
+        }
+    }
+
+    public async Task<JournaledMaintenanceDelivery>
+        MarkMaintenanceInProgressAsync(
+            MaintenanceDeliveryKey key,
+            CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(key);
+        await _mutex.WaitAsync(cancellationToken);
+        try
+        {
+            await using var connection = await OpenAsync(cancellationToken);
+            await using var transaction = connection.BeginTransaction(
+                deferred: false);
+            var delivery = await ReadExactMaintenanceAsync(
+                    connection,
+                    transaction,
+                    key,
+                    cancellationToken)
+                ?? throw new InvalidOperationException(
+                    "Maintenance delivery is not durably accepted.");
+            if (delivery.State == MaintenanceDeliveryState.Terminal)
+            {
+                await transaction.CommitAsync(cancellationToken);
+                return delivery;
+            }
+            await ExecuteAsync(
+                connection,
+                transaction,
+                """
+                UPDATE maintenance_inbox
+                SET state=$state,updated_at=$at
+                WHERE request_id=$request AND operation_id=$operation
+                    AND operation_digest=$digest
+                """,
+                cancellationToken,
+                P("$state", MaintenanceDeliveryState.InProgress.ToString()),
+                P("$at", DateTimeOffset.UtcNow.ToString("O")),
+                P("$request", key.RequestId.ToString("D")),
+                P("$operation", key.OperationId.ToString("D")),
+                P("$digest", key.OperationDigest.Sha256));
+            await transaction.CommitAsync(cancellationToken);
+            return delivery with
+            {
+                State = MaintenanceDeliveryState.InProgress
+            };
+        }
+        finally
+        {
+            _mutex.Release();
+        }
+    }
+
+    public async Task<IReadOnlyList<JournaledMaintenanceDelivery>>
+        ReadPendingMaintenanceAsync(
+            CancellationToken cancellationToken = default)
+    {
+        EnsureInitialized();
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT request_id,operation_id,operation_digest,host_id,
+                node_incarnation_id,request_json,state,last_result_json
+            FROM maintenance_inbox
+            WHERE state<>$terminal
+            ORDER BY accepted_at,request_id
+            """;
+        command.Parameters.AddWithValue(
+            "$terminal",
+            MaintenanceDeliveryState.Terminal.ToString());
+        var deliveries = new List<JournaledMaintenanceDelivery>();
+        await using var reader = await command.ExecuteReaderAsync(
+            cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+            deliveries.Add(ReadMaintenanceDelivery(reader));
+        return deliveries;
+    }
+
+    public async Task<bool> RecordMaintenanceResultAsync(
+        MaintenanceDeliveryKey key,
+        MaintenanceResponse response,
+        string factType,
+        string factPayloadJson,
+        DateTimeOffset observedAt,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(key);
+        ArgumentNullException.ThrowIfNull(response);
+        ArgumentException.ThrowIfNullOrWhiteSpace(factType);
+        ArgumentException.ThrowIfNullOrWhiteSpace(factPayloadJson);
+        if (factType.Length > 128 ||
+            Encoding.UTF8.GetByteCount(factPayloadJson) > 256 * 1024 ||
+            response.ProtocolVersion != MaintenanceContract.ProtocolVersion ||
+            response.RequestId != key.RequestId ||
+            response.OperationId != key.OperationId ||
+            response.OperationDigest != key.OperationDigest ||
+            !Enum.IsDefined(response.Status))
+            throw new ArgumentException(
+                "Maintenance result does not match its durable delivery.");
+        var responseJson = JsonSerializer.Serialize(
+            response,
+            StewardJson.Options);
+        var payloadHash = Hash(factPayloadJson);
+        await _mutex.WaitAsync(cancellationToken);
+        try
+        {
+            await using var connection = await OpenAsync(cancellationToken);
+            await using var transaction = connection.BeginTransaction(
+                deferred: false);
+            var delivery = await ReadExactMaintenanceAsync(
+                    connection,
+                    transaction,
+                    key,
+                    cancellationToken)
+                ?? throw new InvalidOperationException(
+                    "Maintenance result has no durable inbox acceptance.");
+            await using (var existing = connection.CreateCommand())
+            {
+                existing.Transaction = transaction;
+                existing.CommandText = """
+                    SELECT payload_hash FROM maintenance_result_outbox
+                    WHERE request_id=$request AND operation_id=$operation
+                        AND operation_digest=$digest AND status=$status
+                    """;
+                existing.Parameters.AddWithValue(
+                    "$request",
+                    key.RequestId.ToString("D"));
+                existing.Parameters.AddWithValue(
+                    "$operation",
+                    key.OperationId.ToString("D"));
+                existing.Parameters.AddWithValue(
+                    "$digest",
+                    key.OperationDigest.Sha256);
+                existing.Parameters.AddWithValue(
+                    "$status",
+                    response.Status.ToString());
+                var priorHash = (string?)await existing.ExecuteScalarAsync(
+                    cancellationToken);
+                if (priorHash is not null)
+                {
+                    if (!string.Equals(
+                            priorHash,
+                            payloadHash,
+                            StringComparison.Ordinal))
+                        throw new IdempotencyConflictException(
+                            "Maintenance result status was reused with different content.");
+                    await transaction.CommitAsync(cancellationToken);
+                    return false;
+                }
+            }
+            if (delivery.State == MaintenanceDeliveryState.Terminal)
+                throw new IdempotencyConflictException(
+                    "Terminal maintenance delivery cannot publish another result.");
+            var sequence = await InsertRawFactAsync(
+                connection,
+                transaction,
+                factType,
+                factPayloadJson,
+                observedAt,
+                cancellationToken);
+            await ExecuteAsync(
+                connection,
+                transaction,
+                """
+                INSERT INTO maintenance_result_outbox(
+                    request_id,operation_id,operation_digest,status,
+                    payload_hash,fact_sequence,created_at)
+                VALUES($request,$operation,$digest,$status,$hash,$sequence,$at)
+                """,
+                cancellationToken,
+                P("$request", key.RequestId.ToString("D")),
+                P("$operation", key.OperationId.ToString("D")),
+                P("$digest", key.OperationDigest.Sha256),
+                P("$status", response.Status.ToString()),
+                P("$hash", payloadHash),
+                P("$sequence", sequence),
+                P("$at", observedAt.ToString("O")));
+            var state = response.Status is
+                MaintenanceOperationStatus.Succeeded or
+                MaintenanceOperationStatus.Failed
+                ? MaintenanceDeliveryState.Terminal
+                : MaintenanceDeliveryState.InProgress;
+            await ExecuteAsync(
+                connection,
+                transaction,
+                """
+                UPDATE maintenance_inbox
+                SET state=$state,last_result_json=$result,updated_at=$at
+                WHERE request_id=$request AND operation_id=$operation
+                    AND operation_digest=$digest
+                """,
+                cancellationToken,
+                P("$state", state.ToString()),
+                P("$result", responseJson),
+                P("$at", observedAt.ToString("O")),
+                P("$request", key.RequestId.ToString("D")),
+                P("$operation", key.OperationId.ToString("D")),
+                P("$digest", key.OperationDigest.Sha256));
+            await transaction.CommitAsync(cancellationToken);
+            return true;
+        }
+        finally
+        {
+            _mutex.Release();
+        }
+    }
+
+    private static async Task<IReadOnlyList<JournaledMaintenanceDelivery>>
+        ReadMaintenanceMatchesAsync(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            MaintenanceDeliveryKey key,
+            CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT request_id,operation_id,operation_digest,host_id,
+                node_incarnation_id,request_json,state,last_result_json
+            FROM maintenance_inbox
+            WHERE request_id=$request OR operation_id=$operation
+            """;
+        command.Parameters.AddWithValue(
+            "$request",
+            key.RequestId.ToString("D"));
+        command.Parameters.AddWithValue(
+            "$operation",
+            key.OperationId.ToString("D"));
+        var deliveries = new List<JournaledMaintenanceDelivery>(2);
+        await using var reader = await command.ExecuteReaderAsync(
+            cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+            deliveries.Add(ReadMaintenanceDelivery(reader));
+        return deliveries;
+    }
+
+    private static async Task<JournaledMaintenanceDelivery?>
+        ReadExactMaintenanceAsync(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            MaintenanceDeliveryKey key,
+            CancellationToken cancellationToken)
+    {
+        var matches = await ReadMaintenanceMatchesAsync(
+            connection,
+            transaction,
+            key,
+            cancellationToken);
+        return matches.SingleOrDefault(delivery => delivery.Key == key);
+    }
+
+    private static JournaledMaintenanceDelivery ReadMaintenanceDelivery(
+        SqliteDataReader reader)
+    {
+        var request = MaintenanceContract.Parse(
+            Encoding.UTF8.GetBytes(reader.GetString(5)));
+        var key = new MaintenanceDeliveryKey(
+            Guid.Parse(reader.GetString(0)),
+            Guid.Parse(reader.GetString(1)),
+            new MaintenanceOperationDigest(reader.GetString(2)));
+        if (key != MaintenanceDeliveryKey.Create(request.Body))
+            throw new InvalidDataException(
+                "Durable maintenance request digest is invalid.");
+        var state = Enum.Parse<MaintenanceDeliveryState>(
+            reader.GetString(6));
+        var result = reader.IsDBNull(7)
+            ? null
+            : JsonSerializer.Deserialize<MaintenanceResponse>(
+                reader.GetString(7),
+                StewardJson.Options) ?? throw new InvalidDataException(
+                    "Durable maintenance result is invalid.");
+        return new JournaledMaintenanceDelivery(
+            HostId.Parse(reader.GetString(3)),
+            NodeIncarnationId.Parse(reader.GetString(4)),
+            key,
+            request,
+            state,
+            result);
+    }
+
+    private static async Task AdvanceControlCursorAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        long cursor,
+        CancellationToken cancellationToken) =>
+        await ExecuteAsync(
+            connection,
+            transaction,
+            """
+            INSERT INTO stream_cursors(stream,cursor)
+            VALUES($stream,$cursor)
+            ON CONFLICT(stream) DO UPDATE
+            SET cursor=MAX(cursor,excluded.cursor)
+            """,
+            cancellationToken,
+            P("$stream", StreamKind.Control.ToString()),
+            P("$cursor", cursor));
+
+    private static async Task<long> InsertRawFactAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string factType,
+        string payloadJson,
+        DateTimeOffset observedAt,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            INSERT INTO facts(fact_type,payload,observed_at)
+            VALUES($type,$payload,$at);
+            SELECT last_insert_rowid();
+            """;
+        command.Parameters.AddWithValue("$type", factType);
+        command.Parameters.AddWithValue("$payload", payloadJson);
+        command.Parameters.AddWithValue("$at", observedAt.ToString("O"));
+        return (long)(await command.ExecuteScalarAsync(
+            cancellationToken))!;
+    }
     public async Task SetStreamCursorAsync(StreamKind stream, long cursor, CancellationToken cancellationToken = default)
     {
         if (cursor < 0) throw new ArgumentOutOfRangeException(nameof(cursor));
@@ -990,9 +1430,9 @@ public sealed class NodeJournal : IAsyncDisposable
         return result;
     }
 
-    private static async Task<long> InsertFactAsync(
+    private static async Task<long> InsertFactAsync<TPayload>(
         SqliteConnection connection, SqliteTransaction transaction, string factType,
-        object payload, DateTimeOffset observedAt, CancellationToken cancellationToken)
+        TPayload payload, DateTimeOffset observedAt, CancellationToken cancellationToken)
     {
         await using var command = connection.CreateCommand();
         command.Transaction = transaction;

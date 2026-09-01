@@ -4,7 +4,7 @@ using System.Text.Json;
 
 namespace Steward.Workloads.Evals;
 
-public sealed record HarnessCommandProfile(
+internal sealed record HarnessCommandProfile(
     string HarnessName,
     string HarnessVersion,
     string ProfileVersion,
@@ -49,7 +49,7 @@ public sealed record HarnessCommandProfile(
     }
 }
 
-public abstract class EvaluationHarnessAdapterBase : IEvaluationHarnessAdapter
+internal abstract class EvaluationHarnessAdapterBase : IEvaluationHarnessAdapter
 {
     public const string AttemptGenerationToken = "__STEWARD_ATTEMPT_GENERATION__";
     private readonly HarnessCommandProfile profile;
@@ -119,13 +119,13 @@ public abstract class EvaluationHarnessAdapterBase : IEvaluationHarnessAdapter
     }
 }
 
-public sealed class HarborEvaluationAdapter : EvaluationHarnessAdapterBase
+internal sealed class HarborEvaluationAdapter : EvaluationHarnessAdapterBase
 {
     public HarborEvaluationAdapter(HarnessCommandProfile profile, IEvaluationResultParser? parser = null)
         : base(profile, "harbor", parser ?? new HarborEvaluationResultParser()) { }
 }
 
-public sealed class SaberEvaluationAdapter : EvaluationHarnessAdapterBase
+internal sealed class SaberEvaluationAdapter : EvaluationHarnessAdapterBase
 {
     public SaberEvaluationAdapter(HarnessCommandProfile profile, IEvaluationResultParser? parser = null)
         : base(profile, "saber", parser ?? new SaberEvaluationResultParser()) { }
@@ -187,9 +187,17 @@ public sealed record EvaluationCaseResult(
         foreach (var artifact in sortedArtifacts) EvaluationLocations.ValidateLocation(artifact, "Artifact reference");
         var receipt = EvaluationHash.Sha256(EvaluationJson.Serialize(new
         {
-            caseId, context.AttemptGeneration, context.HarnessVersion, context.Commit, context.DatasetHash,
-            context.ModelProfile, status = status.ToString(), score, metrics = sortedMetrics,
-            artifactReferences = sortedArtifacts, failureClassification = failureClassification.ToString()
+            caseId,
+            context.AttemptGeneration,
+            context.HarnessVersion,
+            context.Commit,
+            context.DatasetHash,
+            context.ModelProfile,
+            status = status.ToString(),
+            score,
+            metrics = sortedMetrics,
+            artifactReferences = sortedArtifacts,
+            failureClassification = failureClassification.ToString()
         }));
         return new(caseId, context.AttemptGeneration, context.HarnessVersion, context.Commit, context.DatasetHash,
             context.ModelProfile, status, score, sortedMetrics, sortedArtifacts, failureClassification, receipt);

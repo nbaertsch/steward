@@ -8,14 +8,25 @@ public sealed class ConnectionHostPipeServer(
     ConnectionHostOptions options,
     ConnectionHostOrchestrator orchestrator)
 {
+    private const int MaximumConcurrentClients = 8;
+
     public async Task RunAsync(CancellationToken cancellationToken)
+    {
+        var listeners = Enumerable.Range(0, MaximumConcurrentClients)
+            .Select(_ => RunListenerAsync(cancellationToken))
+            .ToArray();
+        await Task.WhenAll(listeners).ConfigureAwait(false);
+    }
+
+    private async Task RunListenerAsync(
+        CancellationToken cancellationToken)
     {
         while (!cancellationToken.IsCancellationRequested)
         {
             await using var pipe = new NamedPipeServerStream(
                 options.PipeName,
                 PipeDirection.InOut,
-                1,
+                MaximumConcurrentClients,
                 PipeTransmissionMode.Byte,
                 PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly,
                 ConnectionHostProtocol.MaximumMessageBytes,

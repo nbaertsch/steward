@@ -85,17 +85,25 @@ capture, classification, and gateway-socket proof live in
 For Dev Box, Windows App owns the AVD resource connection and reverse-connect
 gateway session. Steward validates the provider-issued `ms-avd` metadata but
 does not activate it in headless acceptance because its supported activation
-is visible. Steward's client-side DVC component uses the documented per-user
-out-of-process COM AddIns model and does not inject, hide windows, or
-reconstruct gateway settings.
+is visible. The effective Windows App compatibility lane observed during
+characterization uses the per-user out-of-process COM AddIns registration plus
+a quarantined .NET startup hook, Harmony patches to Microsoft managed RDCore
+assemblies, and `Steward.RdpDvc.Shim.Windows`, a native shim. That lane does not
+hide windows or reconstruct gateway settings, but it is injection and is not a
+supported Microsoft activation contract or release-gate evidence. It remains
+only to preserve the observed DVC activation behavior until a supported
+replacement proves equivalent behavior live.
 
-### COM provenance
+### COM and compatibility-lane provenance
 
-No third-party hook or RDP package and no generated AxInterop assembly is used.
-The IIDs, CLSID, DISPIDs, and signatures in `MstscInterop.cs` are the public
-Microsoft mstscax type-library contracts. They were checked against the
-installed Microsoft `%WINDIR%\System32\mstscax.dll` type library using
-`LoadTypeLibEx`/`ITypeLib` on Windows. Relevant Microsoft documentation:
+No generated AxInterop assembly is used. The IIDs, CLSID, DISPIDs, and
+signatures in `MstscInterop.cs` are the public Microsoft mstscax type-library
+contracts. They were checked against the installed Microsoft
+`%WINDIR%\System32\mstscax.dll` type library using `LoadTypeLibEx`/`ITypeLib`
+on Windows. Separately, the current Windows App lane contains the observed
+startup-hook/Harmony/native-shim components described above; those components
+must not be represented as supported COM-only integration. Relevant Microsoft
+documentation:
 
 - <https://learn.microsoft.com/windows/win32/termserv/using-the-remote-desktop-activex-control>
 - <https://learn.microsoft.com/windows/win32/termserv/imsrdpclienttransportsettings4>
@@ -239,6 +247,7 @@ load-bearing blocker is now explicit:
 3. prove `NT SERVICE\Steward.Node`/LocalSystem can open the exact session; and
 4. record authenticated PING/PONG across disconnect/reconnect.
 
-Stop now for the Windows App path. Do not use an in-process hook, window-hiding
-automation, minimized launch, or a user-session helper to manufacture
-headlessness.
+Stop now for the Windows App path. Do not expand or treat the quarantined
+startup-hook/Harmony/native-shim lane as supported evidence, and do not use
+window-hiding automation, minimized launch, or a user-session helper to
+manufacture headlessness.

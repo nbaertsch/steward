@@ -1,6 +1,6 @@
+using Microsoft.Data.Sqlite;
 using Steward.Domain;
 using Steward.PortableState;
-using Microsoft.Data.Sqlite;
 
 namespace Steward.PortableState.Tests;
 

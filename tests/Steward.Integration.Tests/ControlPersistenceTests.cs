@@ -347,7 +347,8 @@ public sealed class ControlPersistenceTests
 
     private static CommandDto Command(string key, string value) =>
         new(CommandId.New(), key, 0, null, null, DateTimeOffset.UtcNow.AddMinutes(5), "test", "execute",
-            new("test", "1.0.0", JsonDocument.Parse($$"""{"value":"{{value}}"}""").RootElement.Clone()));
+            ExtensionMetadataDto.Create(
+                "test", "1.0.0", new { value }));
 
     private static DelegationDto Delegation()
     {
@@ -371,7 +372,7 @@ public sealed class ControlPersistenceTests
     }
 
     private static ExtensionMetadataDto Extension(string kind) =>
-        new(kind, "1.0.0", JsonDocument.Parse("{}").RootElement.Clone());
+        ExtensionMetadataDto.Create(kind, "1.0.0", new { });
 
     private static async Task<string> ScalarAsync(SqliteConnection connection, string sql)
     {

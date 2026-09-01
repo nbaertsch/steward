@@ -84,12 +84,15 @@ public sealed class IdentityResolutionException : InvalidOperationException
     public IdentityOfflineBehavior OfflineBehavior { get; }
 }
 
-public delegate void ProtectedMaterialConsumer(ReadOnlySpan<char> material);
+public interface IProtectedMaterialConsumer
+{
+    void Consume(ReadOnlySpan<char> material);
+}
 
 public interface IProtectedIdentityVault
 {
     ProtectedIdentityHandle Store(string provider, string material, DateTimeOffset expiresAt);
-    bool TryReveal(ProtectedIdentityHandle handle, ProtectedMaterialConsumer consumer);
+    bool TryReveal(ProtectedIdentityHandle handle, IProtectedMaterialConsumer consumer);
     void Remove(ProtectedIdentityHandle handle);
 }
 
@@ -107,13 +110,13 @@ public sealed class InMemoryProtectedIdentityVault : IProtectedIdentityVault
         return handle;
     }
 
-    public bool TryReveal(ProtectedIdentityHandle handle, ProtectedMaterialConsumer consumer)
+    public bool TryReveal(ProtectedIdentityHandle handle, IProtectedMaterialConsumer consumer)
     {
         ArgumentNullException.ThrowIfNull(consumer);
         if (handle.ExpiresAt <= DateTimeOffset.UtcNow ||
             !values.TryGetValue(handle.HandleId, out var material))
             return false;
-        consumer(material);
+        consumer.Consume(material);
         return true;
     }
 
@@ -200,7 +203,7 @@ public sealed class DpapiProtectedIdentityVault : IProtectedIdentityVault
         }
     }
 
-    public bool TryReveal(ProtectedIdentityHandle handle, ProtectedMaterialConsumer consumer)
+    public bool TryReveal(ProtectedIdentityHandle handle, IProtectedMaterialConsumer consumer)
     {
         ArgumentNullException.ThrowIfNull(consumer);
         if (handle.ExpiresAt <= DateTimeOffset.UtcNow)
@@ -223,7 +226,7 @@ public sealed class DpapiProtectedIdentityVault : IProtectedIdentityVault
             cleartext = ProtectedData.Unprotect(
                 protectedValue, Entropy(handle), DataProtectionScope.CurrentUser);
             characters = Encoding.UTF8.GetChars(cleartext);
-            consumer(characters);
+            consumer.Consume(characters);
             return true;
         }
         catch (Exception exception) when (
@@ -401,7 +404,7 @@ public sealed record LocalControlIdentityGrantRegistration(
     }
 }
 
-public delegate void ControlIdentityMaterialConsumer(
+internal delegate void ControlIdentityMaterialConsumer(
     string provider,
     ReadOnlySpan<char> material);
 
@@ -482,13 +485,22 @@ public sealed class LocalControlIdentityGrantCatalog : IControlIdentityGrantCata
 
         if (!vault.TryReveal(
                 state.Handle,
-                material => consumer(state.Registration.Provider, material)))
+                new ControlMaterialConsumer(
+                    state.Registration.Provider,
+                    consumer)))
             throw new IdentityResolutionException(
                 "identity.unavailable",
                 "Task identity material is unavailable.");
     }
 }
 
+internal sealed class ControlMaterialConsumer(
+    string provider,
+    ControlIdentityMaterialConsumer consumer) : IProtectedMaterialConsumer
+{
+    public void Consume(ReadOnlySpan<char> material) =>
+        consumer(provider, material);
+}
 public sealed record DirectIdentitySessionBinding(
     Guid SessionId,
     HostId HostId,
@@ -599,180 +611,180 @@ public sealed class DirectSessionControlIdentityStreamHandler(
         HostId hostId,
         DirectSessionControlIdentityHandler handler,
         TimeProvider? timeProvider = null) : IAuxiliaryTransportStreamHandler
+{
+    private readonly TimeProvider timeProvider = timeProvider ?? TimeProvider.System;
+
+    public StreamKind Stream => StreamKind.Identity;
+
+    public async ValueTask HandleAsync(
+        ITransportConnection connection,
+        TransportFrame frame,
+        CancellationToken cancellationToken)
     {
-        private readonly TimeProvider timeProvider = timeProvider ?? TimeProvider.System;
-
-        public StreamKind Stream => StreamKind.Identity;
-
-        public async ValueTask HandleAsync(
-            ITransportConnection connection,
-            TransportFrame frame,
-            CancellationToken cancellationToken)
-        {
-            ArgumentNullException.ThrowIfNull(connection);
-            RequireEphemeralSecureSession(connection);
-            if (frame.Stream != StreamKind.Identity)
-                throw new OrchestrationMessageException(
-                    "The direct identity handler accepts only the Identity stream.");
-            var decoded = OrchestrationMessageCodec.Decode(frame.Payload);
-            if (decoded.Value is not DirectIdentityDeliveryRequest request)
-                throw new OrchestrationMessageException(
-                    "Control accepts only identity delivery requests on the Identity stream.");
-            var binding = new DirectIdentitySessionBinding(
-                connection.Session.SessionId,
-                hostId,
-                connection.Session.NodeIncarnationId,
-                connection.Session.Security.ChannelBinding);
-            var response = await handler.HandleAsync(
-                binding, request, cancellationToken).ConfigureAwait(false);
-            var payload = OrchestrationMessageCodec.Encode(
-                response, timeProvider.GetUtcNow());
-            await connection.SendAsync(new(
-                connection.Session.SessionId,
-                connection.Session.NodeIncarnationId,
-                StreamKind.Identity,
-                frame.Sequence,
-                frame.Sequence,
-                payload), cancellationToken).ConfigureAwait(false);
-        }
-
-        internal static void RequireEphemeralSecureSession(ITransportConnection connection)
-        {
-            if (!connection.Session.Security.IsSecure)
-                throw new IdentityResolutionException(
-                    "identity.session-insecure",
-                    "Identity delivery requires a mutually authenticated encrypted session.");
-            if (connection.Session.LocalResumeCursors.GetValueOrDefault(StreamKind.Identity, 0) != 0 ||
-                connection.Session.RemoteResumeCursors.GetValueOrDefault(StreamKind.Identity, 0) != 0)
-                throw new IdentityResolutionException(
-                    "identity.session-replay-invalid",
-                    "Identity delivery cannot use persisted resume cursors or replay.");
-        }
+        ArgumentNullException.ThrowIfNull(connection);
+        RequireEphemeralSecureSession(connection);
+        if (frame.Stream != StreamKind.Identity)
+            throw new OrchestrationMessageException(
+                "The direct identity handler accepts only the Identity stream.");
+        var decoded = OrchestrationMessageCodec.Decode(frame.Payload);
+        if (decoded.Value is not DirectIdentityDeliveryRequest request)
+            throw new OrchestrationMessageException(
+                "Control accepts only identity delivery requests on the Identity stream.");
+        var binding = new DirectIdentitySessionBinding(
+            connection.Session.SessionId,
+            hostId,
+            connection.Session.NodeIncarnationId,
+            connection.Session.Security.ChannelBinding);
+        var response = await handler.HandleAsync(
+            binding, request, cancellationToken).ConfigureAwait(false);
+        var payload = OrchestrationMessageCodec.Encode(
+            response, timeProvider.GetUtcNow());
+        await connection.SendAsync(new(
+            connection.Session.SessionId,
+            connection.Session.NodeIncarnationId,
+            StreamKind.Identity,
+            frame.Sequence,
+            frame.Sequence,
+            payload), cancellationToken).ConfigureAwait(false);
     }
+
+    internal static void RequireEphemeralSecureSession(ITransportConnection connection)
+    {
+        if (!connection.Session.Security.IsSecure)
+            throw new IdentityResolutionException(
+                "identity.session-insecure",
+                "Identity delivery requires a mutually authenticated encrypted session.");
+        if (connection.Session.LocalResumeCursors.GetValueOrDefault(StreamKind.Identity, 0) != 0 ||
+            connection.Session.RemoteResumeCursors.GetValueOrDefault(StreamKind.Identity, 0) != 0)
+            throw new IdentityResolutionException(
+                "identity.session-replay-invalid",
+                "Identity delivery cannot use persisted resume cursors or replay.");
+    }
+}
 
 [SupportedOSPlatform("windows")]
 public sealed class DirectSessionNodeIdentityClient(HostId hostId) :
         IDirectIdentityDeliveryClient,
         IAuxiliaryTransportStreamHandler
+{
+    private readonly ConcurrentDictionary<
+        Guid, TaskCompletionSource<EncryptedIdentityDelivery>> pending = [];
+    private readonly SemaphoreSlim sendGate = new(1, 1);
+    private ITransportConnection? connection;
+    private long sendSequence;
+
+    public StreamKind Stream => StreamKind.Identity;
+    public bool IsControlConnected => Volatile.Read(ref connection) is not null;
+
+    public DirectIdentitySessionBinding Binding
     {
-        private readonly ConcurrentDictionary<
-            Guid, TaskCompletionSource<EncryptedIdentityDelivery>> pending = [];
-        private readonly SemaphoreSlim sendGate = new(1, 1);
-        private ITransportConnection? connection;
-        private long sendSequence;
-
-        public StreamKind Stream => StreamKind.Identity;
-        public bool IsControlConnected => Volatile.Read(ref connection) is not null;
-
-        public DirectIdentitySessionBinding Binding
+        get
         {
-            get
+            var current = Volatile.Read(ref connection)
+                ?? throw new IdentityControlDisconnectedException();
+            return new(
+                current.Session.SessionId,
+                hostId,
+                current.Session.NodeIncarnationId,
+                current.Session.Security.ChannelBinding);
+        }
+    }
+
+    public IDisposable Attach(ITransportConnection value)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        DirectSessionControlIdentityStreamHandler.RequireEphemeralSecureSession(value);
+        if (Interlocked.CompareExchange(ref connection, value, null) is not null)
+            throw new InvalidOperationException(
+                "A direct identity session is already attached.");
+        sendSequence = 0;
+        return new Attachment(this, value);
+    }
+
+    public async ValueTask<EncryptedIdentityDelivery> DeliverAsync(
+        DirectIdentityDeliveryRequest request,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var completion = new TaskCompletionSource<EncryptedIdentityDelivery>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        if (!pending.TryAdd(request.RequestId, completion))
+            throw new InvalidOperationException("Identity delivery request collision.");
+        var sent = false;
+        try
+        {
+            await sendGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
             {
                 var current = Volatile.Read(ref connection)
                     ?? throw new IdentityControlDisconnectedException();
-                return new(
+                DirectSessionControlIdentityStreamHandler.RequireEphemeralSecureSession(current);
+                var sequence = checked(++sendSequence);
+                var payload = OrchestrationMessageCodec.Encode(
+                    request, DateTimeOffset.UtcNow);
+                await current.SendAsync(new(
                     current.Session.SessionId,
-                    hostId,
                     current.Session.NodeIncarnationId,
-                    current.Session.Security.ChannelBinding);
-            }
-        }
-
-        public IDisposable Attach(ITransportConnection value)
-        {
-            ArgumentNullException.ThrowIfNull(value);
-            DirectSessionControlIdentityStreamHandler.RequireEphemeralSecureSession(value);
-            if (Interlocked.CompareExchange(ref connection, value, null) is not null)
-                throw new InvalidOperationException(
-                    "A direct identity session is already attached.");
-            sendSequence = 0;
-            return new Attachment(this, value);
-        }
-
-        public async ValueTask<EncryptedIdentityDelivery> DeliverAsync(
-            DirectIdentityDeliveryRequest request,
-            CancellationToken cancellationToken)
-        {
-            ArgumentNullException.ThrowIfNull(request);
-            var completion = new TaskCompletionSource<EncryptedIdentityDelivery>(
-                TaskCreationOptions.RunContinuationsAsynchronously);
-            if (!pending.TryAdd(request.RequestId, completion))
-                throw new InvalidOperationException("Identity delivery request collision.");
-            var sent = false;
-            try
-            {
-                await sendGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-                try
-                {
-                    var current = Volatile.Read(ref connection)
-                        ?? throw new IdentityControlDisconnectedException();
-                    DirectSessionControlIdentityStreamHandler.RequireEphemeralSecureSession(current);
-                    var sequence = checked(++sendSequence);
-                    var payload = OrchestrationMessageCodec.Encode(
-                        request, DateTimeOffset.UtcNow);
-                    await current.SendAsync(new(
-                        current.Session.SessionId,
-                        current.Session.NodeIncarnationId,
-                        StreamKind.Identity,
-                        sequence,
-                        sequence,
-                        payload), cancellationToken).ConfigureAwait(false);
-                    sent = true;
-                }
-                finally
-                {
-                    sendGate.Release();
-                }
-                return await completion.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+                    StreamKind.Identity,
+                    sequence,
+                    sequence,
+                    payload), cancellationToken).ConfigureAwait(false);
+                sent = true;
             }
             finally
             {
-                if (!sent)
-                    pending.TryRemove(request.RequestId, out _);
+                sendGate.Release();
             }
+            return await completion.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
         }
-
-        public ValueTask HandleAsync(
-            ITransportConnection connection,
-            TransportFrame frame,
-            CancellationToken cancellationToken)
+        finally
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            if (!ReferenceEquals(Volatile.Read(ref this.connection), connection))
-                throw new IdentityControlDisconnectedException();
-            DirectSessionControlIdentityStreamHandler.RequireEphemeralSecureSession(connection);
-            if (frame.Stream != StreamKind.Identity)
-                throw new OrchestrationMessageException(
-                    "The direct identity client accepts only the Identity stream.");
-            var decoded = OrchestrationMessageCodec.Decode(frame.Payload);
-            if (decoded.Value is not EncryptedIdentityDelivery response)
-                throw new OrchestrationMessageException(
-                    "Node accepts only encrypted identity deliveries on the Identity stream.");
-            if (!pending.TryRemove(response.RequestId, out var completion))
-                throw new OrchestrationMessageException(
-                    "Encrypted identity delivery has no pending request.");
-            completion.TrySetResult(response);
-            return ValueTask.CompletedTask;
-        }
-
-        private void Detach(ITransportConnection value)
-        {
-            if (!ReferenceEquals(
-                    Interlocked.CompareExchange(ref connection, null, value),
-                    value))
-                return;
-            foreach (var item in pending.ToArray())
-                if (pending.TryRemove(item.Key, out var completion))
-                    completion.TrySetException(new IdentityControlDisconnectedException());
-        }
-
-        private sealed class Attachment(
-            DirectSessionNodeIdentityClient owner,
-            ITransportConnection connection) : IDisposable
-        {
-            public void Dispose() => owner.Detach(connection);
+            if (!sent)
+                pending.TryRemove(request.RequestId, out _);
         }
     }
+
+    public ValueTask HandleAsync(
+        ITransportConnection connection,
+        TransportFrame frame,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!ReferenceEquals(Volatile.Read(ref this.connection), connection))
+            throw new IdentityControlDisconnectedException();
+        DirectSessionControlIdentityStreamHandler.RequireEphemeralSecureSession(connection);
+        if (frame.Stream != StreamKind.Identity)
+            throw new OrchestrationMessageException(
+                "The direct identity client accepts only the Identity stream.");
+        var decoded = OrchestrationMessageCodec.Decode(frame.Payload);
+        if (decoded.Value is not EncryptedIdentityDelivery response)
+            throw new OrchestrationMessageException(
+                "Node accepts only encrypted identity deliveries on the Identity stream.");
+        if (!pending.TryRemove(response.RequestId, out var completion))
+            throw new OrchestrationMessageException(
+                "Encrypted identity delivery has no pending request.");
+        completion.TrySetResult(response);
+        return ValueTask.CompletedTask;
+    }
+
+    private void Detach(ITransportConnection value)
+    {
+        if (!ReferenceEquals(
+                Interlocked.CompareExchange(ref connection, null, value),
+                value))
+            return;
+        foreach (var item in pending.ToArray())
+            if (pending.TryRemove(item.Key, out var completion))
+                completion.TrySetException(new IdentityControlDisconnectedException());
+    }
+
+    private sealed class Attachment(
+        DirectSessionNodeIdentityClient owner,
+        ITransportConnection connection) : IDisposable
+    {
+        public void Dispose() => owner.Detach(connection);
+    }
+}
 
 public sealed class IdentityControlDisconnectedException()
     : IOException("The direct Control identity session is disconnected.");

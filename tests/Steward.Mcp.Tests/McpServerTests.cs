@@ -198,11 +198,14 @@ public sealed class McpServerTests
             new Dictionary<string, object?> { ["agentId"] = agent });
         await client.CallToolAsync("read_notifications", new Dictionary<string, object?>
         {
-            ["stream"] = "agent:test", ["afterCursor"] = 2, ["limit"] = 3
+            ["stream"] = "agent:test",
+            ["afterCursor"] = 2,
+            ["limit"] = 3
         });
         await client.CallToolAsync("acknowledge_notifications", new Dictionary<string, object?>
         {
-            ["stream"] = "agent:test", ["throughCursor"] = 4
+            ["stream"] = "agent:test",
+            ["throughCursor"] = 4
         });
 
         Assert.Contains(fixture.Handler.Requests, x => x.PathAndQuery == "/doctor/orchestration");
@@ -283,6 +286,8 @@ public sealed class McpServerTests
             TerminalFileTransferCapabilities.None,
             false,
             false,
+            0,
+            TimeSpan.Zero,
             0);
         await client.CallToolAsync("issue_terminal_authority", new Dictionary<string, object?>
         {

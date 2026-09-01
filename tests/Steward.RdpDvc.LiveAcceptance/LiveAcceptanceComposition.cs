@@ -152,8 +152,11 @@ internal sealed class LiveAcceptanceComposition : IAsyncDisposable
             throw;
         }
 
+        var pipeName =
+            $"Steward.ConnectionHost.LiveAcceptance.{Guid.NewGuid():N}";
         Console.Error.WriteLine("LIVE STAGE: evidence-source");
         RdpDvcEmbeddingConfigurationStore.Write(
+            pipeName + ".DvcBroker",
             options.EvidencePipeName,
             options.EvidenceKeyFile);
         var evidenceSource = new AttestingProductionEvidenceSource(
@@ -237,8 +240,6 @@ internal sealed class LiveAcceptanceComposition : IAsyncDisposable
             };
             authorization.Register(tokens[0]);
             authorization.Register(tokens[1]);
-            var pipeName =
-                $"Steward.ConnectionHost.LiveAcceptance.{Guid.NewGuid():N}";
             Console.Error.WriteLine("LIVE HOST STAGE: host-options");
             var hostOptions = new ConnectionHostOptions
             {
@@ -269,14 +270,26 @@ internal sealed class LiveAcceptanceComposition : IAsyncDisposable
                     options.Timeout,
                     new ProtectedFileRdpDvcLocalCarrier(
                         options.DvcAuthenticationKeyFile,
-                        options.ControlSigningPrivateKeyFile,
-                        options.NodeTransportSigningPublicKeyFile,
-                        options.ControlIdentity,
-                        options.NodeIdentity,
+                        hostOptions.PipeName + ".DvcBroker",
                         options.EvidencePipeName,
                         options.EvidenceKeyFile,
+                        new SqliteConnectionReconnectHighWaterStore(
+                            Path.Combine(
+                                options.EvidenceDirectory,
+                                "reconnect-high-water.v2.db")),
+                        new RdpDvcOpaqueControlPipeBridge(
+                            new(
+                                Environment.GetEnvironmentVariable(
+                                    "STEWARD_CONTROL_RDP_DVC_CARRIER_PIPE_NAME") ??
+                                "Steward.Control.RdpDvc.v2",
+                                options.Timeout,
+                                64 * 1024)),
                         stage => Console.Error.WriteLine(
-                            $"LIVE CARRIER STAGE: {stage}"))),
+                            $"LIVE CARRIER STAGE: {stage}")),
+                    generationStore: new SqliteConnectionGenerationStore(
+                        Path.Combine(
+                            options.EvidenceDirectory,
+                            "connection-generations.v2.db"))),
                 authorization,
                 new MemoryConnectionMetadataStore());
             Console.Error.WriteLine("LIVE HOST STAGE: initialize");

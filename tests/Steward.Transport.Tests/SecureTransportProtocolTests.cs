@@ -186,6 +186,121 @@ public sealed class SecureTransportProtocolTests
     }
 
     [Fact]
+    public async Task Reconnect_carrier_attachment_roundtrips_as_a_bounded_typed_preamble()
+    {
+        var binding = ReconnectBinding();
+        var expected = new ReconnectCarrierAttachment(
+            Guid.NewGuid(),
+            binding);
+        using var stream = new MemoryStream();
+
+        await ReconnectCarrierAttachmentCodec.WriteAsync(
+            stream,
+            expected,
+            CancellationToken.None);
+        stream.Position = 0;
+        var actual = await ReconnectCarrierAttachmentCodec.ReadAsync(
+            stream,
+            CancellationToken.None);
+
+        Assert.Equal(expected, actual);
+        Assert.Equal(
+            ReconnectCarrierAttachmentCodec.EncodedBytes,
+            stream.Length);
+    }
+    [Fact]
+    public void Signed_hellos_bind_the_complete_reconnect_route()
+    {
+        using var nodeSigning = EcdsaEndpointSigningKey.Create("node");
+        using var nodeEphemeral = ECDiffieHellman.Create(
+            ECCurve.NamedCurves.nistP256);
+        var binding = ReconnectBinding();
+        var hello = Hello(
+            Guid.NewGuid(),
+            binding.NodeIncarnationId,
+            4,
+            reconnectBinding: binding);
+        var nodeRecord = SecureTransportProtocol.CreateHandshake(
+            TransportEndpointRole.Node,
+            nodeSigning,
+            hello,
+            nodeEphemeral);
+        var expectedPeer = new ExpectedPeerIdentity(
+            nodeSigning.Identity,
+            nodeSigning.ExportPublicKey());
+
+        _ = SecureTransportProtocol.ParseAndVerifyHandshake(
+            nodeRecord,
+            TransportEndpointRole.Control,
+            expectedPeer,
+            hello);
+
+        var substitutions = new[]
+        {
+            binding with { RouteId = Guid.NewGuid() },
+            binding with { HostId = HostId.New() },
+            binding with { NodeIncarnationId = NodeIncarnationId.New() },
+            binding with { ReconnectGeneration = binding.ReconnectGeneration + 1 },
+            binding with { AttemptId = Guid.NewGuid() },
+            binding with { RdpSessionId = binding.RdpSessionId + 1 },
+            binding with
+            {
+                CarrierTranscriptSha256 = Convert.ToHexString(
+                    RandomNumberGenerator.GetBytes(32))
+            }
+        };
+        foreach (var substitution in substitutions)
+        {
+            var substituted = hello with
+            {
+                NodeIncarnationId = substitution.NodeIncarnationId,
+                ReconnectBinding = substitution
+            };
+            var error = Assert.Throws<SecureHandshakeException>(() =>
+                SecureTransportProtocol.ParseAndVerifyHandshake(
+                    nodeRecord,
+                    TransportEndpointRole.Control,
+                    expectedPeer,
+                    substituted));
+            Assert.Equal(
+                SecureHandshakeError.SessionBindingMismatch,
+                error.Error);
+        }
+    }
+
+    [Fact]
+    public void Signed_hello_rejects_reconnect_binding_downgrade()
+    {
+        using var nodeSigning = EcdsaEndpointSigningKey.Create("node");
+        using var nodeEphemeral = ECDiffieHellman.Create(
+            ECCurve.NamedCurves.nistP256);
+        var binding = ReconnectBinding();
+        var boundHello = Hello(
+            Guid.NewGuid(),
+            binding.NodeIncarnationId,
+            4,
+            reconnectBinding: binding);
+        var unboundHello = boundHello with { ReconnectBinding = null };
+        var unboundRecord = SecureTransportProtocol.CreateHandshake(
+            TransportEndpointRole.Node,
+            nodeSigning,
+            unboundHello,
+            nodeEphemeral);
+
+        var error = Assert.Throws<SecureHandshakeException>(() =>
+            SecureTransportProtocol.ParseAndVerifyHandshake(
+                unboundRecord,
+                TransportEndpointRole.Control,
+                new(
+                    nodeSigning.Identity,
+                    nodeSigning.ExportPublicKey()),
+                boundHello));
+
+        Assert.Equal(
+            SecureHandshakeError.SessionBindingMismatch,
+            error.Error);
+    }
+    [Fact]
     public void Handshake_and_frame_parsers_enforce_bounds()
     {
         var oversized = new byte[
@@ -203,11 +318,91 @@ public sealed class SecureTransportProtocolTests
             SecureTransportProtocol.DeserializeFrame(serialized));
     }
 
+    [Fact]
+    public async Task Carrier_control_protocol_roundtrips_two_typed_phases()
+    {
+        var attemptId = Guid.NewGuid();
+        var relayReady = ReconnectCarrierControlMessage.RelayReady(
+            attemptId);
+        var authenticated =
+            ReconnectCarrierControlMessage.SecureSessionAuthenticated(
+                attemptId);
+        await using var stream = new MemoryStream();
+
+        await ReconnectCarrierControlMessageCodec.WriteAsync(
+            stream,
+            relayReady);
+        await ReconnectCarrierControlMessageCodec.WriteAsync(
+            stream,
+            authenticated);
+        stream.Position = 0;
+
+        Assert.Equal(
+            relayReady,
+            await ReconnectCarrierControlMessageCodec.ReadAsync(stream));
+        Assert.Equal(
+            authenticated,
+            await ReconnectCarrierControlMessageCodec.ReadAsync(stream));
+    }
+
+    [Fact]
+    public async Task Carrier_control_protocol_roundtrips_typed_failure()
+    {
+        var failure = ReconnectCarrierControlMessage.Failed(
+            Guid.NewGuid(),
+            ReconnectCarrierFailure.SessionAuthenticationFailed);
+        await using var stream = new MemoryStream();
+
+        await ReconnectCarrierControlMessageCodec.WriteAsync(
+            stream,
+            failure);
+        stream.Position = 0;
+
+        Assert.Equal(
+            failure,
+            await ReconnectCarrierControlMessageCodec.ReadAsync(stream));
+        Assert.Throws<ArgumentException>(() =>
+            new ReconnectCarrierControlMessage(
+                failure.AttemptId,
+                ReconnectCarrierControlPhase.Failed,
+                ReconnectCarrierFailure.None).Validate());
+    }
+    [Fact]
+    public async Task Retained_1_0_23_carrier_attachment_roundtrips_opaquely()
+    {
+        var attachment = new RetainedV1CarrierAttachment(
+            Guid.NewGuid(),
+            HostId.New(),
+            NodeIncarnationId.New(),
+            42,
+            Guid.NewGuid(),
+            new(
+                "1.0.23",
+                FiniteNonceStateRetained: true))
+        {
+            RouteId = Guid.NewGuid()
+        };
+        await using var stream = new MemoryStream();
+
+        await RdpDvcControlCarrierAttachmentCodec.WriteAsync(
+            stream,
+            attachment);
+        stream.Position = 0;
+        var decoded = await RdpDvcControlCarrierAttachmentCodec
+            .ReadAsync(stream);
+
+        Assert.Equal(attachment, Assert.IsType<
+            RetainedV1CarrierAttachment>(decoded));
+        Assert.Equal(
+            RdpDvcControlCarrierProtocol.RetainedV1,
+            decoded.Protocol);
+    }
     private static SessionHello Hello(
         Guid id,
         NodeIncarnationId incarnation,
         int maximumBufferedFrames,
-        int maximumPayloadBytes = 1024) =>
+        int maximumPayloadBytes = 1024,
+        ReconnectTransportBinding? reconnectBinding = null) =>
         new(
             id,
             incarnation,
@@ -217,8 +412,18 @@ public sealed class SecureTransportProtocolTests
             new HashSet<string>(),
             new Dictionary<StreamKind, long>(),
             new TransportLimits(
-                maximumPayloadBytes, maximumBufferedFrames));
+                maximumPayloadBytes, maximumBufferedFrames),
+            reconnectBinding);
 
+    private static ReconnectTransportBinding ReconnectBinding() =>
+        new(
+            2,
+            HostId.New(),
+            NodeIncarnationId.New(),
+            19,
+            Guid.NewGuid(),
+            42,
+            Convert.ToHexString(RandomNumberGenerator.GetBytes(32)));
     private static TransportFrame Frame(
         SessionHello hello,
         StreamKind kind,

@@ -151,10 +151,10 @@ public sealed class LocalStackObjectStoreTests
     {
         var relative = Metadata("relative/root");
         var credentialUri = Metadata("https://host/container?sig=secret");
-        var wrongKind = new ExtensionMetadataDto(
+        var wrongKind = ExtensionMetadataDto.Create(
             "azure-blob",
             LocalStackObjectStoreConfiguration.MetadataVersion,
-            JsonSerializer.SerializeToElement(new { rootPath = Path.GetFullPath("objects") }));
+            new { rootPath = Path.GetFullPath("objects") });
 
         Assert.Throws<PortableStateException>(
             () => LocalStackObjectStoreConfiguration.FromCompositionMetadata(relative));
@@ -242,10 +242,11 @@ public sealed class LocalStackObjectStoreTests
             () => transfer.ReceiveAsync(descriptor, new OverwritingChunkSource(content)));
     }
 
-    private static ExtensionMetadataDto Metadata(string root) => new(
-        LocalStackObjectStoreConfiguration.MetadataKind,
-        LocalStackObjectStoreConfiguration.MetadataVersion,
-        JsonSerializer.SerializeToElement(new { rootPath = root }));
+    private static ExtensionMetadataDto Metadata(string root) =>
+        ExtensionMetadataDto.Create(
+            LocalStackObjectStoreConfiguration.MetadataKind,
+            LocalStackObjectStoreConfiguration.MetadataVersion,
+            new { rootPath = root });
 
     private sealed class LocalStoreFixture : IDisposable
     {

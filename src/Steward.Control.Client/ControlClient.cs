@@ -8,7 +8,7 @@ using Steward.Terminal.Abstractions;
 
 namespace Steward.Cli;
 
-public sealed record CreateWorkloadCommand(
+internal sealed record CreateWorkloadCommand(
     string WorkloadType,
     string PlannerKind,
     string PlannerVersion,
@@ -102,67 +102,67 @@ public sealed class ControlClient(
         CancellationToken cancellationToken = default) =>
         await tokens.GetTokenAsync(cancellationToken) is not null;
 
-    public Task<JsonElement> DoctorAsync(CancellationToken cancellationToken = default) =>
+    internal Task<JsonElement> DoctorAsync(CancellationToken cancellationToken = default) =>
         GetAsync(ControlRoutes.Doctor, cancellationToken);
 
-    public Task<JsonElement> OrchestrationDoctorAsync(CancellationToken cancellationToken = default) =>
+    internal Task<JsonElement> OrchestrationDoctorAsync(CancellationToken cancellationToken = default) =>
         GetAsync(ControlRoutes.OrchestrationDoctor, cancellationToken);
 
-    public Task<JsonElement> ExportBackupAsync(
+    internal Task<JsonElement> ExportBackupAsync(
         ExportBackupRequest request, CancellationToken cancellationToken = default) =>
         MutateAsync(HttpMethod.Post, "backups/export", request, cancellationToken);
 
-    public Task<JsonElement> ValidateBackupAsync(
+    internal Task<JsonElement> ValidateBackupAsync(
         ValidateBackupRequest request, CancellationToken cancellationToken = default) =>
         MutateAsync(HttpMethod.Post, "backups/validate", request, cancellationToken);
 
-    public Task<JsonElement> RestoreBackupAsync(
+    internal Task<JsonElement> RestoreBackupAsync(
         RestoreBackupRequest request, CancellationToken cancellationToken = default) =>
         MutateAsync(HttpMethod.Post, "backups/restore", request, cancellationToken);
 
-    public Task<JsonElement> CreateWorkloadAsync(
+    internal Task<JsonElement> CreateWorkloadAsync(
         CreateWorkloadCommand command,
         CancellationToken cancellationToken = default) =>
         SendAsync(HttpMethod.Post, "workload-drafts", command, cancellationToken,
             command.IdempotencyKey);
 
-    public Task<JsonElement> SubmitWorkloadAsync(
+    internal Task<JsonElement> SubmitWorkloadAsync(
         SubmitWorkloadRequest request,
         CancellationToken cancellationToken = default) =>
         SendAsync(HttpMethod.Post, "workloads", request, cancellationToken, request.IdempotencyKey);
 
-    public Task<JsonElement> GetWorkloadAsync(
+    internal Task<JsonElement> GetWorkloadAsync(
         WorkloadId workloadId,
         CancellationToken cancellationToken = default) =>
         GetAsync($"workloads/{workloadId}", cancellationToken);
 
-    public Task<JsonElement> CancelWorkloadAsync(
+    internal Task<JsonElement> CancelWorkloadAsync(
         WorkloadId workloadId,
         CancellationToken cancellationToken = default) =>
         MutateAsync(HttpMethod.Post, $"workloads/{workloadId}/cancel", null, cancellationToken);
 
-    public Task<JsonElement> GetTaskAsync(TaskId id, CancellationToken cancellationToken = default) =>
+    internal Task<JsonElement> GetTaskAsync(TaskId id, CancellationToken cancellationToken = default) =>
         GetAsync($"tasks/{id}", cancellationToken);
 
-    public Task<JsonElement> ReadTaskEventsAsync(
+    internal Task<JsonElement> ReadTaskEventsAsync(
         TaskId id, long after, int limit, CancellationToken cancellationToken = default) =>
         GetAsync(ControlRoutes.TaskEvents(id, after, limit), cancellationToken);
 
-    public Task<JsonElement> RetryTaskAsync(
+    internal Task<JsonElement> RetryTaskAsync(
         WorkloadId workload, TaskId task, CancellationToken cancellationToken = default) =>
         MutateAsync(HttpMethod.Post, $"workloads/{workload}/tasks/{task}/retry", null, cancellationToken);
 
-    public Task<JsonElement> ResolveTaskRecoveryAbsentAsync(
+    internal Task<JsonElement> ResolveTaskRecoveryAbsentAsync(
         WorkloadId workload, TaskId task, int generation,
         CancellationToken cancellationToken = default) =>
         MutateAsync(HttpMethod.Post,
             $"workloads/{workload}/tasks/{task}/recovery/absent/{generation}", null, cancellationToken);
 
-    public Task<JsonElement> GetAttemptAsync(
+    internal Task<JsonElement> GetAttemptAsync(
         TaskAttemptId id, CancellationToken cancellationToken = default) =>
         GetAsync($"attempts/{id}", cancellationToken);
 
-    public Task<JsonElement> GetArtifactAsync(
+    internal Task<JsonElement> GetArtifactAsync(
         PortableObjectId id, CancellationToken cancellationToken = default) =>
         GetAsync($"artifacts/{id}", cancellationToken);
 
@@ -222,10 +222,10 @@ public sealed class ControlClient(
             response.Content.Headers.ContentLength);
     }
 
-    public Task<JsonElement> ListPoolsAsync(CancellationToken cancellationToken = default) =>
+    internal Task<JsonElement> ListPoolsAsync(CancellationToken cancellationToken = default) =>
         GetAsync(ControlRoutes.Pools, cancellationToken);
 
-    public async Task<JsonElement> GetPoolAsync(
+    internal async Task<JsonElement> GetPoolAsync(
         PoolId id, CancellationToken cancellationToken = default)
     {
         var pools = await ListPoolsAsync(cancellationToken);
@@ -239,24 +239,24 @@ public sealed class ControlClient(
         throw new ControlApiException(404, "", "NotFound", "The Pool was not found.");
     }
 
-    public Task<JsonElement> RegisterPoolAsync(
+    internal Task<JsonElement> RegisterPoolAsync(
         PoolRegistration registration, CancellationToken cancellationToken = default) =>
         MutateAsync(HttpMethod.Post, ControlRoutes.Pools, registration, cancellationToken);
 
-    public Task<JsonElement> ReconcilePoolAsync(
+    internal Task<JsonElement> ReconcilePoolAsync(
         PoolId id, ReconcilePoolRequest request, CancellationToken cancellationToken = default) =>
         MutateAsync(HttpMethod.Post, ControlRoutes.PoolReconcile(id), request, cancellationToken);
 
-    public Task<JsonElement> ListHostsAsync(CancellationToken cancellationToken = default) =>
+    internal Task<JsonElement> ListHostsAsync(CancellationToken cancellationToken = default) =>
         GetAsync(ControlRoutes.Hosts, cancellationToken);
 
-    public Task<JsonElement> GetHostAsync(HostId id, CancellationToken cancellationToken = default) =>
+    internal Task<JsonElement> GetHostAsync(HostId id, CancellationToken cancellationToken = default) =>
         GetAsync(ControlRoutes.Host(id), cancellationToken);
 
-    public Task<JsonElement> InspectHostAsync(HostId id, CancellationToken cancellationToken = default) =>
+    internal Task<JsonElement> InspectHostAsync(HostId id, CancellationToken cancellationToken = default) =>
         GetAsync(ControlRoutes.HostProvider(id), cancellationToken);
 
-    public Task<JsonElement> StartHostAsync(
+    internal Task<JsonElement> StartHostAsync(
         HostId id,
         CancellationToken cancellationToken = default,
         NodeIncarnationId? expectedIncarnation = null) =>
@@ -266,7 +266,7 @@ public sealed class ControlClient(
             null,
             cancellationToken);
 
-    public Task<JsonElement> DrainHostAsync(
+    internal Task<JsonElement> DrainHostAsync(
         HostId id,
         bool force,
         CancellationToken cancellationToken = default,
@@ -275,7 +275,7 @@ public sealed class ControlClient(
                 id, "drain", force, expectedIncarnation),
             null, cancellationToken);
 
-    public Task<JsonElement> StopHostAsync(
+    internal Task<JsonElement> StopHostAsync(
         HostId id,
         bool force,
         CancellationToken cancellationToken = default,
@@ -284,7 +284,7 @@ public sealed class ControlClient(
                 id, "stop", force, expectedIncarnation),
             null, cancellationToken);
 
-    public Task<JsonElement> RecreateHostAsync(
+    internal Task<JsonElement> RecreateHostAsync(
         HostId id,
         bool force,
         CancellationToken cancellationToken = default,
@@ -293,7 +293,7 @@ public sealed class ControlClient(
                 id, "recreate", force, expectedIncarnation),
             null, cancellationToken);
 
-    public Task<JsonElement> DeleteHostAsync(
+    internal Task<JsonElement> DeleteHostAsync(
         HostId id,
         bool force,
         CancellationToken cancellationToken = default,
@@ -302,89 +302,89 @@ public sealed class ControlClient(
                 id, force, expectedIncarnation),
             null, cancellationToken);
 
-    public Task<JsonElement> ListNodesAsync(CancellationToken cancellationToken = default) =>
+    internal Task<JsonElement> ListNodesAsync(CancellationToken cancellationToken = default) =>
         GetAsync(ControlRoutes.Nodes, cancellationToken);
 
-    public Task<JsonElement> RegisterNodeAsync(
+    internal Task<JsonElement> RegisterNodeAsync(
         RegisterNodeRequest request, CancellationToken cancellationToken = default) =>
         MutateAsync(HttpMethod.Post, "nodes", request, cancellationToken);
 
-    public Task<JsonElement> CreateAgentAsync(
+    internal Task<JsonElement> CreateAgentAsync(
         CreateAgentRequest request, CancellationToken cancellationToken = default) =>
         MutateAsync(HttpMethod.Post, "agents", request, cancellationToken);
 
-    public Task<JsonElement> GetAgentAsync(
+    internal Task<JsonElement> GetAgentAsync(
         StewardAgentId id, CancellationToken cancellationToken = default) =>
         GetAsync($"agents/{id}", cancellationToken);
 
-    public Task<JsonElement> SubmitAgentTurnAsync(
+    internal Task<JsonElement> SubmitAgentTurnAsync(
         StewardAgentId id, SubmitAgentTurnRequest request,
         CancellationToken cancellationToken = default) =>
         MutateAsync(HttpMethod.Post, $"agents/{id}/turns", request, cancellationToken);
 
-    public Task<JsonElement> CancelAgentTurnAsync(
+    internal Task<JsonElement> CancelAgentTurnAsync(
         StewardAgentId agent, AgentTurnId turn,
         CancellationToken cancellationToken = default) =>
         MutateAsync(HttpMethod.Post, $"agents/{agent}/turns/{turn}/cancel", null, cancellationToken);
 
-    public Task<JsonElement> RunNextAgentTurnAsync(
+    internal Task<JsonElement> RunNextAgentTurnAsync(
         StewardAgentId id, CancellationToken cancellationToken = default) =>
         MutateAsync(HttpMethod.Post, $"agents/{id}/run-next", null, cancellationToken);
 
-    public Task<JsonElement> ReadAgentNotificationsAsync(
+    internal Task<JsonElement> ReadAgentNotificationsAsync(
         StewardAgentId id, long after, int limit,
         CancellationToken cancellationToken = default) =>
         GetAsync($"agents/{id}/notifications?after={after}&limit={limit}", cancellationToken);
 
-    public Task<JsonElement> AcknowledgeAgentNotificationsAsync(
+    internal Task<JsonElement> AcknowledgeAgentNotificationsAsync(
         StewardAgentId id, long cursor, CancellationToken cancellationToken = default) =>
         MutateAsync(HttpMethod.Post, $"agents/{id}/notifications/ack/{cursor}", null, cancellationToken);
 
-    public Task<JsonElement> MigrateAgentAsync(
+    internal Task<JsonElement> MigrateAgentAsync(
         StewardAgentId id, AgentMigrationRequest request,
         CancellationToken cancellationToken = default) =>
         MutateAsync(HttpMethod.Post, $"agents/{id}/migrate", request, cancellationToken);
 
-    public Task<JsonElement> ReadNotificationsAsync(
+    internal Task<JsonElement> ReadNotificationsAsync(
         string stream, long after, int limit, CancellationToken cancellationToken = default) =>
         GetAsync($"notifications/{Uri.EscapeDataString(stream)}?after={after}&limit={limit}",
             cancellationToken);
 
-    public Task<JsonElement> AcknowledgeNotificationsAsync(
+    internal Task<JsonElement> AcknowledgeNotificationsAsync(
         string stream, long cursor, CancellationToken cancellationToken = default) =>
         MutateAsync(HttpMethod.Post,
             $"notifications/{Uri.EscapeDataString(stream)}/ack/{cursor}", null, cancellationToken);
 
-    public Task<JsonElement> IssueTerminalAuthorityAsync(
+    internal Task<JsonElement> IssueTerminalAuthorityAsync(
         IssueTerminalAuthorityRequest request, CancellationToken token = default) =>
         MutateAsync(HttpMethod.Post, "terminals/authorities", request, token);
-    public Task<JsonElement> OpenTerminalAsync(
+    internal Task<JsonElement> OpenTerminalAsync(
         TerminalOpenRequest request, CancellationToken token = default) =>
         MutateAsync(HttpMethod.Post, "terminals/open", request, token);
-    public Task<JsonElement> GetTerminalAsync(
+    internal Task<JsonElement> GetTerminalAsync(
         TerminalSessionId id, CancellationToken token = default) =>
         GetAsync($"terminals/{id}", token);
-    public Task<JsonElement> SendTerminalInputAsync(
+    internal Task<JsonElement> SendTerminalInputAsync(
         TerminalSessionId id, TerminalInputRequest request, CancellationToken token = default) =>
         MutateAsync(HttpMethod.Post, $"terminals/{id}/input", request, token);
-    public Task<JsonElement> ResizeTerminalAsync(
+    internal Task<JsonElement> ResizeTerminalAsync(
         TerminalSessionId id, TerminalResizeRequest request, CancellationToken token = default) =>
         MutateAsync(HttpMethod.Post, $"terminals/{id}/resize", request, token);
-    public Task<JsonElement> ReadTerminalOutputAsync(
+    internal Task<JsonElement> ReadTerminalOutputAsync(
         TerminalSessionId id, TerminalOutputReadRequest request, CancellationToken token = default) =>
         MutateAsync(HttpMethod.Post, $"terminals/{id}/output", request, token);
-    public Task<JsonElement> CloseTerminalAsync(
+    internal Task<JsonElement> CloseTerminalAsync(
         TerminalSessionId id, TerminalCloseRequest request, CancellationToken token = default) =>
         MutateAsync(HttpMethod.Post, $"terminals/{id}/close", request, token);
-    public Task<JsonElement> RevokeTerminalAsync(
+    internal Task<JsonElement> RevokeTerminalAsync(
         TerminalSessionId id, CancellationToken token = default) =>
         MutateAsync(HttpMethod.Post, $"terminals/{id}/revoke", null, token);
 
-    public Task<JsonElement> GetOperationsAsync(
+    internal Task<JsonElement> GetOperationsAsync(
         CancellationToken cancellationToken = default) =>
         GetAsync(ControlRoutes.Operations, cancellationToken);
 
-    public Task<JsonElement> GetTerminalPolicyAsync(
+    internal Task<JsonElement> GetTerminalPolicyAsync(
         CancellationToken cancellationToken = default) =>
         GetAsync(ControlRoutes.TerminalPolicy, cancellationToken);
 

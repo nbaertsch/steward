@@ -78,7 +78,7 @@ public sealed class EvaluationIntegrationTests
         setupProfile = setupProfile with
         {
             RepositoryAcquisition = setupProfile.RepositoryAcquisition! with
-                { RequiredIdentityCapabilities = ["source.read"] },
+            { RequiredIdentityCapabilities = ["source.read"] },
             PackageAcquisition =
             [
                 setupProfile.PackageAcquisition!.Single() with
@@ -86,7 +86,7 @@ public sealed class EvaluationIntegrationTests
             ]
         };
         var harness = new HarborEvaluationAdapter(Profile(@"C:\tools\harbor.exe") with
-            { RequiredIdentityCapabilities = ["inference.use"] });
+        { RequiredIdentityCapabilities = ["inference.use"] });
         var plan = new HarborEvaluationPlanner(harness, setupProfile)
             .Plan(new(WorkloadId.New(), PlanRevisionId.New(), input));
         var sourceSetup = plan.Tasks.Single(x => x.LogicalKey == "setup/repository").Input.CanonicalJson;
@@ -158,7 +158,7 @@ public sealed class EvaluationIntegrationTests
     public void Missing_command_identity_capability_is_rejected()
     {
         var adapter = new HarborEvaluationAdapter(Profile(@"C:\tools\harbor.exe") with
-            { RequiredIdentityCapabilities = ["inference.use"] });
+        { RequiredIdentityCapabilities = ["inference.use"] });
         Assert.Throws<ArgumentException>(() => new HarborEvaluationPlanner(adapter, Setup())
             .Plan(new(WorkloadId.New(), PlanRevisionId.New(), Input([EvaluationCase.Create("a", new { })]))));
     }
@@ -373,18 +373,27 @@ public sealed class EvaluationIntegrationTests
         var node = plan.Tasks.Single(x => x.LogicalKey == "eval/runner-case");
         var output = JsonSerializer.Serialize(new
         {
-            type = "progress", caseId = "runner-case", fraction = .5
+            type = "progress",
+            caseId = "runner-case",
+            fraction = .5
         }) + "\n" + JsonSerializer.Serialize(new
         {
-            type = "result", caseId = "runner-case", attemptGeneration = 3, harnessVersion = "1.2",
-            commit = RepositoryCommit, datasetHash = DatasetHash, modelProfile = "inference-profile://test",
-            status = "passed", score = 1, artifacts = new[] { "artifacts/result.json" }
+            type = "result",
+            caseId = "runner-case",
+            attemptGeneration = 3,
+            harnessVersion = "1.2",
+            commit = RepositoryCommit,
+            datasetHash = DatasetHash,
+            modelProfile = "inference-profile://test",
+            status = "passed",
+            score = 1,
+            artifacts = new[] { "artifacts/result.json" }
         }) + "\n";
         var executor = new FakeProcessExecutor(output);
         var taskType = new EvaluationRunnerTaskType(executor, new FakeRunnerStateStore(), new FakeRateFeedbackSink());
         using var document = JsonDocument.Parse(node.Input.CanonicalJson);
         var context = new TaskExecutionContext(TaskAttemptId.New(), 3, Environment.CurrentDirectory,
-            document.RootElement.Clone());
+            TaskPayload.Parse(document.RootElement.GetRawText()));
 
         var execution = await taskType.StartAsync(context, default);
         var observation = await taskType.ObserveAsync(execution, default);
@@ -411,13 +420,15 @@ public sealed class EvaluationIntegrationTests
         var retryAfter = DateTimeOffset.UtcNow.AddMinutes(1);
         var executor = new FakeProcessExecutor(JsonSerializer.Serialize(new
         {
-            type = "failure", signal = "http429", retryAfter
+            type = "failure",
+            signal = "http429",
+            retryAfter
         }) + "\n");
         var sink = new FakeRateFeedbackSink();
         var taskType = new EvaluationRunnerTaskType(executor, new FakeRunnerStateStore(), sink);
         using var document = JsonDocument.Parse(node.Input.CanonicalJson);
         var context = new TaskExecutionContext(TaskAttemptId.New(), 0, Environment.CurrentDirectory,
-            document.RootElement.Clone());
+            TaskPayload.Parse(document.RootElement.GetRawText()));
 
         var execution = await taskType.StartAsync(context, default);
         _ = await taskType.ObserveAsync(execution, default);
@@ -439,12 +450,13 @@ public sealed class EvaluationIntegrationTests
             .Single(x => x.LogicalKey == "eval/filtered");
         var executor = new FakeProcessExecutor(JsonSerializer.Serialize(new
         {
-            type = "failure", signal = "contentFilterBeforeEngagement"
+            type = "failure",
+            signal = "contentFilterBeforeEngagement"
         }) + "\n");
         var taskType = new EvaluationRunnerTaskType(executor, new FakeRunnerStateStore(), new FakeRateFeedbackSink());
         using var document = JsonDocument.Parse(node.Input.CanonicalJson);
         var context = new TaskExecutionContext(TaskAttemptId.New(), 0, Environment.CurrentDirectory,
-            document.RootElement.Clone());
+            TaskPayload.Parse(document.RootElement.GetRawText()));
 
         var execution = await taskType.StartAsync(context, default);
         _ = await taskType.ObserveAsync(execution, default);
@@ -614,8 +626,13 @@ public sealed class EvaluationIntegrationTests
         var parser = new JsonLinesEvaluationResultParser();
         var line = JsonSerializer.Serialize(new
         {
-            type = "result", caseId = "a", attemptGeneration = 1, harnessVersion = "wrong",
-            commit = RepositoryCommit, datasetHash = DatasetHash, modelProfile = "inference-profile://test",
+            type = "result",
+            caseId = "a",
+            attemptGeneration = 1,
+            harnessVersion = "wrong",
+            commit = RepositoryCommit,
+            datasetHash = DatasetHash,
+            modelProfile = "inference-profile://test",
             status = "passed"
         });
         Assert.Throws<FormatException>(() => parser.ParseResult(line,
@@ -628,7 +645,9 @@ public sealed class EvaluationIntegrationTests
         var parser = new JsonLinesEvaluationResultParser();
         Assert.Throws<FormatException>(() => parser.ParseProgress(JsonSerializer.Serialize(new
         {
-            type = "progress", caseId = "a", fraction = .5,
+            type = "progress",
+            caseId = "a",
+            fraction = .5,
             message = new string('x', EvaluationLimits.MaximumProgressMessageLength + 1)
         })));
         var context = new EvaluationResultContext(0, "1.2", RepositoryCommit, DatasetHash,
@@ -668,7 +687,7 @@ public sealed class EvaluationIntegrationTests
         var taskType = new EvaluationReducerTaskType(store);
         using var document = JsonDocument.Parse(node.Input.CanonicalJson);
         var context = new TaskExecutionContext(TaskAttemptId.New(), 0, Environment.CurrentDirectory,
-            document.RootElement.Clone());
+            TaskPayload.Parse(document.RootElement.GetRawText()));
 
         var execution = await taskType.StartAsync(context, default);
         var observation = await taskType.ObserveAsync(execution, default);
@@ -765,13 +784,20 @@ public sealed class EvaluationIntegrationTests
             .Single(x => x.LogicalKey == $"eval/{caseId}");
         using var document = JsonDocument.Parse(node.Input.CanonicalJson);
         var context = new TaskExecutionContext(TaskAttemptId.New(), generation, Environment.CurrentDirectory,
-            document.RootElement.Clone());
+            TaskPayload.Parse(document.RootElement.GetRawText()));
         var output = JsonSerializer.Serialize(new { type = "progress", caseId, fraction = .25 }) + "\n" +
             JsonSerializer.Serialize(new
             {
-                type = "result", caseId, attemptGeneration = generation, harnessVersion = "1.2",
-                commit = RepositoryCommit, datasetHash = DatasetHash, modelProfile = "inference-profile://test",
-                status = "passed", score = 1, artifacts = new[] { $"artifacts/{caseId}.json" }
+                type = "result",
+                caseId,
+                attemptGeneration = generation,
+                harnessVersion = "1.2",
+                commit = RepositoryCommit,
+                datasetHash = DatasetHash,
+                modelProfile = "inference-profile://test",
+                status = "passed",
+                score = 1,
+                artifacts = new[] { $"artifacts/{caseId}.json" }
             }) + "\n";
         return (node, context, output);
     }
@@ -888,19 +914,19 @@ public sealed class EvaluationIntegrationTests
     }
 
     private sealed class RecordingResultWriter : IEvaluationTaskResultWriter
-        {
-            public TaskId? TaskId { get; private set; }
-            public EvaluationCaseResult? Result { get; private set; }
+    {
+        public TaskId? TaskId { get; private set; }
+        public EvaluationCaseResult? Result { get; private set; }
 
-            public ValueTask RecordTaskResultAsync(
-                TaskId taskId,
-                EvaluationCaseResult result,
-                CancellationToken cancellationToken)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                TaskId = taskId;
-                Result = result;
-                return ValueTask.CompletedTask;
+        public ValueTask RecordTaskResultAsync(
+            TaskId taskId,
+            EvaluationCaseResult result,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            TaskId = taskId;
+            Result = result;
+            return ValueTask.CompletedTask;
         }
     }
 

@@ -9,8 +9,10 @@
     <Project Path="src/Steward.ConnectionHost.Windows/Steward.ConnectionHost.Windows.csproj" />
     <Project Path="src/Steward.Desktop.Windows/Steward.Desktop.Windows.csproj" />
     <Project Path="src/Steward.Domain/Steward.Domain.csproj" />
+    <Project Path="src/Steward.Endpoint.Provisioner/Steward.Endpoint.Provisioner.csproj" />
     <Project Path="src/Steward.DevBox.Windows/Steward.DevBox.Windows.csproj" />
     <Project Path="src/Steward.HandleKeeper/Steward.HandleKeeper.csproj" />
+    <Project Path="src/Steward.Maintenance.Windows/Steward.Maintenance.Windows.csproj" />
     <Project Path="src/Steward.Mcp/Steward.Mcp.csproj" />
     <Project Path="src/Steward.Node/Steward.Node.csproj" />
     <Project Path="src/Steward.Node.Host/Steward.Node.Host.csproj" />
@@ -25,6 +27,7 @@
     <Project Path="src/Steward.RdpDvc.Client.Windows/Steward.RdpDvc.Client.Windows.csproj" />
     <Project Path="src/Steward.RdpDvc.Server.Windows/Steward.RdpDvc.Server.Windows.csproj" />
     <Project Path="src/Steward.Scheduling/Steward.Scheduling.csproj" />
+    <Project Path="src/Steward.Sqlite/Steward.Sqlite.csproj" />
     <Project Path="src/Steward.Stack.Local/Steward.Stack.Local.csproj" />
     <Project Path="src/Steward.Tasks.Abstractions/Steward.Tasks.Abstractions.csproj" />
     <Project Path="src/Steward.Tasks.Compose/Steward.Tasks.Compose.csproj" />
@@ -39,6 +42,7 @@
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Steward.AgentFixture/Steward.AgentFixture.csproj" />
+    <Project Path="tests/Steward.Maintenance.Windows.Tests/Steward.Maintenance.Windows.Tests.csproj" />
     <Project Path="tests/Steward.Mcp.Tests/Steward.Mcp.Tests.csproj" />
     <Project Path="tests/Steward.Orchestration.Tests/Steward.Orchestration.Tests.csproj" />
     <Project Path="tests/Steward.Cli.Tests/Steward.Cli.Tests.csproj" />
@@ -49,6 +53,7 @@
     <Project Path="tests/Steward.DevBox.LiveAcceptance/Steward.DevBox.LiveAcceptance.csproj" />
     <Project Path="tests/Steward.Domain.Tests/Steward.Domain.Tests.csproj" />
     <Project Path="tests/Steward.EndToEnd.Tests/Steward.EndToEnd.Tests.csproj" />
+    <Project Path="tests/Steward.Endpoint.Provisioner.Tests/Steward.Endpoint.Provisioner.Tests.csproj" />
     <Project Path="tests/Steward.Evals.Tests/Steward.Evals.Tests.csproj" />
     <Project Path="tests/Steward.Integration.Tests/Steward.Integration.Tests.csproj" />
     <Project Path="tests/Steward.Agents.Tests/Steward.Agents.Tests.csproj" />
@@ -56,6 +61,7 @@
     <Project Path="tests/Steward.Rdp.Windows.Tests/Steward.Rdp.Windows.Tests.csproj" />
     <Project Path="tests/Steward.RdCore.Windows.Tests/Steward.RdCore.Windows.Tests.csproj" />
     <Project Path="tests/Steward.RdpDvc.LiveAcceptance/Steward.RdpDvc.LiveAcceptance.csproj" />
+    <Project Path="tests/Steward.RdpDvc.Server.Windows.Tests/Steward.RdpDvc.Server.Windows.Tests.csproj" />
     <Project Path="tests/Steward.Scheduling.Tests/Steward.Scheduling.Tests.csproj" />
     <Project Path="tests/Steward.Transport.Tests/Steward.Transport.Tests.csproj" />
     <Project Path="tests/Steward.Transport.Rdp.Windows.Tests/Steward.Transport.Rdp.Windows.Tests.csproj" />

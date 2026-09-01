@@ -1,8 +1,8 @@
+using System.Net;
+using System.Text;
 using Azure.Core;
 using Azure.Identity;
 using Steward.DevBox.Windows;
-using System.Net;
-using System.Text;
 
 namespace Steward.DevBox.Tests;
 

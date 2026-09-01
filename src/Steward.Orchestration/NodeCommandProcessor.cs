@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using Steward.Contracts;
 using Steward.Domain;
+using Steward.Maintenance.Windows;
 using Steward.Node;
 using Steward.Tasks.Abstractions;
 using Steward.Transport;
@@ -21,10 +22,12 @@ public sealed class NodeCommandProcessor : IAsyncDisposable
     private readonly ITaskPortablePublisher? portablePublisher;
     private readonly NodeTerminalCommandProcessor? terminal;
     private readonly INodeRateFeedbackSource? rateFeedback;
+    private readonly NodeMaintenanceCommandHandler? maintenance;
     private readonly IReadOnlyDictionary<StreamKind, IAuxiliaryTransportStreamHandler>
         auxiliaryHandlers;
     private readonly ConcurrentDictionary<TaskAttemptId, RunningAttempt> attempts = [];
     private readonly ConcurrentDictionary<CommandId, Task> commandTasks = [];
+    private readonly ConcurrentDictionary<Guid, Task> maintenanceTasks = [];
     private readonly ConcurrentDictionary<TaskAttemptId, byte> completedAttempts = [];
     private readonly SemaphoreSlim recoveryGate = new(1, 1);
     private readonly CancellationTokenSource lifetime = new();
@@ -40,7 +43,8 @@ public sealed class NodeCommandProcessor : IAsyncDisposable
         ITaskPortablePublisher? portablePublisher = null,
         NodeTerminalCommandProcessor? terminal = null,
         INodeRateFeedbackSource? rateFeedback = null,
-        IEnumerable<IAuxiliaryTransportStreamHandler>? auxiliaryHandlers = null)
+        IEnumerable<IAuxiliaryTransportStreamHandler>? auxiliaryHandlers = null,
+        NodeMaintenanceCommandHandler? maintenance = null)
     {
         this.journal = journal ?? throw new ArgumentNullException(nameof(journal));
         this.registry = registry ?? throw new ArgumentNullException(nameof(registry));
@@ -51,6 +55,7 @@ public sealed class NodeCommandProcessor : IAsyncDisposable
         this.portablePublisher = portablePublisher;
         this.terminal = terminal;
         this.rateFeedback = rateFeedback;
+        this.maintenance = maintenance;
         this.auxiliaryHandlers =
             AuxiliaryTransportStreamHandlers.Index(auxiliaryHandlers);
         if (this.observationInterval <= TimeSpan.Zero)
@@ -65,6 +70,8 @@ public sealed class NodeCommandProcessor : IAsyncDisposable
         await journal.BeginSessionAsync(
             connection.Session.SessionId, connection.Session.NodeIncarnationId, cancellationToken).ConfigureAwait(false);
         await RecoverDurableAttemptsAsync(cancellationToken).ConfigureAwait(false);
+        await RecoverDurableMaintenanceAsync(cancellationToken)
+            .ConfigureAwait(false);
 
         using var sessionCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var receive = ReceiveCommandsAsync(connection, sessionCancellation.Token);
@@ -95,8 +102,12 @@ public sealed class NodeCommandProcessor : IAsyncDisposable
         {
             var running = attempts.Values.Select(x => x.Completion).ToArray();
             var commands = commandTasks.Values.ToArray();
-            if (running.Length == 0 && commands.Length == 0) return;
-            await Task.WhenAll(running.Concat(commands)).WaitAsync(cancellationToken).ConfigureAwait(false);
+            var maintenanceOperations = maintenanceTasks.Values.ToArray();
+            if (running.Length == 0 && commands.Length == 0 &&
+                maintenanceOperations.Length == 0) return;
+            await Task.WhenAll(running.Concat(commands).Concat(
+                    maintenanceOperations))
+                .WaitAsync(cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -104,6 +115,7 @@ public sealed class NodeCommandProcessor : IAsyncDisposable
     {
         await foreach (var frame in connection.ReceiveAsync(cancellationToken).ConfigureAwait(false))
         {
+            var cursorAcceptedWithMaintenance = false;
             if (frame.Stream == StreamKind.Terminal)
             {
                 if (terminal is null)
@@ -142,6 +154,24 @@ public sealed class NodeCommandProcessor : IAsyncDisposable
                 case CancelTaskMessage cancel:
                     Track(cancel.Command.CommandId, ProcessCancelAsync(cancel));
                     break;
+                case LocalMaintenanceRequestMessage maintenanceRequest:
+                    if (maintenance is null)
+                        throw new OrchestrationMessageException(
+                            "Local maintenance capability is unavailable on this Node.");
+                    var accepted = await journal.AcceptMaintenanceAsync(
+                            maintenanceRequest.HostId,
+                            maintenanceRequest.NodeIncarnationId,
+                            maintenanceRequest.Request,
+                            frame.Cursor,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                    cursorAcceptedWithMaintenance = true;
+                    if (accepted.Delivery.State !=
+                        MaintenanceDeliveryState.Terminal)
+                        TrackMaintenance(
+                            accepted.Delivery.Key.OperationId,
+                            ProcessMaintenanceAsync(accepted.Delivery));
+                    break;
                 case FactAcknowledgementMessage acknowledgement:
                     await journal.AcknowledgeFactsAsync(
                         connection.Session.SessionId,
@@ -153,7 +183,12 @@ public sealed class NodeCommandProcessor : IAsyncDisposable
                     throw new OrchestrationMessageException(
                         $"Message '{decoded.Kind}' is not valid Control-to-Node traffic.");
             }
-            await journal.SetStreamCursorAsync(frame.Stream, frame.Cursor, cancellationToken).ConfigureAwait(false);
+            if (!cursorAcceptedWithMaintenance)
+                await journal.SetStreamCursorAsync(
+                        frame.Stream,
+                        frame.Cursor,
+                        cancellationToken)
+                    .ConfigureAwait(false);
         }
     }
 
@@ -189,6 +224,97 @@ public sealed class NodeCommandProcessor : IAsyncDisposable
                     payload), cancellationToken).ConfigureAwait(false);
                 cursor = fact.Sequence;
             }
+        }
+    }
+
+    private async Task RecoverDurableMaintenanceAsync(
+        CancellationToken cancellationToken)
+    {
+        if (maintenance is null)
+            return;
+        foreach (var delivery in await journal.ReadPendingMaintenanceAsync(
+                     cancellationToken).ConfigureAwait(false))
+            TrackMaintenance(
+                delivery.Key.OperationId,
+                ProcessMaintenanceAsync(delivery));
+    }
+
+    private async Task ProcessMaintenanceAsync(
+        JournaledMaintenanceDelivery delivery)
+    {
+        var inProgress = await journal.MarkMaintenanceInProgressAsync(
+                delivery.Key,
+                lifetime.Token)
+            .ConfigureAwait(false);
+        if (inProgress.State == MaintenanceDeliveryState.Terminal)
+            return;
+        LocalMaintenanceResultFact result;
+        try
+        {
+            result = await maintenance!.HandleAsync(
+                    new LocalMaintenanceRequestMessage(
+                        1,
+                        delivery.HostId,
+                        delivery.NodeIncarnationId,
+                        delivery.Request),
+                    lifetime.Token)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (lifetime.IsCancellationRequested)
+        {
+            return;
+        }
+        catch (Exception exception) when (exception is
+            IOException or InvalidDataException or TimeoutException or
+            UnauthorizedAccessException)
+        {
+            return;
+        }
+        catch (OrchestrationMessageException)
+        {
+            result = new LocalMaintenanceResultFact(
+                1,
+                delivery.HostId,
+                delivery.NodeIncarnationId,
+                new MaintenanceResponse(
+                    MaintenanceContract.ProtocolVersion,
+                    delivery.Key.RequestId,
+                    delivery.Key.OperationId,
+                    MaintenanceOperationStatus.Failed,
+                    false,
+                    "local_response_invalid",
+                    "Local maintenance response was invalid.",
+                    delivery.Key.OperationDigest));
+        }
+        var payload = JsonSerializer.Serialize(result, StewardJson.Options);
+        await journal.RecordMaintenanceResultAsync(
+                delivery.Key,
+                result.Result,
+                OrchestrationMessageKinds.MaintenanceResult,
+                payload,
+                timeProvider.GetUtcNow(),
+                CancellationToken.None)
+            .ConfigureAwait(false);
+    }
+    private void TrackMaintenance(Guid operationId, Task task)
+    {
+        if (operationId == Guid.Empty ||
+            !maintenanceTasks.TryAdd(operationId, task))
+            return;
+        _ = RemoveMaintenanceWhenCompleteAsync(operationId, task);
+    }
+
+    private async Task RemoveMaintenanceWhenCompleteAsync(
+        Guid operationId,
+        Task task)
+    {
+        try
+        {
+            await task.ConfigureAwait(false);
+        }
+        finally
+        {
+            maintenanceTasks.TryRemove(operationId, out _);
         }
     }
 
@@ -289,10 +415,7 @@ public sealed class NodeCommandProcessor : IAsyncDisposable
             message.InputMediaType, message.InputSchemaVersion, message.InputJson);
         if (!string.Equals(canonicalInput.CanonicalJson, message.InputJson, StringComparison.Ordinal))
             throw new ArgumentException("Task input is not canonical.", nameof(message));
-        using var inputDocument = JsonDocument.Parse(
-            canonicalInput.CanonicalJson,
-            new JsonDocumentOptions { MaxDepth = Steward.Scheduling.TaskInput.MaximumDepth });
-        var input = inputDocument.RootElement.Clone();
+        var input = TaskPayload.Parse(canonicalInput.CanonicalJson);
         var validation = type.Validate(input);
         if (!validation.IsValid)
             throw new ArgumentException("TaskType validation rejected immutable input.", nameof(message));
@@ -918,8 +1041,9 @@ public sealed class NodeCommandProcessor : IAsyncDisposable
         new(identity.AttemptId, identity.TaskId, identity.Generation, identity.HostId,
             identity.NodeIncarnationId, state, certainty, identity.DelegationId, identity.CommandId,
             authorityExpiresAt,
-            new("orchestration", "1.0",
-                JsonSerializer.SerializeToElement(new { identity.WorkloadId }, StewardJson.Options)));
+            ExtensionMetadataDto.Create(
+                "orchestration", "1.0",
+                new { identity.WorkloadId }, StewardJson.Options));
 
     private static ResourceRequirements ToDomain(ResourceRequirementsDto value) =>
         new(value.CpuCores, value.MemoryBytes, value.DiskBytes, value.GpuCount,

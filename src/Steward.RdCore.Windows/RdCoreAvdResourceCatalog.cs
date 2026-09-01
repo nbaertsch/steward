@@ -54,219 +54,219 @@ public sealed class RdCoreAvdResourceCatalog : IDevBoxAvdResourceCatalog
         }
         using (session)
         {
-        options.Report("catalog-session-created");
-        var bindings = RdCoreReflectionBindings.For(session.Assembly);
-        options.Report("catalog-bindings-created");
-        object activityManager;
-        try
-        {
-            activityManager = session.CreateActivityManager(bindings);
-        }
-        catch (Exception exception)
-        {
-            options.Report(
-                $"catalog-activity-manager-failed-" +
-                $"{exception.GetType().Name}-" +
-                $"0x{exception.HResult:X8}" +
-                (exception is RdCoreLoadException load
-                    ? $"-{load.Code}" +
-                      (load.Detail is { Length: > 0 and <= 128 } detail &&
-                       detail.All(character =>
-                           char.IsAsciiLetterOrDigit(character) ||
-                           character is '.' or '-' or '_')
-                          ? $"-{detail}"
-                          : string.Empty)
-                    : exception is DllNotFoundException
-                      {
-                          InnerException: System.ComponentModel.Win32Exception
-                          win32
-                      }
-                        ? $"-win32-{win32.NativeErrorCode}"
-                        : string.Empty) +
-                ExceptionChain(exception) +
-                $"-reason-{SafeReason(exception.Message)}");
-            throw;
-        }
-        options.Report("catalog-activity-manager-created");
-        bindings.InitializeActivityManager(activityManager, options);
-        options.Report("catalog-activity-manager-initialized");
-        var downloader = ReflectionInvoke.Call(
-            bindings.CreateWorkspaceDownloader,
-            activityManager) ??
-            throw new InvalidOperationException(
-                "RDCore returned no workspace downloader.");
-        try
-        {
-            session.InitializeIconVector(bindings);
-            ConfigureWorkspace(
-                bindings,
-                activityManager,
-                downloader);
-        }
-        catch (Exception exception)
-        {
-            options.Report(
-                $"catalog-workspace-failed-" +
-                $"{exception.GetType().Name}-" +
-                $"0x{exception.HResult:X8}" +
-                ExceptionChain(exception) +
-                $"-reason-{SafeReason(exception.Message)}");
-            throw;
-        }
-        options.Report("catalog-workspace-configured");
+            options.Report("catalog-session-created");
+            var bindings = RdCoreReflectionBindings.For(session.Assembly);
+            options.Report("catalog-bindings-created");
+            object activityManager;
+            try
+            {
+                activityManager = session.CreateActivityManager(bindings);
+            }
+            catch (Exception exception)
+            {
+                options.Report(
+                    $"catalog-activity-manager-failed-" +
+                    $"{exception.GetType().Name}-" +
+                    $"0x{exception.HResult:X8}" +
+                    (exception is RdCoreLoadException load
+                        ? $"-{load.Code}" +
+                          (load.Detail is { Length: > 0 and <= 128 } detail &&
+                           detail.All(character =>
+                               char.IsAsciiLetterOrDigit(character) ||
+                               character is '.' or '-' or '_')
+                              ? $"-{detail}"
+                              : string.Empty)
+                        : exception is DllNotFoundException
+                        {
+                            InnerException: System.ComponentModel.Win32Exception
+                              win32
+                        }
+                            ? $"-win32-{win32.NativeErrorCode}"
+                            : string.Empty) +
+                    ExceptionChain(exception) +
+                    $"-reason-{SafeReason(exception.Message)}");
+                throw;
+            }
+            options.Report("catalog-activity-manager-created");
+            bindings.InitializeActivityManager(activityManager, options);
+            options.Report("catalog-activity-manager-initialized");
+            var downloader = ReflectionInvoke.Call(
+                bindings.CreateWorkspaceDownloader,
+                activityManager) ??
+                throw new InvalidOperationException(
+                    "RDCore returned no workspace downloader.");
+            try
+            {
+                session.InitializeIconVector(bindings);
+                ConfigureWorkspace(
+                    bindings,
+                    activityManager,
+                    downloader);
+            }
+            catch (Exception exception)
+            {
+                options.Report(
+                    $"catalog-workspace-failed-" +
+                    $"{exception.GetType().Name}-" +
+                    $"0x{exception.HResult:X8}" +
+                    ExceptionChain(exception) +
+                    $"-reason-{SafeReason(exception.Message)}");
+                throw;
+            }
+            options.Report("catalog-workspace-configured");
 
-        var resources = new List<DevBoxAvdResourceDescriptor>();
-        var sync = new object();
-        var acceptCallbacks = true;
-        var callbackErrors = new BoundedCallbackErrorSlot();
-        using var resourceSubscription = new ReflectionEventSubscription(
-            bindings.ResourceListAvailable,
-            downloader,
-            (_, args) =>
+            var resources = new List<DevBoxAvdResourceDescriptor>();
+            var sync = new object();
+            var acceptCallbacks = true;
+            var callbackErrors = new BoundedCallbackErrorSlot();
+            using var resourceSubscription = new ReflectionEventSubscription(
+                bindings.ResourceListAvailable,
+                downloader,
+                (_, args) =>
+                {
+                    lock (sync)
+                    {
+                        if (acceptCallbacks)
+                        {
+                            CaptureCallbackError(
+                                callbackErrors,
+                                () =>
+                                {
+                                    if (args is null)
+                                    {
+                                        throw new InvalidDataException(
+                                            "RDCore returned null resource-list " +
+                                            "event data.");
+                                    }
+
+                                    AddResources(
+                                        bindings,
+                                        args,
+                                        resources,
+                                        sync);
+                                });
+                        }
+                    }
+                });
+            using var completionSubscription = new ReflectionEventSubscription(
+                bindings.WorkspaceDownloadCompleted,
+                downloader,
+                (_, args) =>
+                {
+                    lock (sync)
+                    {
+                        if (acceptCallbacks)
+                        {
+                            CaptureCallbackError(
+                                callbackErrors,
+                                () =>
+                                {
+                                    if (args is null)
+                                    {
+                                        throw new InvalidDataException(
+                                            "RDCore returned null workspace-" +
+                                            "completion event data.");
+                                    }
+                                });
+                        }
+                    }
+                });
+            using var statusSubscription = new ReflectionEventSubscription(
+                bindings.WorkspaceDownloadStatusChanged,
+                downloader,
+                (_, args) =>
+                {
+                    if (args is null)
+                        return;
+                    var status = ReflectionInvoke.Get(
+                            bindings.WorkspaceDownloadCurrentStatus,
+                            args)
+                        ?.ToString();
+                    if (!string.IsNullOrWhiteSpace(status) &&
+                        status.All(character =>
+                            char.IsAsciiLetterOrDigit(character) ||
+                            character is '-' or '_'))
+                        options.Report(
+                            $"catalog-workspace-status-{status}");
+                });
+
+            var operation = ReflectionInvoke.Call(bindings.DownloadAsync, downloader) ??
+                throw new InvalidOperationException(
+                    "RDCore returned no workspace download operation.");
+            options.Report("catalog-download-started");
+            object? result;
+            try
+            {
+                result = await ReflectedAsyncOperation.AwaitAsync(
+                    operation,
+                    timeout.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+                when (callbackErrors.HasError)
+            {
+                try
+                {
+                    callbackErrors.ThrowIfCaptured();
+                }
+                catch (Exception exception)
+                {
+                    ReportFailure(
+                        "catalog-callback",
+                        exception);
+                    throw;
+                }
+                throw;
+            }
+            catch (Exception exception)
+            {
+                ReportFailure("catalog-download", exception);
+                throw;
+            }
+            finally
             {
                 lock (sync)
                 {
-                    if (acceptCallbacks)
-                    {
-                        CaptureCallbackError(
-                            callbackErrors,
-                            () =>
-                            {
-                                if (args is null)
-                                {
-                                    throw new InvalidDataException(
-                                        "RDCore returned null resource-list " +
-                                        "event data.");
-                                }
-
-                                AddResources(
-                                    bindings,
-                                    args,
-                                    resources,
-                                    sync);
-                            });
-                    }
+                    acceptCallbacks = false;
                 }
-            });
-        using var completionSubscription = new ReflectionEventSubscription(
-            bindings.WorkspaceDownloadCompleted,
-            downloader,
-            (_, args) =>
-            {
-                lock (sync)
-                {
-                    if (acceptCallbacks)
-                    {
-                        CaptureCallbackError(
-                            callbackErrors,
-                            () =>
-                            {
-                                if (args is null)
-                                {
-                                    throw new InvalidDataException(
-                                        "RDCore returned null workspace-" +
-                                        "completion event data.");
-                                }
-                            });
-                    }
-                }
-            });
-        using var statusSubscription = new ReflectionEventSubscription(
-            bindings.WorkspaceDownloadStatusChanged,
-            downloader,
-            (_, args) =>
-            {
-                if (args is null)
-                    return;
-                var status = ReflectionInvoke.Get(
-                        bindings.WorkspaceDownloadCurrentStatus,
-                        args)
-                    ?.ToString();
-                if (!string.IsNullOrWhiteSpace(status) &&
-                    status.All(character =>
-                        char.IsAsciiLetterOrDigit(character) ||
-                        character is '-' or '_'))
-                    options.Report(
-                        $"catalog-workspace-status-{status}");
-            });
+            }
 
-        var operation = ReflectionInvoke.Call(bindings.DownloadAsync, downloader) ??
-            throw new InvalidOperationException(
-                "RDCore returned no workspace download operation.");
-        options.Report("catalog-download-started");
-        object? result;
-        try
-        {
-            result = await ReflectedAsyncOperation.AwaitAsync(
-                operation,
-                timeout.Token).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException)
-            when (callbackErrors.HasError)
-        {
+            resourceSubscription.Dispose();
+            completionSubscription.Dispose();
+            statusSubscription.Dispose();
             try
             {
                 callbackErrors.ThrowIfCaptured();
             }
             catch (Exception exception)
             {
-                ReportFailure(
-                    "catalog-callback",
-                    exception);
+                ReportFailure("catalog-callback", exception);
                 throw;
             }
-            throw;
-        }
-        catch (Exception exception)
-        {
-            ReportFailure("catalog-download", exception);
-            throw;
-        }
-        finally
-        {
-            lock (sync)
-            {
-                acceptCallbacks = false;
-            }
-        }
-
-        resourceSubscription.Dispose();
-        completionSubscription.Dispose();
-        statusSubscription.Dispose();
-        try
-        {
-            callbackErrors.ThrowIfCaptured();
-        }
-        catch (Exception exception)
-        {
-            ReportFailure("catalog-callback", exception);
-            throw;
-        }
-        options.Report("catalog-download-completed");
-        if (result is null)
-        {
-            throw new InvalidDataException(
-                "RDCore returned no feed download result.");
-        }
-
-        var status = bindings.FeedDownloadStatus.GetValue(result)?.ToString();
-        options.Report($"catalog-feed-status-{status ?? "null"}");
-        if (status is not ("Success" or "NoResourcesPublished"))
-        {
-            throw new InvalidDataException(
-                "RDCore returned an unsuccessful or unknown feed status.");
-        }
-
-        lock (sync)
-        {
-            if (status == "NoResourcesPublished" && resources.Count != 0)
+            options.Report("catalog-download-completed");
+            if (result is null)
             {
                 throw new InvalidDataException(
-                    "RDCore returned resources with a no-resources status.");
+                    "RDCore returned no feed download result.");
             }
 
-            return resources.ToArray();
-        }
+            var status = bindings.FeedDownloadStatus.GetValue(result)?.ToString();
+            options.Report($"catalog-feed-status-{status ?? "null"}");
+            if (status is not ("Success" or "NoResourcesPublished"))
+            {
+                throw new InvalidDataException(
+                    "RDCore returned an unsuccessful or unknown feed status.");
+            }
+
+            lock (sync)
+            {
+                if (status == "NoResourcesPublished" && resources.Count != 0)
+                {
+                    throw new InvalidDataException(
+                        "RDCore returned resources with a no-resources status.");
+                }
+
+                return resources.ToArray();
+            }
         }
     }
 

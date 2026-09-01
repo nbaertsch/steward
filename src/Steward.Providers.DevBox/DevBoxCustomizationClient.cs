@@ -146,15 +146,7 @@ public sealed class DevBoxCustomizationClient
                 "A customization group must contain 1..16 tasks.",
                 nameof(tasks));
         var validated = tasks.Select(task => task.Validate()).ToArray();
-        var payload = JsonSerializer.SerializeToUtf8Bytes(
-            new ApplyRequest(
-                validated.Select(task => new TaskRequest(
-                    task.Name,
-                    task.DisplayName,
-                    task.Parameters,
-                    task.RunAs.ToString(),
-                    task.TimeoutInSeconds)).ToArray()),
-            Json);
+        var payload = SerializeApplyRequest(validated);
         if (payload.Length > 256 * 1024)
             throw new ArgumentException(
                 "Customization request exceeds its bound.",
@@ -171,6 +163,23 @@ public sealed class DevBoxCustomizationClient
             groupUri,
             requireTaskResults: false);
     }
+
+    internal static int MeasureApplyRequestBytes(
+        IReadOnlyList<DevBoxCustomizationTaskRequest> tasks) =>
+        SerializeApplyRequest(
+            tasks.Select(task => task.Validate()).ToArray()).Length;
+
+    private static byte[] SerializeApplyRequest(
+        IReadOnlyList<DevBoxCustomizationTaskRequest> tasks) =>
+        JsonSerializer.SerializeToUtf8Bytes(
+            new ApplyRequest(
+                tasks.Select(task => new TaskRequest(
+                    task.Name,
+                    task.DisplayName,
+                    task.Parameters,
+                    task.RunAs.ToString(),
+                    task.TimeoutInSeconds)).ToArray()),
+            Json);
 
     public async Task<DevBoxCustomizationGroupResult> GetAsync(
         string project,

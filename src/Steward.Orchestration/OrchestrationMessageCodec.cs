@@ -2,12 +2,13 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Steward.Contracts;
+using Steward.Maintenance.Windows;
 
 namespace Steward.Orchestration;
 
 public sealed class OrchestrationMessageException(string message) : InvalidOperationException(message);
 
-public static class OrchestrationMessageCodec
+internal static class OrchestrationMessageCodec
 {
     public const int MaximumPayloadBytes = 256 * 1024;
     public const int MaximumTextLength = 4096;
@@ -84,6 +85,10 @@ public static class OrchestrationMessageCodec
         OrchestrationMessageKinds.RateFeedback => Deserialize<RateFeedbackFact>(payload),
         OrchestrationMessageKinds.IdentityDeliveryRequest => Deserialize<DirectIdentityDeliveryRequest>(payload),
         OrchestrationMessageKinds.IdentityDelivery => Deserialize<EncryptedIdentityDelivery>(payload),
+        OrchestrationMessageKinds.MaintenanceRequest =>
+            Deserialize<LocalMaintenanceRequestMessage>(payload),
+        OrchestrationMessageKinds.MaintenanceResult =>
+            Deserialize<LocalMaintenanceResultFact>(payload),
         _ => throw new OrchestrationMessageException($"Unknown message discriminator '{kind}'.")
     };
 
@@ -111,6 +116,10 @@ public static class OrchestrationMessageCodec
         RateFeedbackFact => OrchestrationMessageKinds.RateFeedback,
         DirectIdentityDeliveryRequest => OrchestrationMessageKinds.IdentityDeliveryRequest,
         EncryptedIdentityDelivery => OrchestrationMessageKinds.IdentityDelivery,
+        LocalMaintenanceRequestMessage =>
+            OrchestrationMessageKinds.MaintenanceRequest,
+        LocalMaintenanceResultFact =>
+            OrchestrationMessageKinds.MaintenanceResult,
         _ => throw new OrchestrationMessageException($"CLR type '{value.GetType().Name}' is not a registered wire message.")
     };
 
@@ -233,6 +242,38 @@ public static class OrchestrationMessageCodec
                     message.Grant.Scopes.Any(string.IsNullOrWhiteSpace))
                     throw new OrchestrationMessageException(
                         "Identity delivery request is invalid or not exactly bound to its Task use.");
+                break;
+            case LocalMaintenanceRequestMessage message:
+                if (message.Version != 1 ||
+                    message.HostId == default ||
+                    message.NodeIncarnationId == default)
+                    throw new OrchestrationMessageException(
+                        "Local maintenance request identity is invalid.");
+                try
+                {
+                    MaintenanceContract.Validate(message.Request.Body);
+                    _ = MaintenanceContract.Serialize(message.Request);
+                }
+                catch (Exception exception) when (exception is
+                    MaintenanceProtocolException or InvalidDataException or
+                    FormatException)
+                {
+                    throw new OrchestrationMessageException(
+                        "Local maintenance request contract is invalid.");
+                }
+                break;
+            case LocalMaintenanceResultFact message:
+                if (message.Version != 1 ||
+                    message.HostId == default ||
+                    message.NodeIncarnationId == default ||
+                    message.Result.ProtocolVersion !=
+                        MaintenanceContract.ProtocolVersion ||
+                    message.Result.RequestId == Guid.Empty ||
+                    message.Result.OperationId == Guid.Empty ||
+                    message.Result.OperationDigest is null ||
+                    !Enum.IsDefined(message.Result.Status))
+                    throw new OrchestrationMessageException(
+                        "Local maintenance result identity is invalid.");
                 break;
             case EncryptedIdentityDelivery message:
                 if (message.RequestId == Guid.Empty ||

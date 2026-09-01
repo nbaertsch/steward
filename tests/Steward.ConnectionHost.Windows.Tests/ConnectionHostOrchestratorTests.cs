@@ -135,6 +135,130 @@ public sealed class ConnectionHostOrchestratorTests
     }
 
     [Fact]
+    public async Task Blocked_connect_does_not_block_another_connection()
+    {
+        var fixture = new HostFixture(enableConnections: true);
+        await using var host = fixture.CreateHost();
+        await host.InitializeAsync();
+        await fixture.ResolveAndPrepareAsync(host, "blocked");
+        await fixture.ResolveAndPrepareAsync(host, "independent");
+        fixture.Authorization.Register("blocked-token");
+        fixture.Runtime.BlockedConnectionId = "blocked";
+
+        var connect = host.ExecuteAsync(
+            fixture.Command(
+                ConnectionHostOperation.Connect,
+                "blocked",
+                token: "blocked-token"));
+        await fixture.Runtime.ConnectStarted.Task.WaitAsync(
+            TimeSpan.FromSeconds(5));
+        var sameConnectionStatus = host.ExecuteAsync(
+            fixture.Command(ConnectionHostOperation.Status, "blocked"));
+        var independentStatus = host.ExecuteAsync(
+            fixture.Command(ConnectionHostOperation.Status, "independent"));
+
+        try
+        {
+            var response = await independentStatus.WaitAsync(
+                TimeSpan.FromSeconds(1));
+
+            Assert.True(response.Accepted);
+            Assert.Equal("independent", response.Status!.ConnectionId);
+            Assert.False(connect.IsCompleted);
+            Assert.False(sameConnectionStatus.IsCompleted);
+        }
+        finally
+        {
+            fixture.Runtime.ReleaseBlockedConnect.TrySetResult(true);
+        }
+
+        var connected = await connect;
+        var orderedStatus = await sameConnectionStatus;
+        Assert.True(connected.Accepted);
+        Assert.Equal(
+            RdpDvcSessionState.ConnectedTransport,
+            orderedStatus.Status!.State);
+        Assert.Equal(
+            connected.Status!.ConnectionGeneration,
+            orderedStatus.Status.ConnectionGeneration);
+    }
+
+    [Fact]
+    public async Task Concurrent_connections_persist_a_complete_snapshot()
+    {
+        var metadata = new BlockingMetadataStore();
+        var fixture = new HostFixture(
+            enableConnections: false,
+            metadata: metadata);
+        await using var host = fixture.CreateHost();
+        await host.InitializeAsync();
+        metadata.BlockNextSave();
+
+        var first = host.ExecuteAsync(
+            fixture.Command(ConnectionHostOperation.Resolve, "first"));
+        await metadata.SaveStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var second = host.ExecuteAsync(
+            fixture.Command(ConnectionHostOperation.Resolve, "second"));
+
+        try
+        {
+            using var timeout = new CancellationTokenSource(
+                TimeSpan.FromSeconds(5));
+            ConnectionHostResponse status;
+            do
+            {
+                status = await host.ExecuteAsync(
+                    fixture.Command(ConnectionHostOperation.Status),
+                    timeout.Token);
+                if (status.Connections!.Count < 2)
+                    await Task.Delay(10, timeout.Token);
+            }
+            while (status.Connections!.Count < 2);
+
+            Assert.Equal(
+                ["first", "second"],
+                status.Connections.Select(value => value.ConnectionId));
+        }
+        finally
+        {
+            metadata.ReleaseSave.TrySetResult(true);
+        }
+
+        Assert.True((await first).Accepted);
+        Assert.True((await second).Accepted);
+        var persisted = await metadata.LoadAsync(CancellationToken.None);
+        Assert.Equal(
+            ["first", "second"],
+            persisted.Select(value => value.ConnectionId));
+    }
+
+    [Fact]
+    public async Task Dispose_cancels_work_and_disposes_runtime_once()
+    {
+        var fixture = new HostFixture(enableConnections: true);
+        var host = fixture.CreateHost();
+        await host.InitializeAsync();
+        await fixture.ResolveAndPrepareAsync(host, "blocked-dispose");
+        fixture.Authorization.Register("dispose-token");
+        fixture.Runtime.BlockedConnectionId = "blocked-dispose";
+        var connect = host.ExecuteAsync(
+            fixture.Command(
+                ConnectionHostOperation.Connect,
+                "blocked-dispose",
+                token: "dispose-token"));
+        await fixture.Runtime.ConnectStarted.Task.WaitAsync(
+            TimeSpan.FromSeconds(5));
+
+        await Task.WhenAll(
+            host.DisposeAsync().AsTask(),
+            host.DisposeAsync().AsTask());
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => connect);
+        Assert.Equal(1, fixture.Runtime.DisposeCount);
+    }
+
+    [Fact]
     public async Task Stale_generation_is_rejected_before_runtime_view()
     {
         var fixture = new HostFixture(enableConnections: true);
@@ -236,6 +360,134 @@ public sealed class ConnectionHostOrchestratorTests
         Assert.Equal(0, secondFixture.Runtime.ConnectCount);
     }
 
+    [Fact]
+    public async Task Crash_restart_refreshes_provider_material_and_recreates_desired_connection()
+    {
+        var directory = TestDirectory();
+        try
+        {
+            var store = new SqliteConnectionMetadataStore(
+                Path.Combine(directory, "connections.db"));
+            var desired = Desired("desired-restart");
+            await store.UpsertDesiredAsync(desired, CancellationToken.None);
+            await store.SaveAsync(
+                [Disconnected(desired.ConnectionId)],
+                CancellationToken.None);
+            var fixture = new HostFixture(
+                enableConnections: true,
+                metadata: store);
+            await using var host = fixture.CreateHost();
+
+            await host.InitializeAsync();
+            var status = await host.ExecuteAsync(
+                fixture.Command(
+                    ConnectionHostOperation.Status,
+                    desired.ConnectionId));
+
+            Assert.Equal(1, fixture.Runtime.ConnectCount);
+            Assert.Equal(
+                "CONNECTION_HOST_DESIRED_RECOVERED",
+                status.Status!.Code);
+            Assert.Contains(
+                fixture.Runtime.ProviderResources,
+                value => value.AbsoluteUri.Contains(
+                    "refreshed-provider",
+                    StringComparison.Ordinal));
+        Assert.Empty(await store.ReadPendingTransitionsAsync(
+                100,
+                CancellationToken.None));
+            await using var connection = new Microsoft.Data.Sqlite.SqliteConnection(
+                $"Data Source={Path.Combine(directory, "connections.db")}");
+            await connection.OpenAsync();
+            await using var attempts = connection.CreateCommand();
+            attempts.CommandText =
+                "SELECT COUNT(*) FROM connection_attempts WHERE state='Connected'";
+            Assert.Equal(
+                1L,
+                Convert.ToInt64(await attempts.ExecuteScalarAsync()));
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Restart_retains_desired_intent_when_silent_auth_is_refused()
+    {
+        var directory = TestDirectory();
+        try
+        {
+            var store = new SqliteConnectionMetadataStore(
+                Path.Combine(directory, "connections.db"));
+            var desired = Desired("silent-refusal");
+            await store.UpsertDesiredAsync(desired, CancellationToken.None);
+            await store.SaveAsync(
+                [Disconnected(desired.ConnectionId)],
+                CancellationToken.None);
+            var runtime = new FakeRuntime();
+            var authorization = new CountingAuthorization();
+            await using var host = new ConnectionHostOrchestrator(
+                new() { EnableLiveConnections = true },
+                new InteractionRequiredIdentity(),
+                new FakeResolver("signed-rdp"),
+                new CompatibleInspector(),
+                new ReadyRegistration(),
+                runtime,
+                authorization,
+                store,
+                new FakeRecoveryMaterialIssuer(authorization));
+
+            await host.InitializeAsync();
+            var status = await host.ExecuteAsync(new(
+                ConnectionHostProtocol.CurrentVersion,
+                Guid.NewGuid().ToString("N"),
+                ConnectionHostOperation.Status,
+                desired.ConnectionId));
+
+            Assert.Equal(0, runtime.ConnectCount);
+            Assert.Equal(
+                "CONNECTION_HOST_SILENT_AUTH_REFUSED",
+                status.Status!.Code);
+            Assert.Equal(
+                desired,
+                Assert.Single(await store.LoadDesiredAsync(
+                    CancellationToken.None)));
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    private static DesiredConnectionRecord Desired(string connectionId) =>
+        new(
+            ConnectionHostProtocol.CurrentVersion,
+            connectionId,
+            new("https://project-1.devcenter.azure.com/"),
+            "project-1",
+            "me",
+            "devbox-1",
+            Guid.NewGuid(),
+            Guid.NewGuid(),
+            Guid.NewGuid(),
+            true,
+            DateTimeOffset.UtcNow);
+
+    private static DurableConnectionMetadata Disconnected(
+        string connectionId) =>
+        new(
+            ConnectionHostProtocol.CurrentVersion,
+            connectionId,
+            RdpDvcSessionState.Disconnected,
+            null,
+            null,
+            false,
+            false,
+            "CONNECTION_HOST_RECOVERY_PENDING",
+            DateTimeOffset.UtcNow);
     [Fact]
     public async Task Closing_ui_preserves_the_transport()
     {
@@ -388,10 +640,14 @@ public sealed class ConnectionHostOrchestratorTests
             this.providerSecret = providerSecret;
             this.rdpSecret = rdpSecret;
             Runtime = runtime ?? new FakeRuntime();
+            Resolver = new FakeResolver(rdpSecret);
+            RecoveryIssuer = new FakeRecoveryMaterialIssuer(Authorization);
         }
 
         public FakeRuntime Runtime { get; }
+        public FakeResolver Resolver { get; }
         public CountingAuthorization Authorization { get; } = new();
+        public FakeRecoveryMaterialIssuer RecoveryIssuer { get; }
 
         public ConnectionHostOrchestrator CreateHost() =>
             new(
@@ -400,12 +656,13 @@ public sealed class ConnectionHostOrchestratorTests
                     EnableLiveConnections = enableConnections
                 },
                 new ReadyIdentity(),
-                new FakeResolver(rdpSecret),
+                Resolver,
                 new CompatibleInspector(),
                 new ReadyRegistration(),
                 Runtime,
                 Authorization,
-                metadata);
+                metadata,
+                RecoveryIssuer);
 
         public ConnectionHostCommand Command(
             ConnectionHostOperation operation,
@@ -476,14 +733,58 @@ public sealed class ConnectionHostOrchestratorTests
                     null));
     }
 
+    private sealed class InteractionRequiredIdentity :
+        IDevBoxConnectionIdentityGate
+    {
+        public Task<DevBoxConnectionIdentityStatus> StatusAsync(
+            CancellationToken cancellationToken) =>
+            Task.FromResult(new DevBoxConnectionIdentityStatus(
+                DevBoxConnectionIdentityConstants.CurrentVersion,
+                DevBoxConnectionIdentityConstants.ContextName,
+                DevBoxConnectionIdentityOutcome.InteractionRequired,
+                false,
+                "interaction-required",
+                null,
+                null,
+                null));
+    }
+
+    private sealed class FakeRecoveryMaterialIssuer(
+        CountingAuthorization authorization) :
+        IConnectionRecoveryMaterialIssuer
+    {
+        public ValueTask<ConnectionRecoveryMaterial> IssueAsync(
+            DesiredConnectionRecord desired,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var token = "recovery-token-" + Guid.NewGuid().ToString("N");
+            authorization.Register(token);
+            return ValueTask.FromResult(new ConnectionRecoveryMaterial(
+                token,
+                "recovery-evidence-" + Guid.NewGuid().ToString("N")));
+        }
+    }
     private sealed class FakeResolver(string content) :
-        IDevBoxConnectionResolver
+        IDevBoxConnectionResolver,
+        IDesiredDevBoxConnectionResolver
     {
         public Task<ISensitiveRdpConnectionMaterial> ResolveAsync(
             Uri providerResource,
             CancellationToken cancellationToken) =>
             Task.FromResult<ISensitiveRdpConnectionMaterial>(
                 new FakeMaterial(providerResource, content));
+
+        public Task<ISensitiveRdpConnectionMaterial> ResolveDesiredAsync(
+            DesiredConnectionRecord desired,
+            CancellationToken cancellationToken) =>
+            ResolveAsync(
+                new Uri(
+                    "ms-avd:connect?env=prod&preview=false" +
+                    "&resourceId=refreshed-provider" +
+                    "&username=user%40example.test&version=1" +
+                    "&workspaceId=workspace"),
+                cancellationToken);
     }
 
     private sealed class FakeMaterial(
@@ -562,7 +863,7 @@ public sealed class ConnectionHostOrchestratorTests
         }
     }
 
-    private sealed class FakeRuntime : IRdCoreConnectionRuntime
+    private sealed class FakeRuntime : IRdCoreConnectionRuntime, IAsyncDisposable
     {
         private readonly Dictionary<string, RdCoreConnectionRuntimeResult>
             active = new(StringComparer.Ordinal);
@@ -579,6 +880,11 @@ public sealed class ConnectionHostOrchestratorTests
         public int ViewCount { get; private set; }
         public int DisconnectCount { get; private set; }
         public List<Uri> ProviderResources { get; } = [];
+        public string? BlockedConnectionId { get; set; }
+        public TaskCompletionSource<bool> ConnectStarted { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<bool> ReleaseBlockedConnect { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public async Task<RdCoreConnectionRuntimeResult> ConnectAsync(
             RdCoreConnectionStartRequest request,
@@ -586,6 +892,14 @@ public sealed class ConnectionHostOrchestratorTests
         {
             ConnectCount++;
             ProviderResources.Add(request.ProviderResourceUri);
+            if (string.Equals(
+                    request.ConnectionId,
+                    BlockedConnectionId,
+                    StringComparison.Ordinal))
+            {
+                ConnectStarted.TrySetResult(true);
+                await ReleaseBlockedConnect.Task.WaitAsync(cancellationToken);
+            }
             using var content = new MemoryStream();
             await request.SignedRdpContent.CopyToAsync(
                 content,
@@ -646,6 +960,14 @@ public sealed class ConnectionHostOrchestratorTests
             return Task.CompletedTask;
         }
 
+        public int DisposeCount { get; private set; }
+
+        public ValueTask DisposeAsync()
+        {
+            DisposeCount++;
+            return ValueTask.CompletedTask;
+        }
+
         private static RdCoreConnectionRuntimeResult Result(
             string id,
             long generation,
@@ -675,6 +997,42 @@ public sealed class ConnectionHostOrchestratorTests
             new(RdCoreDvcEvidenceEvent.DvcHmacAuthenticated),
             new(RdCoreDvcEvidenceEvent.SecurePeerAuthenticated)
         ];
+    }
+
+    private sealed class BlockingMetadataStore : IConnectionMetadataStore
+    {
+        private readonly object synchronization = new();
+        private IReadOnlyList<DurableConnectionMetadata> values = [];
+        private int blockNextSave;
+
+        public TaskCompletionSource<bool> SaveStarted { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<bool> ReleaseSave { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public void BlockNextSave() =>
+            Interlocked.Exchange(ref blockNextSave, 1);
+
+        public Task<IReadOnlyList<DurableConnectionMetadata>> LoadAsync(
+            CancellationToken cancellationToken)
+        {
+            lock (synchronization)
+                return Task.FromResult(values);
+        }
+
+        public async Task SaveAsync(
+            IReadOnlyCollection<DurableConnectionMetadata> connections,
+            CancellationToken cancellationToken)
+        {
+            var snapshot = connections.ToArray();
+            if (Interlocked.Exchange(ref blockNextSave, 0) == 1)
+            {
+                SaveStarted.TrySetResult(true);
+                await ReleaseSave.Task.WaitAsync(cancellationToken);
+            }
+            lock (synchronization)
+                values = snapshot;
+        }
     }
 
     private sealed class MemoryMetadataStore : IConnectionMetadataStore

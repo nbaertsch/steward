@@ -2,6 +2,8 @@ using Steward.Transport.Rdp.Windows;
 
 namespace Steward.RdpDvc.Client.Windows;
 
+public interface IEmbeddedDvcPlugin;
+
 public static class EmbeddedDvcPluginHost
 {
     private static readonly object Sync = new();
@@ -9,7 +11,7 @@ public static class EmbeddedDvcPluginHost
     private static ClientDvcBroker? broker;
     private static StewardDvcPlugin? plugin;
 
-    public static object Start()
+    public static IEmbeddedDvcPlugin Start()
     {
         lock (Sync)
         {
@@ -24,7 +26,9 @@ public static class EmbeddedDvcPluginHost
                 AuthenticatedRdpDvcEvidencePublisher.FromProtectedFile(
                     configuration.EvidencePipeName,
                     configuration.EvidenceKeyFile);
-            broker = new ClientDvcBroker(log);
+            broker = new ClientDvcBroker(
+                log,
+                configuration.BrokerPipeName);
             var evidence = publisher.CreateLifecycleSession();
             evidence.PublishAsync(
                     RdpDvcEvidencePublicationEvent

@@ -122,7 +122,7 @@ public interface IStewardControlClient
         CancellationToken cancellationToken = default);
 }
 
-public sealed class StewardControlClient(ControlClient inner) : IStewardControlClient
+internal sealed class StewardControlClient(ControlClient inner) : IStewardControlClient
 {
     private static readonly JsonSerializerOptions HttpJson =
         CreateHttpJson();
@@ -339,10 +339,7 @@ public sealed class StewardControlClient(ControlClient inner) : IStewardControlC
                 "Steward.Control returned an empty terminal response.");
         if (response.Problem is not null)
             throw new TerminalException(response.Problem);
-        var snapshot = response.Snapshot is null
-            ? null
-            : TerminalWireCodec.FromElement<TerminalSessionSnapshot>(
-                response.Snapshot.Value);
+        var snapshot = response.Snapshot;
         return new(snapshot, response.Output ?? []);
     }
 

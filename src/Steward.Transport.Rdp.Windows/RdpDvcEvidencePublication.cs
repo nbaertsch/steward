@@ -24,17 +24,24 @@ public sealed record RdpDvcEvidenceRoute(
     Guid HostId,
     Guid NodeIncarnationId,
     int WtsSessionId,
-    Guid ConnectionNonce)
+    Guid ConnectionNonce,
+    int ProtocolVersion = 2)
 {
+    public RdpDvcRetainedV1EndpointState? RetainedV1Endpoint
+    { get; init; }
+
     public RdpDvcEvidenceRoute Validate()
     {
         if (SessionId == Guid.Empty ||
             HostId == Guid.Empty ||
             NodeIncarnationId == Guid.Empty ||
             WtsSessionId < 0 ||
-            ConnectionNonce == Guid.Empty)
+            ConnectionNonce == Guid.Empty ||
+            ProtocolVersion is not (1 or 2) ||
+            ProtocolVersion == 2 && RetainedV1Endpoint is not null)
             throw new ArgumentException(
                 "The DVC evidence route is invalid.");
+        _ = RetainedV1Endpoint?.Validate();
         return this;
     }
 
@@ -59,6 +66,25 @@ public sealed record RdpDvcEvidenceRoute(
             ConnectionNonce == other.ConnectionNonce;
     }
 
+    public bool MatchesAuthenticatedRoute(
+        RdpDvcEvidenceRoute authenticated)
+    {
+        ArgumentNullException.ThrowIfNull(authenticated);
+        _ = Validate();
+        _ = authenticated.ValidateBound();
+        return authenticated.ProtocolVersion == 2
+            ? ProtocolVersion == 2 &&
+              RetainedV1Endpoint is null &&
+              authenticated.RetainedV1Endpoint is null &&
+              SessionId == authenticated.SessionId &&
+              HostId == authenticated.HostId &&
+              NodeIncarnationId == authenticated.NodeIncarnationId
+            : ProtocolVersion == 1 &&
+              RetainedV1Endpoint ==
+                authenticated.RetainedV1Endpoint &&
+              HasSamePreauthorizedBase(authenticated) &&
+              (IsWtsWildcard || this == authenticated);
+    }
     public RdpDvcEvidenceRoute BindWtsSession(int wtsSessionId)
     {
         _ = Validate();
@@ -78,7 +104,8 @@ public sealed record RdpDvcEvidenceRoute(
             handshake.HostId,
             handshake.NodeIncarnationId,
             handshake.RdpSessionId,
-            handshake.Nonce).ValidateBound();
+            handshake.Nonce,
+            ProtocolVersion: 1).ValidateBound();
 
     internal static RdpDvcEvidenceRoute From(
         RdpDvcConnectionIdentity identity) =>
@@ -87,8 +114,10 @@ public sealed record RdpDvcEvidenceRoute(
             identity.HostId,
             identity.NodeIncarnationId,
             identity.RdpSessionId,
-            identity.ConnectionNonce).ValidateBound();
-
+            identity.IsReconnectV2
+                ? identity.AttemptId
+                : identity.ConnectionNonce,
+            identity.IsReconnectV2 ? 2 : 1).ValidateBound();
     public override string ToString() =>
         "RdpDvcEvidenceRoute { Redacted }";
 }
@@ -629,6 +658,29 @@ public sealed class RdpDvcEvidencePublisherSession
         }
     }
 
+    public void BindAuthenticatedReconnectRoute(
+        RdpDvcEvidenceRoute authenticatedRoute)
+    {
+        var bound = authenticatedRoute.ValidateBound();
+        if (bound.ProtocolVersion != 2)
+            throw new InvalidOperationException(
+                "Reconnect evidence requires protocol version two.");
+        gate.Wait();
+        try
+        {
+            if (ticket is not { } current)
+                throw new InvalidOperationException(
+                    "A lifecycle evidence publisher cannot bind a transport route.");
+            if (!current.Route.MatchesAuthenticatedRoute(bound))
+                throw new InvalidOperationException(
+                    "The authenticated reconnect route differs from its preauthorized ticket.");
+            ticket = current with { Route = bound };
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
     public void BindAuthenticatedRoute(
         RdpDvcEvidenceRoute authenticatedRoute)
     {

@@ -9,7 +9,7 @@ using Steward.Tasks.Abstractions;
 
 namespace Steward.Tasks.Agent;
 
-public sealed record AgentTurnTaskInput(
+internal sealed record AgentTurnTaskInput(
     StewardAgentId AgentId,
     AgentTurnId TurnId,
     string Text,
@@ -119,7 +119,7 @@ public sealed class AgentTurnStateStore
     }
 }
 
-public sealed class AgentTurnTaskType(
+internal sealed class AgentTurnTaskType(
     IProcessExecutor executor,
     AgentTurnStateStore store,
     string allowedExecutable,
@@ -130,7 +130,7 @@ public sealed class AgentTurnTaskType(
         TaskCapabilities.Execute | TaskCapabilities.Observe | TaskCapabilities.Cancel;
     public override InterruptionClass InterruptionClass => InterruptionClass.Restartable;
 
-    public override ValidationResult Validate(JsonElement input)
+    public override ValidationResult Validate(TaskPayload input)
     {
         try
         {
@@ -157,13 +157,21 @@ public sealed class AgentTurnTaskType(
             schema = "steward.agent-turn/1.0",
             agentId = value.AgentId.ToString(),
             turnId = value.TurnId.ToString(),
-            value.Text, value.Provenance, value.Context, value.Tools, value.Environment
+            value.Text,
+            value.Provenance,
+            value.Context,
+            value.Tools,
+            value.Environment
         }, new JsonSerializerOptions(JsonSerializerDefaults.Web));
         await File.WriteAllTextAsync(inputPath, request + Environment.NewLine, cancellationToken);
         return await executor.StartAsync(new(
             context.AttemptId, context.Generation, value.Executable, value.Arguments,
             context.Workspace, Path.Combine(context.Workspace, ".steward", "spool"),
-            value.MaximumOutputBytes, 256 * 1024 * 1024, StandardInputPath: inputPath), cancellationToken);
+            value.MaximumOutputBytes, 256 * 1024 * 1024,
+            StandardInputPath: inputPath,
+            Isolation: ProcessIsolationProfile.ForTask(
+                context,
+                ProcessIsolationCapability.Agent)), cancellationToken);
     }
 
     public override async ValueTask<ExecutionObservation> ObserveAsync(

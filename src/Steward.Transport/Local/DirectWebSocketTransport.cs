@@ -396,10 +396,9 @@ internal sealed class DirectWebSocketConnection : ITransportConnection
             while (_socket.State == WebSocketState.Open)
             {
                 ThrowIfExpired();
-                var record = await DirectWebSocketSession.RunWithTimeoutAsync(
-                    token => DirectWebSocketSession.ReceiveRecordAsync(
-                        _socket, _options.MaximumWireFrameBytes, token),
-                    _options.WireOperationTimeout,
+                var record = await DirectWebSocketSession.ReceiveRecordAsync(
+                    _socket,
+                    _options.MaximumWireFrameBytes,
                     cancellationToken);
                 var recordSequence = checked(++_receiveRecord);
                 if (recordSequence > _options.RekeyAfterFrames)
@@ -535,7 +534,8 @@ internal sealed class DirectWebSocketConnection : ITransportConnection
                     CancellationToken.None);
         }
         catch (Exception ex) when (
-            ex is WebSocketException or IOException or ObjectDisposedException or OperationCanceledException) { }
+            ex is WebSocketException or IOException or ObjectDisposedException or OperationCanceledException)
+        { }
         _socket.Dispose();
         _enqueueGate.Dispose();
         _lifetime.Dispose();

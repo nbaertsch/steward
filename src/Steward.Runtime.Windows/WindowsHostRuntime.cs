@@ -2,7 +2,7 @@ using Steward.Tasks.Abstractions;
 
 namespace Steward.Runtime.Windows;
 
-public sealed class WindowsHostRuntime(IProcessExecutor processes) : IHostRuntime
+internal sealed class WindowsHostRuntime(IProcessExecutor processes) : IHostRuntime
 {
     public HostRuntimeDescriptor Descriptor { get; } = new(
         "windows",

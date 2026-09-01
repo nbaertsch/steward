@@ -146,7 +146,8 @@ public sealed class ContractTests
     private static ExtensionMetadataDto Metadata(string value)
     {
         using var document = JsonDocument.Parse($"{{\"name\":\"{value}\"}}");
-        return new("neutral", "1.0.0", document.RootElement.Clone());
+        return ExtensionMetadataDto.Create(
+            "neutral", "1.0.0", document.RootElement.Clone());
     }
 
     private static void RoundTrip<T>(T value)

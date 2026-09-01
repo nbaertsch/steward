@@ -1,0 +1,53 @@
+$schema: "1.0"
+name: install-steward-endpoint
+description: Download, verify, and install the CI-attested Steward endpoint MSI.
+author: Steward Project
+command: .\Install-Steward.ps1 -ReleaseAssetUrl '{{releaseAssetUrl}}' -BootstrapEncryptionPublicKeyBase64 '{{bootstrapEncryptionPublicKeyBase64}}' -ControlSigningPublicKeyBase64 '{{controlSigningPublicKeyBase64}}' -ControlIdentity '{{controlIdentity}}' -NodeUserAccount '{{nodeUserAccount}}' -NodeUserSid '{{nodeUserSid}}'
+parameters:
+  releaseAssetUrl:
+    type: string
+    required: true
+    description: Short-lived private GitHub release asset URL generated immediately before execution.
+    validationRegex: "^https://release-assets\\.githubusercontent\\.com/[A-Za-z0-9._~:/?&=%+-]+$"
+    minLength: 64
+    maxLength: 4096
+  bootstrapEncryptionPublicKeyBase64:
+    type: string
+    required: true
+    description: Base64 DER RSA public key used to encrypt the bootstrap receipt.
+    validationRegex: "^[A-Za-z0-9+/]{300,1600}={0,2}$"
+    minLength: 300
+    maxLength: 1602
+  controlSigningPublicKeyBase64:
+    type: string
+    required: true
+    description: Base64 DER public key used to authenticate Control.
+    validationRegex: "^[A-Za-z0-9+/]{80,1600}={0,2}$"
+    minLength: 80
+    maxLength: 1602
+  controlIdentity:
+    type: string
+    required: true
+    description: Expected Steward Control transport identity.
+    validationRegex: "^[A-Za-z0-9._:@/-]{1,200}$"
+    minLength: 1
+    maxLength: 200
+  nodeUserAccount:
+    type: string
+    required: true
+    description: Assigned Dev Box user account used by at-logon endpoint tasks.
+    validationRegex: "^[A-Za-z0-9._@\\\\/-]{3,256}$"
+    minLength: 3
+    maxLength: 256
+  nodeUserSid:
+    type: string
+    required: true
+    description: Assigned Entra user cloud SID.
+    validationRegex: "^S-1-12-1-(\\d+-){2}\\d+-\\d+$"
+    minLength: 20
+    maxLength: 184
+timeout: 30
+keywords:
+  - steward
+  - endpoint
+  - dvc

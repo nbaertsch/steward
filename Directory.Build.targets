@@ -1,0 +1,7 @@
+<Project>
+  <ItemGroup Condition="'$(UsesStewardSqlite)' == 'true' and '$(MSBuildProjectName)' != 'Steward.Sqlite'">
+    <ProjectReference Include="$(MSBuildThisFileDirectory)src\Steward.Sqlite\Steward.Sqlite.csproj" />
+    <Compile Include="$(MSBuildThisFileDirectory)build\StewardSqliteProviderInitializer.cs"
+             Link="StewardSqliteProviderInitializer.cs" />
+  </ItemGroup>
+</Project>

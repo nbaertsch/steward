@@ -172,7 +172,7 @@ public sealed class TerminalApplicationService(
                 new TerminalGetCommand(id, Context(authority)), cancellationToken);
             if (current.Snapshot is { } snapshot)
             {
-                var value = TerminalWireCodec.FromElement<TerminalSessionSnapshot>(snapshot)!;
+                var value = snapshot;
                 if (value.State is TerminalSessionState.Open or TerminalSessionState.Opening)
                     await router.SendAsync(
                         authority.HostId, "close",

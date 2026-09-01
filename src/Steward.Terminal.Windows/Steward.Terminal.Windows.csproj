@@ -2,6 +2,7 @@
 
   <PropertyGroup>
     <TargetFramework>net10.0-windows</TargetFramework>
+    <UsesStewardSqlite>true</UsesStewardSqlite>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
@@ -9,10 +10,11 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.4" />
-    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.5" />
+    <PackageReference Include="Microsoft.Data.Sqlite.Core" Version="$(MicrosoftDataSqlitePackageVersion)" />
     <ProjectReference Include="..\Steward.Domain\Steward.Domain.csproj" />
     <ProjectReference Include="..\Steward.Terminal.Abstractions\Steward.Terminal.Abstractions.csproj" />
+    <ProjectReference Include="..\Steward.Runtime.Windows\Steward.Runtime.Windows.csproj" />
+    <ProjectReference Include="..\Steward.Tasks.Abstractions\Steward.Tasks.Abstractions.csproj" />
   </ItemGroup>
 
 </Project>

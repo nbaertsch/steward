@@ -1,5 +1,5 @@
-using Microsoft.Extensions.Hosting;
 using System.Runtime.Versioning;
+using Microsoft.Extensions.Hosting;
 
 namespace Steward.HandleKeeper;
 

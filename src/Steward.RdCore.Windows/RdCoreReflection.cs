@@ -651,9 +651,9 @@ internal static class ReflectionInvoke
     {
         Exception current = exception;
         while (current is TargetInvocationException
-               {
-                   InnerException: not null
-               } wrapper)
+            {
+                InnerException: not null
+            } wrapper)
             current = wrapper.InnerException!;
         ExceptionDispatchInfo.Capture(current).Throw();
     }

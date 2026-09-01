@@ -455,12 +455,9 @@ internal sealed class SecureStreamConnection : ITransportConnection
             while (true)
             {
                 ThrowIfExpired();
-                var record = await SecureStreamSession.RunWithTimeoutAsync(
-                        token => SecureStreamSession.ReadRecordAsync(
-                            _stream,
-                            _options.MaximumWireRecordBytes,
-                            token),
-                        _options.WireOperationTimeout,
+                var record = await SecureStreamSession.ReadRecordAsync(
+                        _stream,
+                        _options.MaximumWireRecordBytes,
                         cancellationToken)
                     .ConfigureAwait(false);
                 var sequence = checked(++_receiveRecord);

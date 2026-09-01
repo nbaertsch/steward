@@ -398,6 +398,35 @@ public sealed class SqliteControlStore
     public Task AcknowledgeCommandAsync(long sequence, CancellationToken cancellationToken = default) =>
         AcknowledgeBySequenceAsync("command_outbox", "sequence", sequence, cancellationToken);
 
+    public async Task EnqueueOutboxAsync(
+        OutboxMessage message,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        await using var connection = await OpenConnectionAsync(
+                cancellationToken)
+            .ConfigureAwait(false);
+        await using var transaction = connection.BeginTransaction(
+            deferred: false);
+        try
+        {
+            await InsertOutboxAsync(
+                    connection,
+                    transaction,
+                    message,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch
+        {
+            await transaction.RollbackAsync(cancellationToken)
+                .ConfigureAwait(false);
+            throw;
+        }
+    }
+
     public async Task<IReadOnlyList<AggregateOutboxItem>> ReadOutboxAsync(
         int limit = 100, DateTimeOffset? now = null, CancellationToken cancellationToken = default)
     {
@@ -436,10 +465,10 @@ public sealed class SqliteControlStore
             json, delegation.AcceptedAt, cancellationToken);
     }
 
-    public async Task<long> AppendNotificationAsync(
+    public async Task<long> AppendNotificationAsync<TPayload>(
         NotificationId notificationId,
         string stream,
-        object payload,
+        TPayload payload,
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(stream);

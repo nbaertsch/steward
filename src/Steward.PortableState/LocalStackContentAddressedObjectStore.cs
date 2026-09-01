@@ -20,12 +20,17 @@ public sealed class LocalStackObjectStoreConfiguration
         if (!string.Equals(metadata.Kind, MetadataKind, StringComparison.Ordinal) ||
             !string.Equals(metadata.Version, MetadataVersion, StringComparison.Ordinal))
             throw new PortableStateException("Local Stack portable-state metadata kind or version is unsupported.");
-        if (metadata.Data.ValueKind != JsonValueKind.Object ||
-            !TryGetProperty(metadata.Data, "rootPath", out var rootElement) ||
-            rootElement.ValueKind != JsonValueKind.String)
-            throw new PortableStateException("Local Stack portable-state metadata must contain rootPath.");
-
-        var root = rootElement.GetString();
+        LocalStackMetadata? data;
+        try
+        {
+            data = metadata.DeserializeData<LocalStackMetadata>(StewardJson.Options);
+        }
+        catch (JsonException)
+        {
+            throw new PortableStateException(
+                "Local Stack portable-state metadata must contain rootPath.");
+        }
+        var root = data?.RootPath;
         if (string.IsNullOrWhiteSpace(root) ||
             root.Length > 32_767 ||
             root.IndexOf('\0') >= 0 ||
@@ -37,6 +42,8 @@ public sealed class LocalStackObjectStoreConfiguration
 
         return new(Path.GetFullPath(root));
     }
+
+    private sealed record LocalStackMetadata(string RootPath);
 
     private static bool TryGetProperty(JsonElement value, string name, out JsonElement property)
     {

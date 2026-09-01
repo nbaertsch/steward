@@ -1,12 +1,12 @@
-using System.Text.Json;
 using System.Security.Cryptography;
+using System.Text.Json;
 using Steward.Contracts;
 using Steward.Domain;
 using Steward.Persistence.Sqlite;
 
 namespace Steward.Application;
 
-public record CreateWorkloadRequest(
+internal record CreateWorkloadRequest(
     string WorkloadType,
     string PlannerKind,
     string PlannerVersion,
@@ -15,7 +15,7 @@ public record CreateWorkloadRequest(
     PlanRevisionId? PlanRevisionId = null,
     string? IdempotencyKey = null);
 
-public class WorkloadApplicationService(SqliteControlStore store)
+internal class WorkloadApplicationService(SqliteControlStore store)
 {
     public async Task<ContractEnvelope<WorkloadDto>> CreateAsync(
         CreateWorkloadRequest request, CancellationToken cancellationToken = default)
@@ -34,7 +34,11 @@ public class WorkloadApplicationService(SqliteControlStore store)
             WorkloadObservedState.Planning,
             [],
             [],
-            new(request.PlannerKind, request.PlannerVersion, request.PlannerData.Clone()));
+            ExtensionMetadataDto.Create(
+                request.PlannerKind,
+                request.PlannerVersion,
+                request.PlannerData.Clone(),
+                StewardJson.Options));
         var snapshot = new ContractEnvelope<WorkloadDto>(
             "steward.workload", "1.0.0", [], [], DateTimeOffset.UtcNow, 0, payload);
         if (request.IdempotencyKey is { } key)

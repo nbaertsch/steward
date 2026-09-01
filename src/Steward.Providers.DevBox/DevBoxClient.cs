@@ -1,8 +1,8 @@
+using System.Text.Json;
 using Azure;
 using Azure.Core;
 using Azure.Developer.DevCenter;
 using Azure.Developer.DevCenter.Models;
-using System.Text.Json;
 using Steward.Providers.Abstractions;
 
 namespace Steward.Providers.DevBox;

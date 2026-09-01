@@ -21,10 +21,10 @@ public sealed class DelegatedExecutionAuthority(NodeJournal journal)
             attemptId, delegationId, taskId, generation, resources,
             requestedRates, requestedIdentities, now, cancellationToken);
 
-    public Task<long> RecordTerminalFactAsync(
+    public Task<long> RecordTerminalFactAsync<TPayload>(
         Guid reservationId,
         string factType,
-        object payload,
+        TPayload payload,
         DateTimeOffset observedAt,
         CancellationToken cancellationToken = default) =>
         journal.CompleteStartReservationAsync(reservationId, factType, payload, observedAt, cancellationToken);
@@ -39,7 +39,7 @@ public sealed class DelegatedExecutionAuthority(NodeJournal journal)
 
 public sealed class ReconciliationService(NodeJournal journal)
 {
-    public Task<long> EmitAsync(string factType, object payload, DateTimeOffset observedAt, CancellationToken cancellationToken = default) =>
+    public Task<long> EmitAsync<TPayload>(string factType, TPayload payload, DateTimeOffset observedAt, CancellationToken cancellationToken = default) =>
         journal.AppendFactAsync(factType, payload, observedAt, cancellationToken);
 
     public async Task<IReadOnlyList<JournaledFact>> ReplayUnacknowledgedAsync(int maximumCount = 256, CancellationToken cancellationToken = default)

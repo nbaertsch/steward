@@ -12,13 +12,16 @@ internal static class ConPtyNativeMethods
     internal const uint ExtendedStartupInfoPresent = 0x00080000;
     internal const uint CreateUnicodeEnvironment = 0x00000400;
     internal const uint HandleFlagInherit = 0x00000001;
+    internal const uint StartfUseStdHandles = 0x00000100;
     internal const uint ProcessQueryLimitedInformation = 0x1000;
     internal const uint StillActive = 259;
     internal const uint JobObjectLimitKillOnJobClose = 0x00002000;
     internal const uint TokenQuery = 0x0008;
     internal const int ErrorInsufficientBuffer = 122;
+    internal const nuint ProcThreadAttributeHandleList = 0x00020002;
     internal const nuint ProcThreadAttributePseudoConsole = 0x00020016;
     internal const nuint ProcThreadAttributeJobList = 0x0002000D;
+    internal const nuint ProcThreadAttributeSecurityCapabilities = 0x00020009;
 
     [StructLayout(LayoutKind.Sequential)]
     internal struct Coord
@@ -144,7 +147,7 @@ internal static class ConPtyNativeMethods
     internal static extern bool CreatePipe(
         out SafeFileHandle readPipe,
         out SafeFileHandle writePipe,
-        IntPtr pipeAttributes,
+        ref SecurityAttributes pipeAttributes,
         uint size);
 
     [DllImport("kernel32.dll", SetLastError = true)]

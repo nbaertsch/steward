@@ -2,16 +2,20 @@
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net10.0-windows</TargetFramework>
+    <UsesStewardSqlite>true</UsesStewardSqlite>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <DefineConstants>$(DefineConstants);RDP_DVC_SERVER_EMBEDDED</DefineConstants>
   </PropertyGroup>
   <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite.Core" Version="$(MicrosoftDataSqlitePackageVersion)" />
+    <ProjectReference Include="..\Steward.Contracts\Steward.Contracts.csproj" />
     <ProjectReference Include="..\Steward.Domain\Steward.Domain.csproj" />
     <ProjectReference Include="..\Steward.Transport\Steward.Transport.csproj" />
     <ProjectReference Include="..\Steward.Node.Host\Steward.Node.Host.csproj" />
     <ProjectReference Include="..\Steward.PortableState\Steward.PortableState.csproj" />
     <ProjectReference Include="..\Steward.Stack.Local\Steward.Stack.Local.csproj" />
+    <Compile Include="..\Steward.Transport.Rdp.Windows\RdpDvcCarrierProtocolV2.cs" Link="Transport\RdpDvcCarrierProtocolV2.cs" />
     <Compile Include="..\Steward.Transport.Rdp.Endpoint.Windows\RdpDvcConstants.cs" Link="Transport\RdpDvcConstants.cs" />
     <Compile Include="..\Steward.Transport.Rdp.Endpoint.Windows\RdpDvcProtocol.cs" Link="Transport\RdpDvcProtocol.cs" />
     <Compile Include="..\Steward.Transport.Rdp.Endpoint.Windows\RdpDvcBrokerRouting.cs" Link="Transport\RdpDvcBrokerRouting.cs" />

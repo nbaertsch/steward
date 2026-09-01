@@ -11,6 +11,7 @@ internal static class NativeMethods
     internal const uint CreateNoWindow = 0x08000000;
     internal const uint CreateNewProcessGroup = 0x00000200;
     internal const uint ExtendedStartupInfoPresent = 0x00080000;
+    internal const uint CreateUnicodeEnvironment = 0x00000400;
     internal const uint HandleFlagInherit = 0x00000001;
     internal const uint JobObjectAllAccess = 0x1F001F;
     internal const uint ProcessQueryLimitedInformation = 0x1000;
@@ -22,10 +23,12 @@ internal static class NativeMethods
     internal const uint JobObjectLimitActiveProcess = 0x00000008;
     internal const uint JobObjectLimitProcessMemory = 0x00000100;
     internal const uint JobObjectLimitJobMemory = 0x00000200;
+    internal const uint JobObjectLimitKillOnJobClose = 0x00002000;
     internal const int ErrorInsufficientBuffer = 122;
     internal const int ErrorMoreData = 234;
     internal const nuint ProcThreadAttributeHandleList = 0x00020002;
     internal const nuint ProcThreadAttributeJobList = 0x0002000D;
+    internal const nuint ProcThreadAttributeSecurityCapabilities = 0x00020009;
     internal const uint ThreadSuspendResume = 0x0002;
     internal const uint ThreadQueryLimitedInformation = 0x0800;
     internal const uint Th32csSnapThread = 0x00000004;
@@ -69,6 +72,14 @@ internal static class NativeMethods
         internal IntPtr AttributeList;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct SecurityCapabilities
+    {
+        internal IntPtr AppContainerSid;
+        internal IntPtr Capabilities;
+        internal uint CapabilityCount;
+        internal uint Reserved;
+    }
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     internal struct ThreadEntry32
     {

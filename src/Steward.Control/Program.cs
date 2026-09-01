@@ -1,9 +1,11 @@
-using Microsoft.AspNetCore.HostFiltering;
 using System.Text.Json;
+using Microsoft.AspNetCore.HostFiltering;
 using Steward.Application;
 using Steward.Contracts;
 using Steward.DevBox.Windows;
 using Steward.Domain;
+using Steward.Maintenance.Windows;
+using Steward.Orchestration;
 using Steward.Persistence.Sqlite;
 using Steward.Stack.Local;
 using Steward.Terminal.Abstractions;
@@ -129,6 +131,39 @@ app.MapPost("/backups/restore", async (
 {
     await service.RestoreAsync(request, token);
     return Results.NoContent();
+});
+
+app.MapPost("/maintenance/operations", async (
+    LocalMaintenanceSubmission request,
+    ControlMaintenanceDispatcher dispatcher,
+    CancellationToken token) =>
+{
+    var accepted = await dispatcher.DispatchAsync(request, token);
+    return Results.Accepted(
+        $"/maintenance/operations/{accepted.Request.Body.OperationId:D}",
+        new
+        {
+            accepted.Request.Body.RequestId,
+            accepted.Request.Body.OperationId,
+            accepted.HostId,
+            accepted.NodeIncarnationId,
+            status = MaintenanceOperationStatus.Accepted
+        });
+});
+
+app.MapGet("/maintenance/operations/{operationId:guid}", async (
+    Guid operationId,
+    ControlOrchestrator orchestrator,
+    CancellationToken token) =>
+{
+    var result = await orchestrator.GetMaintenanceResultAsync(
+        operationId,
+        token);
+    return result is null
+        ? Results.Accepted(
+            $"/maintenance/operations/{operationId:D}",
+            new { operationId, status = MaintenanceOperationStatus.Accepted })
+        : Results.Ok(result);
 });
 
 app.MapPost("/workload-drafts", async (

@@ -1,5 +1,5 @@
-using System.Text.Json;
 using System.Runtime.Versioning;
+using System.Text.Json;
 using Azure.Identity;
 
 namespace Steward.DevBox.Windows;

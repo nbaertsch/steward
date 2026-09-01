@@ -36,6 +36,30 @@ public sealed class DirectWebSocketTransportTests
     }
 
     [Fact]
+    public async Task Idle_receive_survives_operation_timeout()
+    {
+        await using var pair = await ConnectedPair.CreateAsync(
+            TransportEndpointRole.Control,
+            operationTimeout: TimeSpan.FromMilliseconds(50));
+        using var timeout = new CancellationTokenSource(
+            TimeSpan.FromSeconds(2));
+        await using var received = pair.Listener
+            .ReceiveAsync(timeout.Token)
+            .GetAsyncEnumerator();
+        var waiting = received.MoveNextAsync().AsTask();
+
+        await Task.Delay(200, timeout.Token);
+        await pair.Dialer.SendAsync(
+            pair.Frame(StreamKind.Control, 1, "after-idle"),
+            timeout.Token);
+
+        Assert.True(await waiting);
+        Assert.Equal(
+            "after-idle",
+            Encoding.UTF8.GetString(received.Current.Payload.Span));
+    }
+
+    [Fact]
     public async Task Handshake_rejects_the_wrong_enrolled_identity()
     {
         using var dialerKey = EcdsaEndpointSigningKey.Create("dialer");
@@ -307,7 +331,8 @@ public sealed class DirectWebSocketTransportTests
         Uri endpoint,
         TransportEndpointRole role,
         IEndpointSigningKey key,
-        ExpectedPeerIdentity peer) =>
+        ExpectedPeerIdentity peer,
+        TimeSpan? operationTimeout = null) =>
         new(
             endpoint,
             role,
@@ -316,7 +341,8 @@ public sealed class DirectWebSocketTransportTests
             AllowUnencryptedLoopback: true,
             ConnectTimeout: TimeSpan.FromSeconds(5),
             HandshakeTimeout: TimeSpan.FromSeconds(5),
-            OperationTimeout: TimeSpan.FromSeconds(5));
+            OperationTimeout:
+                operationTimeout ?? TimeSpan.FromSeconds(5));
 
     private static SessionHello Hello(
         IReadOnlyDictionary<StreamKind, long>? cursors = null,
@@ -386,7 +412,8 @@ public sealed class DirectWebSocketTransportTests
         public static async Task<ConnectedPair> CreateAsync(
             TransportEndpointRole dialerRole,
             SessionHello? dialerHello = null,
-            SessionHello? listenerHello = null)
+            SessionHello? listenerHello = null,
+            TimeSpan? operationTimeout = null)
         {
             var dialerKey = EcdsaEndpointSigningKey.Create("dialer");
             var listenerKey = EcdsaEndpointSigningKey.Create("listener");
@@ -410,7 +437,10 @@ public sealed class DirectWebSocketTransportTests
                     endpoint,
                     listenerRole,
                     listenerKey,
-                    new ExpectedPeerIdentity("dialer", dialerKey.ExportPublicKey())));
+                    new ExpectedPeerIdentity(
+                        "dialer",
+                        dialerKey.ExportPublicKey()),
+                    operationTimeout));
                 try
                 {
                     var accepting = acceptor.AcceptAsync(listenerHello).AsTask();
@@ -418,7 +448,10 @@ public sealed class DirectWebSocketTransportTests
                         endpoint,
                         dialerRole,
                         dialerKey,
-                        new ExpectedPeerIdentity("listener", listenerKey.ExportPublicKey())));
+                        new ExpectedPeerIdentity(
+                            "listener",
+                            listenerKey.ExportPublicKey()),
+                        operationTimeout));
                     var dialer = await carrier.ConnectAsync(dialerHello);
                     try
                     {

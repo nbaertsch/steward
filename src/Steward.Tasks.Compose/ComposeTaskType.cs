@@ -5,7 +5,7 @@ using Steward.Tasks.Abstractions;
 
 namespace Steward.Tasks.Compose;
 
-public sealed record ComposeTaskDefinition(
+internal sealed record ComposeTaskDefinition(
     string DockerExecutable,
     string ComposeFile,
     string ProjectName,
@@ -19,7 +19,7 @@ public sealed record ComposeTaskDefinition(
 /// Supervises the Docker CLI process. Containers remain owned and isolated by
 /// the Docker engine; Job Object containment does not extend into containers.
 /// </summary>
-public sealed class ComposeTaskType(IProcessExecutor executor) : TaskTypeBase, IRecoverableTaskType, ITaskOutputSource
+internal sealed class ComposeTaskType(IProcessExecutor executor) : TaskTypeBase, IRecoverableTaskType, ITaskOutputSource
 {
     private const int MaximumOutputReadBytes = 64 * 1024;
     private const long CursorMask = 0x7fff_ffff;
@@ -32,7 +32,7 @@ public sealed class ComposeTaskType(IProcessExecutor executor) : TaskTypeBase, I
         TaskCapabilities.Cancel | TaskCapabilities.Restart | TaskCapabilities.Cleanup;
     public override InterruptionClass InterruptionClass => InterruptionClass.Restartable;
 
-    public override ValidationResult Validate(JsonElement input)
+    public override ValidationResult Validate(TaskPayload input)
     {
         ComposeTaskDefinition? definition;
         try { definition = input.Deserialize<ComposeTaskDefinition>(JsonOptions); }
@@ -218,7 +218,10 @@ public sealed class ComposeTaskType(IProcessExecutor executor) : TaskTypeBase, I
         var attemptId = operation is null ? context.AttemptId : TaskAttemptId.New();
         return executor.StartAsync(new(attemptId, context.Generation, definition.DockerExecutable, arguments,
             workspace, Path.Combine(context.Workspace, ".steward", "spool"), definition.MaxOutputBytes,
-            definition.RequiredDiskReserveBytes), cancellationToken);
+            definition.RequiredDiskReserveBytes,
+            Isolation: ProcessIsolationProfile.ForTask(
+                context,
+                ProcessIsolationCapability.Compose)), cancellationToken);
     }
 
     private ComposeTaskDefinition Get(TaskExecutionContext context)

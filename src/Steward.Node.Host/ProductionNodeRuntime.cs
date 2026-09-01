@@ -1,5 +1,6 @@
 using System.Runtime.Versioning;
 using Steward.Domain;
+using Steward.Maintenance.Windows;
 using Steward.Node;
 using Steward.Orchestration;
 using Steward.PortableState;
@@ -72,12 +73,12 @@ public sealed class ProductionNodeRuntime : IAsyncDisposable
             throw new PlatformNotSupportedException(
                 "The production Node runtime requires Windows.");
 
-        var bootId = LoadBootIdentity($"{options.JournalPath}.boot.json");
+        var boot = LoadBootIdentity($"{options.JournalPath}.boot.json");
         var journal = new NodeJournal(options.JournalPath);
         try
         {
             await journal.InitializeAsync(
-                options.IncarnationId, bootId, true, cancellationToken)
+                options.IncarnationId, boot.Id, false, cancellationToken)
                 .ConfigureAwait(false);
         }
         catch
@@ -103,7 +104,8 @@ public sealed class ProductionNodeRuntime : IAsyncDisposable
                 executionJournal,
                 keeper,
                 options.IncarnationId,
-                bootId.ToString("D"));
+                boot.Id.ToString("D"),
+                bootIdentityVerified: boot.Verified);
             var evaluations = new SqliteEvaluationStore(
                 options.EvaluationDatabasePath);
             var spool = new DiskSpool(new()
@@ -129,7 +131,7 @@ public sealed class ProductionNodeRuntime : IAsyncDisposable
                 terminalJournal,
                 options.HostId,
                 options.IncarnationId,
-                bootId.ToString("D"),
+                boot.Id.ToString("D"),
                 options: new(
                     MaximumConcurrentSessions:
                         options.MaximumTerminalSessions),
@@ -176,7 +178,19 @@ public sealed class ProductionNodeRuntime : IAsyncDisposable
                     terminalService,
                     terminalRevocations),
                 rateFeedback: evaluations,
-                auxiliaryHandlers: [portableTransfer, identityClient]);
+                auxiliaryHandlers: [portableTransfer, identityClient],
+                maintenance: new NodeMaintenanceCommandHandler(
+                    options.HostId,
+                    options.IncarnationId,
+                    new NamedPipeLocalMaintenanceForwarder(
+                        MaintenanceContract.LocalPipeName,
+                        TimeSpan.FromSeconds(30),
+                        Path.Combine(
+                            Path.GetDirectoryName(options.JournalPath) ??
+                                throw new InvalidDataException(
+                                    "Node journal has no state root."),
+                            "keys",
+                            "rdp-dvc.key"))));
 
             return new ProductionNodeRuntime(
                 journal,
@@ -250,11 +264,10 @@ public sealed class ProductionNodeRuntime : IAsyncDisposable
         await _journal.DisposeAsync().ConfigureAwait(false);
     }
 
-    private static Guid LoadBootIdentity(string path)
+    private static RuntimeBootIdentity LoadBootIdentity(string path)
     {
-        var boot = DateTimeOffset.UtcNow -
-            TimeSpan.FromMilliseconds(Environment.TickCount64);
-        if (File.Exists(path))
+        var evidence = WindowsBootIdentity.Capture();
+        if (evidence.Verified && File.Exists(path))
         {
             try
             {
@@ -262,21 +275,37 @@ public sealed class ProductionNodeRuntime : IAsyncDisposable
                     .Deserialize<BootRecord>(File.ReadAllText(path));
                 if (stored is not null &&
                     stored.Id != Guid.Empty &&
-                    Math.Abs((stored.ObservedBootUtc - boot).TotalSeconds) <= 5)
-                    return stored.Id;
+                    stored.Verified &&
+                    string.Equals(
+                        stored.SystemBootIdentity,
+                        evidence.Identity,
+                        StringComparison.Ordinal))
+                    return new RuntimeBootIdentity(stored.Id, true);
             }
-            catch (System.Text.Json.JsonException) { }
+            catch (System.Text.Json.JsonException)
+            {
+            }
         }
-        var record = new BootRecord(Guid.NewGuid(), boot);
+        var record = new BootRecord(
+            Guid.NewGuid(),
+            evidence.Identity,
+            evidence.Verified,
+            evidence.Source);
         Directory.CreateDirectory(
             Path.GetDirectoryName(Path.GetFullPath(path))!);
-        var temporary = $"{path}.{Guid.NewGuid():N}.new";
+        var pending = $"{path}.{Guid.NewGuid():N}.new";
         File.WriteAllText(
-            temporary,
+            pending,
             System.Text.Json.JsonSerializer.Serialize(record));
-        File.Move(temporary, path, true);
-        return record.Id;
+        File.Move(pending, path, true);
+        return new RuntimeBootIdentity(record.Id, record.Verified);
     }
 
-    private sealed record BootRecord(Guid Id, DateTimeOffset ObservedBootUtc);
+    private sealed record RuntimeBootIdentity(Guid Id, bool Verified);
+
+    private sealed record BootRecord(
+        Guid Id,
+        string? SystemBootIdentity = null,
+        bool Verified = false,
+        string? Source = null);
 }

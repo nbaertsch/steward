@@ -1,6 +1,7 @@
 using ModelContextProtocol.AspNetCore;
 using Steward.Application;
 using Steward.Cli;
+using Steward.Contracts;
 using Steward.Mcp;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -21,10 +22,15 @@ builder.Services.AddSingleton<IControlMutationTokenProvider, EnvironmentOrFileMu
 builder.Services.AddHttpClient<ControlClient>(client => client.BaseAddress = new Uri(controlUrl));
 builder.Services.AddHostFiltering(options =>
     options.AllowedHosts = ["localhost", "127.0.0.1", "[::1]"]);
+var mcpJson = new System.Text.Json.JsonSerializerOptions(StewardJson.Options)
+{
+    TypeInfoResolver = new System.Text.Json.Serialization.Metadata.DefaultJsonTypeInfoResolver()
+};
+
 builder.Services
     .AddMcpServer()
     .WithHttpTransport(options => options.SessionMode = HttpServerSessionMode.Stateless)
-    .WithTools<StewardTools>();
+    .WithTools<StewardTools>(mcpJson);
 
 var app = builder.Build();
 

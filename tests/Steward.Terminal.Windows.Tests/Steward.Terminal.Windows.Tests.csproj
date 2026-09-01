@@ -18,6 +18,8 @@
     <ProjectReference Include="..\..\src\Steward.Domain\Steward.Domain.csproj" />
     <ProjectReference Include="..\..\src\Steward.Terminal.Abstractions\Steward.Terminal.Abstractions.csproj" />
     <ProjectReference Include="..\..\src\Steward.Terminal.Windows\Steward.Terminal.Windows.csproj" />
+    <ProjectReference Include="..\..\src\Steward.Runtime.Windows\Steward.Runtime.Windows.csproj" />
+    <ProjectReference Include="..\..\src\Steward.Tasks.Abstractions\Steward.Tasks.Abstractions.csproj" />
   </ItemGroup>
 
   <ItemGroup>

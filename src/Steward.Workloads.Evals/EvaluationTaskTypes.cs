@@ -8,7 +8,7 @@ using Steward.Tasks.Abstractions;
 
 namespace Steward.Workloads.Evals;
 
-public sealed record EvaluationRunnerCommandDefinition(
+internal sealed record EvaluationRunnerCommandDefinition(
     string Executable,
     IReadOnlyList<string> Arguments,
     string? WorkingDirectory,
@@ -16,12 +16,12 @@ public sealed record EvaluationRunnerCommandDefinition(
 
 public sealed record EvaluationRunnerDatasetDefinition(string Identity, string Hash);
 
-public sealed record EvaluationRunnerTaskDefinition(
+internal sealed record EvaluationRunnerTaskDefinition(
     string Harness,
     string HarnessVersion,
     string AdapterProfileVersion,
     string CaseId,
-    JsonElement CaseDefinition,
+    TaskPayload CaseDefinition,
     string InventoryHash,
     EvaluationRunnerDatasetDefinition Dataset,
     string EvaluationSet,
@@ -96,7 +96,7 @@ public sealed record EvaluationRunnerOutcome(
     EvaluationRunnerErrorCode? ErrorCode,
     string? TerminalReceipt);
 
-public sealed class EvaluationRunnerTaskType :
+internal sealed class EvaluationRunnerTaskType :
     TaskTypeBase,
     IRecoverableTaskType,
     ITaskOutputSource,
@@ -134,7 +134,7 @@ public sealed class EvaluationRunnerTaskType :
         TaskCapabilities.Restart | TaskCapabilities.Cleanup;
     public override InterruptionClass InterruptionClass => InterruptionClass.Restartable;
 
-    public override ValidationResult Validate(JsonElement input)
+    public override ValidationResult Validate(TaskPayload input)
     {
         EvaluationRunnerTaskDefinition? definition;
         try { definition = input.Deserialize<EvaluationRunnerTaskDefinition>(JsonOptions); }
@@ -207,7 +207,10 @@ public sealed class EvaluationRunnerTaskType :
             context.Generation.ToString(CultureInfo.InvariantCulture), StringComparison.Ordinal)).ToArray();
         var request = new ProcessLaunchRequest(context.AttemptId, context.Generation, definition.Command.Executable,
             arguments, workingDirectory, Path.Combine(context.Workspace, ".steward", "spool"),
-            definition.MaxOutputBytes, definition.RequiredDiskReserveBytes);
+            definition.MaxOutputBytes, definition.RequiredDiskReserveBytes,
+            Isolation: ProcessIsolationProfile.ForTask(
+                context,
+                ProcessIsolationCapability.Evaluation));
         var state = RunnerState.Create(definition, parsers[definition.ParserContract],
             DefinitionHash(context.Input), context.AttemptId, context.Generation);
         await stateStore.SaveAsync(state.Snapshot, cancellationToken);
@@ -298,8 +301,11 @@ public sealed class EvaluationRunnerTaskType :
                     return observation with { ExitCode = -1, Detail = "RetryableEvaluationFailure" };
                 state.Fail(EvaluationRunnerErrorCode.MissingResult, EvaluationFailureSignal.Harness);
                 await stateStore.SaveAsync(state.Snapshot, cancellationToken);
-                return observation with { ExitCode = observation.ExitCode == 0 ? -1 : observation.ExitCode,
-                    Detail = EvaluationRunnerErrorCode.MissingResult.ToString() };
+                return observation with
+                {
+                    ExitCode = observation.ExitCode == 0 ? -1 : observation.ExitCode,
+                    Detail = EvaluationRunnerErrorCode.MissingResult.ToString()
+                };
             }
             if (state.Failure?.RetryCase == true)
                 return observation with { ExitCode = -1, Detail = "RetryableEvaluationFailure" };
@@ -404,8 +410,9 @@ public sealed class EvaluationRunnerTaskType :
         return context.Input.Deserialize<EvaluationRunnerTaskDefinition>(JsonOptions)!;
     }
 
-    private static string DefinitionHash(JsonElement input) =>
-        EvaluationHash.Sha256(EvaluationJson.Serialize(input));
+    private static string DefinitionHash(TaskPayload input) =>
+        EvaluationHash.Sha256(EvaluationJson.Serialize(
+            input.Deserialize<JsonElement>()));
 
     private static TaskRuntimeOutput ToRuntimeOutput(TaskEvent value) => value switch
     {

@@ -1,6 +1,6 @@
+using Microsoft.Extensions.DependencyInjection;
 using Steward.Orchestration;
 using Steward.Scheduling;
-using Microsoft.Extensions.DependencyInjection;
 using Steward.Transport;
 
 namespace Steward.Control;

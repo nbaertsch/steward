@@ -4,8 +4,8 @@ using System.Text.Json;
 using Steward.Application;
 using Steward.Cli;
 using Steward.ConnectionHost.Windows;
-using Steward.DevBox.Windows;
 using Steward.Desktop.Windows;
+using Steward.DevBox.Windows;
 using Steward.Domain;
 using Steward.Orchestration;
 using Steward.Providers.Abstractions;
@@ -499,7 +499,7 @@ public sealed class DesktopLogicTests
             JsonContent.Create(new TerminalWireResponse(
                 "request",
                 "ok",
-                TerminalWireCodec.Element(snapshot),
+                snapshot,
                 [],
                 null),
                 options: ServerJson()));

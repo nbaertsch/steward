@@ -28,17 +28,14 @@ internal sealed class WindowsAppOutOfProcOverride : IDisposable
         this.existed = existed;
     }
 
-    internal static WindowsAppOutOfProcOverride Disable()
+    internal static WindowsAppOutOfProcOverride Disable(
+        CancellationToken cancellationToken)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(BreadcrumbPath)!);
         FileStream? lockFile = null;
         try
         {
-            lockFile = new(
-                LockPath,
-                FileMode.OpenOrCreate,
-                FileAccess.ReadWrite,
-                FileShare.None);
+            lockFile = AcquireLock(LockPath, cancellationToken);
             RestoreStaleBreadcrumb();
             using var machine = Registry.LocalMachine.OpenSubKey(
                 KeyPath,
@@ -68,6 +65,30 @@ internal sealed class WindowsAppOutOfProcOverride : IDisposable
         {
             lockFile?.Dispose();
             throw;
+        }
+    }
+
+    internal static FileStream AcquireLock(
+        string path,
+        CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                return new(
+                    path,
+                    FileMode.OpenOrCreate,
+                    FileAccess.ReadWrite,
+                    FileShare.None);
+            }
+            catch (Exception exception)
+                when (exception is IOException or UnauthorizedAccessException)
+            {
+                if (cancellationToken.WaitHandle.WaitOne(100))
+                    cancellationToken.ThrowIfCancellationRequested();
+            }
         }
     }
 

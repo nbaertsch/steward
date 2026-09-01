@@ -15,6 +15,30 @@ public sealed record ConnectionHostOptions
     public Action<string>? DiagnosticSink { get; init; }
 }
 
+public interface IDevBoxRemoteConnectionProvider
+{
+    Task<Uri> GetRemoteConnectionAsync(
+        DesiredConnectionRecord desired,
+        CancellationToken cancellationToken);
+}
+
+public interface IDesiredDevBoxConnectionResolver
+{
+    Task<ISensitiveRdpConnectionMaterial> ResolveDesiredAsync(
+        DesiredConnectionRecord desired,
+        CancellationToken cancellationToken);
+}
+
+public sealed record ConnectionRecoveryMaterial(
+    string AuthorizationToken,
+    string EvidenceReference);
+
+public interface IConnectionRecoveryMaterialIssuer
+{
+    ValueTask<ConnectionRecoveryMaterial> IssueAsync(
+        DesiredConnectionRecord desired,
+        CancellationToken cancellationToken);
+}
 public interface IDevBoxConnectionResolver
 {
     Task<ISensitiveRdpConnectionMaterial> ResolveAsync(
@@ -30,7 +54,10 @@ public interface ISensitiveRdpConnectionMaterial : IDisposable
 }
 
 public sealed class DevBoxConnectionResolver(
-    DevBoxBrokerFeedResolver resolver) : IDevBoxConnectionResolver
+    DevBoxBrokerFeedResolver resolver,
+    IDevBoxRemoteConnectionProvider? remoteConnections = null) :
+    IDevBoxConnectionResolver,
+    IDesiredDevBoxConnectionResolver
 {
     public async Task<ISensitiveRdpConnectionMaterial> ResolveAsync(
         Uri providerResource,
@@ -41,6 +68,24 @@ public sealed class DevBoxConnectionResolver(
                     providerResource,
                     cancellationToken)
                 .ConfigureAwait(false));
+
+    public async Task<ISensitiveRdpConnectionMaterial> ResolveDesiredAsync(
+        DesiredConnectionRecord desired,
+        CancellationToken cancellationToken)
+    {
+        desired = desired.Validate();
+        var provider = remoteConnections ??
+            throw new DevBoxConnectionIdentityException(
+                DevBoxConnectionIdentityOutcome.InteractionRequired,
+                "Silent Dev Box connection refresh is unavailable.");
+        return await ResolveAsync(
+                await provider.GetRemoteConnectionAsync(
+                        desired,
+                        cancellationToken)
+                    .ConfigureAwait(false),
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
 }
 
 internal sealed class SensitiveRdpConnectionMaterial(
@@ -166,6 +211,35 @@ public sealed class SingleUseControlConnectAuthorizationValidator :
     }
 }
 
+public sealed class DpapiConnectionRecoveryMaterialIssuer(
+    SingleUseControlConnectAuthorizationValidator authorization,
+    DpapiRdpDvcEvidenceTicketStore evidenceTickets) :
+    IConnectionRecoveryMaterialIssuer
+{
+    public ValueTask<ConnectionRecoveryMaterial> IssueAsync(
+        DesiredConnectionRecord desired,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        desired = desired.Validate();
+        var token = Convert.ToHexString(
+            RandomNumberGenerator.GetBytes(32));
+        var evidenceReference = "recovery-" +
+            RandomNumberGenerator.GetHexString(24);
+        evidenceTickets.Write(
+            evidenceReference,
+            new(
+                desired.SessionId,
+                desired.HostId,
+                desired.NodeIncarnationId,
+                0,
+                Guid.NewGuid(),
+                ProtocolVersion: 2));
+        authorization.Register(token);
+        return ValueTask.FromResult(
+            new ConnectionRecoveryMaterial(token, evidenceReference));
+    }
+}
 public sealed record RdCoreRuntimeEvidence(
     RdCoreDvcEvidenceEvent Event,
     string? PluginAddInName = null,

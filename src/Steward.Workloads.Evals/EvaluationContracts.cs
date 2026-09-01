@@ -1,8 +1,9 @@
 using System.Collections.Immutable;
-using System.Text.RegularExpressions;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Steward.Domain;
 using Steward.Scheduling;
+using Steward.Tasks.Abstractions;
 
 namespace Steward.Workloads.Evals;
 
@@ -186,10 +187,10 @@ public sealed record EvaluationRuntimeRequirements(
     }
 }
 
-public sealed record EvaluationCase(string CaseId, JsonElement Definition)
+public sealed record EvaluationCase(string CaseId, TaskPayload Definition)
 {
-    public static EvaluationCase Create(string caseId, object definition) =>
-        new(caseId, JsonSerializer.SerializeToElement(definition, EvaluationJson.Options));
+    public static EvaluationCase Create<T>(string caseId, T definition) =>
+        new(caseId, TaskPayload.From(definition, EvaluationJson.Options));
 }
 
 public sealed class NormalizedHarnessInventory
@@ -207,14 +208,18 @@ public sealed class NormalizedHarnessInventory
         {
             EvaluationSource.Required(item.CaseId, "Case ID");
             if (item.CaseId.Length > 512) throw new ArgumentException("Case ID exceeds 512 characters.", nameof(cases));
-            if (item.Definition.ValueKind is JsonValueKind.Undefined or JsonValueKind.Null)
+            if (item.Definition.Deserialize<JsonElement>().ValueKind is
+                JsonValueKind.Undefined or JsonValueKind.Null)
                 throw new ArgumentException("Case definition is required.", nameof(cases));
         }
         if (values.Select(x => x.CaseId).Distinct(StringComparer.Ordinal).Count() != values.Length)
             throw new ArgumentException("Inventory case IDs must be unique.", nameof(cases));
 
         Cases = values.OrderBy(x => x.CaseId, StringComparer.Ordinal)
-            .Select(x => new EvaluationCase(x.CaseId, EvaluationJson.CanonicalElement(x.Definition)))
+            .Select(x => new EvaluationCase(
+                    x.CaseId,
+                    TaskPayload.Parse(EvaluationJson.Serialize(
+                        x.Definition.Deserialize<JsonElement>()))))
             .ToImmutableArray();
         var canonical = EvaluationJson.Serialize(Cases.Select(x => new { caseId = x.CaseId, definition = x.Definition }));
         if (System.Text.Encoding.UTF8.GetByteCount(canonical) > EvaluationLimits.MaximumInventoryBytes)
@@ -239,7 +244,9 @@ public sealed class NormalizedHarnessInventory
                     !item.TryGetProperty("caseId", out var caseId) || caseId.ValueKind != JsonValueKind.String ||
                     !item.TryGetProperty("definition", out var definition))
                     throw new ArgumentException("Each inventory item requires string caseId and definition.", nameof(json));
-                cases.Add(new(caseId.GetString()!, definition.Clone()));
+                cases.Add(new(
+                    caseId.GetString()!,
+                    TaskPayload.Parse(definition.GetRawText())));
                 if (cases.Count > EvaluationLimits.MaximumCases)
                     throw new ArgumentException($"Inventory exceeds {EvaluationLimits.MaximumCases} cases.", nameof(json));
             }
@@ -337,7 +344,7 @@ public sealed record CompletedEvaluationResult(EvaluationCaseResult Result, stri
     }
 }
 
-public sealed record EvaluationCommand(
+internal sealed record EvaluationCommand(
     string Executable,
     IReadOnlyList<string> Arguments,
     string? WorkingDirectory,
@@ -345,14 +352,14 @@ public sealed record EvaluationCommand(
 
 public sealed record EvaluationProgress(string CaseId, double Fraction, string? Message);
 
-public interface IEvaluationResultParser
+internal interface IEvaluationResultParser
 {
     EvaluationProgress? ParseProgress(string line);
     EvaluationCaseResult? ParseResult(string line, EvaluationResultContext context);
     EvaluationFailureNotice? ParseFailure(string line) => null;
 }
 
-public interface IEvaluationHarnessAdapter
+internal interface IEvaluationHarnessAdapter
 {
     string HarnessName { get; }
     string HarnessVersion { get; }

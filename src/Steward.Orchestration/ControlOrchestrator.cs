@@ -27,6 +27,13 @@ public sealed record PersistedNodeFact(
     string Kind,
     string PayloadJson,
     DateTimeOffset ProcessedAt);
+public sealed record PoolSchedulingDemand(
+    PoolId PoolId,
+    IReadOnlyList<Steward.Providers.Abstractions.PoolDemand> Demands);
+
+public sealed record ControlSchedulingRepair(
+    int Placements,
+    IReadOnlyList<PoolSchedulingDemand> PoolDemands);
 public sealed record PersistedAttemptFactPage(
     IReadOnlyList<PersistedNodeFact> Facts,
     long PageCursor);
@@ -117,8 +124,29 @@ public sealed class ControlOrchestrator
                 workload_id TEXT NOT NULL UNIQUE,
                 created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS orchestration_capacity_catalog(
+                host_id TEXT PRIMARY KEY,
+                node_incarnation_id TEXT NOT NULL UNIQUE,
+                pool_id TEXT NOT NULL,
+                capacity_json TEXT NOT NULL,
+                capabilities_json TEXT NOT NULL,
+                setup_fingerprints_json TEXT NOT NULL,
+                observed_at TEXT NOT NULL,
+                authenticated_online INTEGER NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             """;
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        command.CommandText = """
+            UPDATE orchestration_capacity_catalog
+            SET authenticated_online=0,updated_at=$updated
+            WHERE authenticated_online<>0
+            """;
+        command.Parameters.AddWithValue(
+            "$updated",
+            timeProvider.GetUtcNow().ToString("O"));
+        await command.ExecuteNonQueryAsync(cancellationToken)
+            .ConfigureAwait(false);
         await LoadPersistedPlansAsync(cancellationToken).ConfigureAwait(false);
     }
 
@@ -154,8 +182,13 @@ public sealed class ControlOrchestrator
             plans[plan.WorkloadId] = plan;
             demandPools[plan.WorkloadId] = demandPool;
             schedulerStates[plan.WorkloadId] = registered;
-            schedulerStates[plan.WorkloadId] =
-                await scheduler.SetHostsAsync(plan, hosts, cancellationToken).ConfigureAwait(false);
+            foreach (var host in hosts)
+                await UpsertCapacityAsync(host, cancellationToken)
+                    .ConfigureAwait(false);
+            await RefreshHostsFromCatalogAsync(
+                plan,
+                demandPool,
+                cancellationToken).ConfigureAwait(false);
             return await ScheduleAndDispatchCoreAsync(plan, demandPool, now, cancellationToken).ConfigureAwait(false);
         }
         finally { gate.Release(); }
@@ -167,15 +200,149 @@ public sealed class ControlOrchestrator
         DateTimeOffset now,
         CancellationToken cancellationToken = default)
     {
+        now = now.ToUniversalTime();
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             var plan = RequirePlan(workloadId);
+            await RefreshHostsFromCatalogAsync(
+                plan,
+                demandPool,
+                cancellationToken).ConfigureAwait(false);
             return await ScheduleAndDispatchCoreAsync(plan, demandPool, now, cancellationToken).ConfigureAwait(false);
         }
         finally { gate.Release(); }
     }
 
+    public async Task<int> ObserveHostAsync(
+        HostCapacitySnapshot host,
+        DateTimeOffset now,
+        CancellationToken cancellationToken = default)
+    {
+        host = host with
+        {
+            ObservedAt = host.ObservedAt.ToUniversalTime(),
+            Available = true
+        };
+        now = now.ToUniversalTime();
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await UpsertCapacityAsync(host, cancellationToken)
+                .ConfigureAwait(false);
+            var placements = 0;
+            foreach (var plan in plans.Values.ToArray())
+            {
+                if (!demandPools.TryGetValue(plan.WorkloadId, out var demandPool) ||
+                    demandPool != host.PoolId ||
+                    !schedulerStates.TryGetValue(plan.WorkloadId, out var state) ||
+                    !state.Tasks.Any(value =>
+                        value.State == ScheduledTaskState.Ready))
+                    continue;
+                await RefreshHostsFromCatalogAsync(
+                    plan,
+                    demandPool,
+                    cancellationToken).ConfigureAwait(false);
+                var result = await ScheduleAndDispatchCoreAsync(
+                    plan,
+                    demandPool,
+                    now,
+                    cancellationToken).ConfigureAwait(false);
+                placements += result.Placements.Count;
+            }
+            return placements;
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+    public async Task ObserveHostOfflineAsync(
+        HostId hostId,
+        NodeIncarnationId incarnationId,
+        CancellationToken cancellationToken = default)
+    {
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await MarkCapacityOfflineAsync(
+                hostId,
+                incarnationId,
+                cancellationToken).ConfigureAwait(false);
+            foreach (var plan in plans.Values.ToArray())
+                if (demandPools.TryGetValue(
+                        plan.WorkloadId,
+                        out var demandPool))
+                    await RefreshHostsFromCatalogAsync(
+                        plan,
+                        demandPool,
+                        cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    public async Task<int> ReconcileSchedulingAsync(
+        DateTimeOffset now,
+        CancellationToken cancellationToken = default) =>
+        (await RepairSchedulingAsync(now, cancellationToken)
+            .ConfigureAwait(false)).Placements;
+
+    public async Task<ControlSchedulingRepair> RepairSchedulingAsync(
+        DateTimeOffset now,
+        CancellationToken cancellationToken = default)
+    {
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var placements = 0;
+            var demands = new Dictionary<
+                PoolId,
+                List<Steward.Providers.Abstractions.PoolDemand>>();
+            foreach (var plan in plans.Values.ToArray())
+            {
+                if (!demandPools.TryGetValue(
+                        plan.WorkloadId,
+                        out var demandPool))
+                    continue;
+                await RefreshHostsFromCatalogAsync(
+                    plan,
+                    demandPool,
+                    cancellationToken).ConfigureAwait(false);
+                var result = await ScheduleAndDispatchCoreAsync(
+                    plan,
+                    demandPool,
+                    now.ToUniversalTime(),
+                    cancellationToken).ConfigureAwait(false);
+                placements += result.Placements.Count;
+                if (result.PoolDemands.Count == 0)
+                    continue;
+                if (!demands.TryGetValue(demandPool, out var poolDemands))
+                {
+                    poolDemands = [];
+                    demands.Add(demandPool, poolDemands);
+                }
+                poolDemands.AddRange(result.PoolDemands);
+            }
+            return new(
+                placements,
+                demands.OrderBy(
+                        value => value.Key.ToString(),
+                        StringComparer.Ordinal)
+                    .Select(value => new PoolSchedulingDemand(
+                        value.Key,
+                        value.Value
+                            .Distinct()
+                            .ToArray()))
+                    .ToArray());
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
     public async Task CancelAsync(
         WorkloadId workloadId,
         TimeSpan gracePeriod,
@@ -348,15 +515,72 @@ public sealed class ControlOrchestrator
         return new(facts, facts.LastOrDefault()?.Sequence ?? afterSequence);
     }
 
-    public async Task<FactDisposition> ApplyNodeFactAsync(
+    public async Task<LocalMaintenanceResultFact?> GetMaintenanceResultAsync(
+        Guid operationId,
+        CancellationToken cancellationToken = default)
+    {
+        if (operationId == Guid.Empty)
+            throw new ArgumentException(
+                "Maintenance operation identity is invalid.",
+                nameof(operationId));
+        await using var connection = await controlStore.OpenConnectionAsync(
+                cancellationToken)
+            .ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT payload_json
+            FROM orchestration_node_facts
+            WHERE kind=$kind
+            ORDER BY processed_at DESC
+            LIMIT 1000
+            """;
+        command.Parameters.AddWithValue(
+            "$kind",
+            OrchestrationMessageKinds.MaintenanceResult);
+        await using var reader = await command.ExecuteReaderAsync(
+                cancellationToken)
+            .ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken)
+                   .ConfigureAwait(false))
+        {
+            var result = JsonSerializer.Deserialize<
+                LocalMaintenanceResultFact>(
+                reader.GetString(0),
+                StewardJson.Options);
+            if (result?.Result.OperationId == operationId)
+                return result;
+        }
+        return null;
+    }
+
+    public async Task QueueMaintenanceAsync(
+        LocalMaintenanceRequestMessage message,
+        CancellationToken cancellationToken = default)
+    {
+        var payload = OrchestrationMessageCodec.Encode(
+            message,
+            timeProvider.GetUtcNow());
+        var id = message.Request.Body.RequestId;
+        await controlStore.EnqueueOutboxAsync(
+                new OutboxMessage(
+                    $"maintenance:{id:D}",
+                    OrchestrationMessageKinds.MaintenanceRequest,
+                    Encoding.UTF8.GetString(payload.Span),
+                    $"maintenance:{message.Request.Body.OperationId:D}"),
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    public async Task<FactDisposition> ApplyNodeFactAsync<TFact>(
         NodeIncarnationId sessionIncarnation,
         long sequence,
         string kind,
-        object fact,
+        TFact fact,
         CancellationToken cancellationToken = default)
+        where TFact : notnull
     {
         if (sequence <= 0) throw new ArgumentOutOfRangeException(nameof(sequence));
-        var payloadJson = JsonSerializer.Serialize(fact, fact.GetType(), StewardJson.Options);
+        var payloadJson = JsonSerializer.Serialize(fact, StewardJson.Options);
         var hash = Hash($"{kind}\n{payloadJson}");
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -398,12 +622,160 @@ public sealed class ControlOrchestrator
         finally { gate.Release(); }
     }
 
+    private async Task UpsertCapacityAsync(
+        HostCapacitySnapshot host,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = await controlStore.OpenConnectionAsync(
+                cancellationToken)
+            .ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO orchestration_capacity_catalog(
+                host_id,node_incarnation_id,pool_id,capacity_json,
+                capabilities_json,setup_fingerprints_json,observed_at,
+                authenticated_online,updated_at)
+            VALUES(
+                $host,$incarnation,$pool,$capacity,$capabilities,$setups,
+                $observed,$online,$updated)
+            ON CONFLICT(host_id) DO UPDATE SET
+                node_incarnation_id=excluded.node_incarnation_id,
+                pool_id=excluded.pool_id,
+                capacity_json=excluded.capacity_json,
+                capabilities_json=excluded.capabilities_json,
+                setup_fingerprints_json=excluded.setup_fingerprints_json,
+                observed_at=excluded.observed_at,
+                authenticated_online=excluded.authenticated_online,
+                updated_at=excluded.updated_at
+            WHERE julianday(excluded.observed_at) >=
+                  julianday(orchestration_capacity_catalog.observed_at)
+            """;
+        command.Parameters.AddWithValue("$host", host.HostId.ToString());
+        command.Parameters.AddWithValue(
+            "$incarnation",
+            host.IncarnationId.ToString());
+        command.Parameters.AddWithValue("$pool", host.PoolId.ToString());
+        command.Parameters.AddWithValue(
+            "$capacity",
+            JsonSerializer.Serialize(host.Capacity, StewardJson.Options));
+        command.Parameters.AddWithValue(
+            "$capabilities",
+            JsonSerializer.Serialize(host.Capabilities, StewardJson.Options));
+        command.Parameters.AddWithValue(
+            "$setups",
+            JsonSerializer.Serialize(
+                host.SetupFingerprints,
+                StewardJson.Options));
+        command.Parameters.AddWithValue(
+            "$observed",
+            host.ObservedAt.ToUniversalTime().ToString("O"));
+        command.Parameters.AddWithValue("$online", host.Available);
+        command.Parameters.AddWithValue(
+            "$updated",
+            timeProvider.GetUtcNow().ToString("O"));
+        await command.ExecuteNonQueryAsync(cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private async Task MarkCapacityOfflineAsync(
+        HostId hostId,
+        NodeIncarnationId incarnationId,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = await controlStore.OpenConnectionAsync(
+                cancellationToken)
+            .ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE orchestration_capacity_catalog
+            SET authenticated_online=0,updated_at=$updated
+            WHERE host_id=$host AND node_incarnation_id=$incarnation
+            """;
+        command.Parameters.AddWithValue("$host", hostId.ToString());
+        command.Parameters.AddWithValue(
+            "$incarnation",
+            incarnationId.ToString());
+        command.Parameters.AddWithValue(
+            "$updated",
+            timeProvider.GetUtcNow().ToString("O"));
+        await command.ExecuteNonQueryAsync(cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private async Task<IReadOnlyList<HostCapacitySnapshot>>
+        LoadCapacityAsync(
+            PoolId poolId,
+            CancellationToken cancellationToken)
+    {
+        await using var connection = await controlStore.OpenConnectionAsync(
+                cancellationToken)
+            .ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT host_id,node_incarnation_id,capacity_json,
+                   capabilities_json,setup_fingerprints_json,observed_at,
+                   authenticated_online
+            FROM orchestration_capacity_catalog
+            WHERE pool_id=$pool
+            ORDER BY host_id
+            """;
+        command.Parameters.AddWithValue("$pool", poolId.ToString());
+        var hosts = new List<HostCapacitySnapshot>();
+        await using var reader = await command.ExecuteReaderAsync(
+            cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            var capacity = JsonSerializer.Deserialize<ResourceRequirements>(
+                    reader.GetString(2),
+                    StewardJson.Options)
+                ?? throw new InvalidDataException(
+                    "The capacity catalog resource snapshot is invalid.");
+            var capabilities = JsonSerializer.Deserialize<string[]>(
+                    reader.GetString(3),
+                    StewardJson.Options)
+                ?? throw new InvalidDataException(
+                    "The capacity catalog capabilities are invalid.");
+            var setups = JsonSerializer.Deserialize<string[]>(
+                    reader.GetString(4),
+                    StewardJson.Options)
+                ?? throw new InvalidDataException(
+                    "The capacity catalog setup fingerprints are invalid.");
+            hosts.Add(new(
+                HostId.Parse(reader.GetString(0)),
+                NodeIncarnationId.Parse(reader.GetString(1)),
+                poolId,
+                capacity,
+                capabilities,
+                setups,
+                DateTimeOffset.Parse(reader.GetString(5)),
+                reader.GetBoolean(6)));
+        }
+        return hosts;
+    }
+
+    private async Task RefreshHostsFromCatalogAsync(
+        WorkloadPlan plan,
+        PoolId poolId,
+        CancellationToken cancellationToken)
+    {
+        schedulerStates[plan.WorkloadId] =
+            await scheduler.SetHostsAsync(
+                    plan,
+                    await LoadCapacityAsync(poolId, cancellationToken)
+                        .ConfigureAwait(false),
+                    cancellationToken)
+                .ConfigureAwait(false);
+    }
     private async Task<SchedulingResult> ScheduleAndDispatchCoreAsync(
         WorkloadPlan plan,
         PoolId demandPool,
         DateTimeOffset now,
         CancellationToken cancellationToken)
     {
+        await RefreshHostsFromCatalogAsync(
+            plan,
+            demandPool,
+            cancellationToken).ConfigureAwait(false);
         var result = await scheduler.ScheduleAsync(plan, now, demandPool, cancellationToken).ConfigureAwait(false);
         schedulerStates[plan.WorkloadId] = result.State;
         if (result.Placements.Count == 0)
@@ -619,9 +991,11 @@ public sealed class ControlOrchestrator
 
     private static ContractEnvelope<WorkloadDto> InitialWorkload(WorkloadPlan plan, DateTimeOffset now)
     {
-        var planner = new ExtensionMetadataDto(
-            plan.PlannerType, plan.PlannerVersion,
-            JsonSerializer.SerializeToElement(new { plan.DeterministicHash }, StewardJson.Options));
+        var planner = ExtensionMetadataDto.Create(
+            plan.PlannerType,
+            plan.PlannerVersion,
+            new { plan.DeterministicHash },
+            StewardJson.Options);
         return new ContractEnvelope<WorkloadDto>(
             "steward.workload", "1.0.0", [], [], now, 0,
             new(plan.WorkloadId, plan.PlanRevisionId, plan.PlannerType,
@@ -637,13 +1011,14 @@ public sealed class ControlOrchestrator
                 node.Dependencies.Count == 0 ? TaskObservedState.Queued : TaskObservedState.Blocked,
                 0, node.InterruptionClass, TaskCapabilities.Execute, ToDto(node.Resources),
                 node.Dependencies,
-                new(node.TaskType, node.TaskTypeVersion,
-                    JsonSerializer.SerializeToElement(new
+                ExtensionMetadataDto.Create(
+                    node.TaskType, node.TaskTypeVersion,
+                    new
                     {
                         inputMediaType = node.Input.MediaType,
                         inputSchemaVersion = node.Input.SchemaVersion,
                         inputJson = node.Input.CanonicalJson
-                    }, StewardJson.Options))));
+                    }, StewardJson.Options)));
 
     private async Task LoadPersistedPlansAsync(CancellationToken cancellationToken)
     {
@@ -675,6 +1050,23 @@ public sealed class ControlOrchestrator
             var state = await schedulerStore.LoadAsync(plan.WorkloadId, cancellationToken).ConfigureAwait(false)
                 ?? throw new InvalidDataException("Persisted orchestration plan has no durable scheduler state.");
             SchedulerStateValidator.Validate(state, plan);
+            state = await scheduler.SetHostsAsync(
+                    plan,
+                    state.Hosts.Select(host => host with
+                    {
+                        Available = false
+                    }).ToArray(),
+                    cancellationToken)
+                .ConfigureAwait(false);
+            foreach (var active in state.Tasks.Where(task =>
+                         task.State is ScheduledTaskState.Placed or
+                             ScheduledTaskState.Running).ToArray())
+                state = await scheduler.MarkAmbiguousAsync(
+                        plan,
+                        active.TaskId,
+                        active.AttemptGeneration,
+                        cancellationToken)
+                    .ConfigureAwait(false);
             plans.Add(plan.WorkloadId, plan);
             demandPools.Add(plan.WorkloadId, PoolId.Parse(row.Pool));
             schedulerStates.Add(plan.WorkloadId, state);
@@ -736,6 +1128,25 @@ public sealed class ControlOrchestrator
                 throw new InvalidOperationException("Delegation acceptance has a stale Node incarnation.");
             await CommitFactAsync(sessionIncarnation, sequence, kind, hash, payloadJson,
                 $"delegation:{delegation.DelegationId}", null, null, null, cancellationToken).ConfigureAwait(false);
+            return FactDisposition.Applied;
+        }
+        if (fact is LocalMaintenanceResultFact maintenance)
+        {
+            if (maintenance.NodeIncarnationId != sessionIncarnation)
+                throw new InvalidOperationException(
+                    "Maintenance result has a stale Node incarnation.");
+            await CommitFactAsync(
+                    sessionIncarnation,
+                    sequence,
+                    kind,
+                    hash,
+                    payloadJson,
+                    $"maintenance:{maintenance.Result.RequestId:D}",
+                    null,
+                    null,
+                    null,
+                    cancellationToken)
+                .ConfigureAwait(false);
             return FactDisposition.Applied;
         }
         if (fact is RateFeedbackFact feedback)
@@ -816,7 +1227,8 @@ public sealed class ControlOrchestrator
                 portable = new(artifact.PortableObjectId, PortableObjectKind.Artifact, artifact.MediaType,
                     artifact.ContentHash, artifact.SizeBytes, identity.AttemptId, null, artifact.Portable,
                     artifact.Portable ? artifact.Reference : null,
-                    timeProvider.GetUtcNow(), new("orchestration", "1.0", JsonSerializer.SerializeToElement(new { artifact.Name })));
+                    timeProvider.GetUtcNow(), ExtensionMetadataDto.Create(
+                        "orchestration", "1.0", new { artifact.Name }, StewardJson.Options));
                 break;
             case TaskCheckpointFact checkpoint:
                 state = await scheduler.SetCheckpointAsync(plan, identity.TaskId, identity.Generation, cancellationToken)
@@ -825,7 +1237,8 @@ public sealed class ControlOrchestrator
                 portable = new(checkpoint.PortableObjectId, PortableObjectKind.TaskCheckpoint, "application/octet-stream",
                     checkpoint.ContentHash, checkpoint.SizeBytes, identity.AttemptId, null, checkpoint.Portable,
                     checkpoint.Portable ? checkpoint.Reference : null,
-                    timeProvider.GetUtcNow(), new("orchestration", "1.0", JsonSerializer.SerializeToElement(new { })));
+                    timeProvider.GetUtcNow(), ExtensionMetadataDto.Create(
+                        "orchestration", "1.0", new { }, StewardJson.Options));
                 break;
             case TaskTerminalFact terminal:
                 var success = terminal.State == TaskAttemptState.Succeeded;
@@ -885,18 +1298,13 @@ public sealed class ControlOrchestrator
         await CommitFactAsync(sessionIncarnation, sequence, kind, hash, payloadJson, ack,
             taskUpdate, attemptUpdate, workload, cancellationToken, portable).ConfigureAwait(false);
         if (fact is TaskTerminalFact &&
-            plan.Tasks.Any(x => x.Dependencies.Contains(identity.TaskId)) &&
             demandPools.TryGetValue(identity.WorkloadId, out var demandPool))
-        {
-            var refreshedHosts = state.Hosts.Select(x =>
-                x.HostId == identity.HostId && x.IncarnationId == identity.NodeIncarnationId
-                    ? x with { ObservedAt = timeProvider.GetUtcNow(), Available = true }
-                    : x).ToArray();
-            state = await scheduler.SetHostsAsync(plan, refreshedHosts, cancellationToken).ConfigureAwait(false);
-            schedulerStates[plan.WorkloadId] = state;
             await ScheduleAndDispatchCoreAsync(
-                plan, demandPool, timeProvider.GetUtcNow(), cancellationToken).ConfigureAwait(false);
-        }
+                    plan,
+                    demandPool,
+                    timeProvider.GetUtcNow(),
+                    cancellationToken)
+                .ConfigureAwait(false);
         return fact is TaskRecoveryFact ? FactDisposition.Recovery : FactDisposition.Applied;
     }
 
@@ -1083,7 +1491,9 @@ public sealed class ControlOrchestrator
             new(identity.AttemptId, identity.TaskId, identity.Generation, identity.HostId,
                 identity.NodeIncarnationId, TaskAttemptState.Dispatched, RecoveryCertainty.Certain,
                 identity.DelegationId, identity.CommandId, expiresAt,
-                new("orchestration", "1.0", JsonSerializer.SerializeToElement(new { identity.WorkloadId }))));
+                ExtensionMetadataDto.Create(
+                    "orchestration", "1.0",
+                    new { identity.WorkloadId }, StewardJson.Options)));
 
     private static ContractEnvelope<TaskDto> NextTask(
         ContractEnvelope<TaskDto> value, TaskObservedState state) =>
@@ -1117,7 +1527,8 @@ public sealed class ControlOrchestrator
         string capability,
         DateTimeOffset now) =>
         new(id, idempotencyKey, 0, generation, incarnation, now.AddDays(7), "steward.control", capability,
-            new(capability, "1.0", JsonSerializer.SerializeToElement(new { }, StewardJson.Options)));
+            ExtensionMetadataDto.Create(
+                capability, "1.0", new { }, StewardJson.Options));
 
     private static OutboxMessage Outbox(string id, string kind, object value, string idempotencyKey) =>
         new(id, kind, Encoding.UTF8.GetString(OrchestrationMessageCodec.Encode(value, DateTimeOffset.UtcNow).Span),
@@ -1228,7 +1639,7 @@ public sealed class ControlOrchestrator
         command.Parameters.AddWithValue("$hash", value.ContentHash);
         command.Parameters.AddWithValue("$size", value.SizeBytes);
         command.Parameters.AddWithValue("$complete", value.Complete);
-        command.Parameters.AddWithValue("$receipt", (object?)value.StoreReceipt ?? DBNull.Value);
+        command.Parameters.AddWithValue("$receipt", (IConvertible?)value.StoreReceipt ?? DBNull.Value);
         command.Parameters.AddWithValue("$metadata", JsonSerializer.Serialize(value, StewardJson.Options));
         command.Parameters.AddWithValue("$created", value.CreatedAt.ToString("O"));
         if (await command.ExecuteNonQueryAsync(cancellationToken) != 1)

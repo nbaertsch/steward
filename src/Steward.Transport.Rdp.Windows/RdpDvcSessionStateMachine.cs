@@ -96,23 +96,23 @@ public sealed class RdpDvcSessionStateMachine
                 (RdpDvcSessionState.ConnectingHeadless or
                  RdpDvcSessionState.Reconnecting))
                 throw InvalidTransition();
-        if (!verifiedEvidence.Accepted ||
-            !string.Equals(
-                verifiedEvidence.Code,
-                RdCoreDvcContract.EvidenceVerifiedCode,
-                StringComparison.Ordinal) ||
-            verifiedEvidence.ConnectionGeneration is not { } generation)
-            throw new RdpDvcSessionTransitionException(
-                "RDP_DVC_VERIFIED_EVIDENCE_REQUIRED",
-                "Connected transport requires verified RDCore/DVC evidence.");
-        if (_connectionGeneration is { } previous &&
-            generation <= previous)
-            throw new RdpDvcSessionTransitionException(
-                "RDP_DVC_CONNECTION_GENERATION_NOT_ADVANCED",
-                "A reconnected transport requires a newer connection generation.");
-        _connectionGeneration = generation;
-        _dvcConnected = true;
-        _visibleSurfaceAuthorized = false;
+            if (!verifiedEvidence.Accepted ||
+                !string.Equals(
+                    verifiedEvidence.Code,
+                    RdCoreDvcContract.EvidenceVerifiedCode,
+                    StringComparison.Ordinal) ||
+                verifiedEvidence.ConnectionGeneration is not { } generation)
+                throw new RdpDvcSessionTransitionException(
+                    "RDP_DVC_VERIFIED_EVIDENCE_REQUIRED",
+                    "Connected transport requires verified RDCore/DVC evidence.");
+            if (_connectionGeneration is { } previous &&
+                generation <= previous)
+                throw new RdpDvcSessionTransitionException(
+                    "RDP_DVC_CONNECTION_GENERATION_NOT_ADVANCED",
+                    "A reconnected transport requires a newer connection generation.");
+            _connectionGeneration = generation;
+            _dvcConnected = true;
+            _visibleSurfaceAuthorized = false;
             return Transition(
                 RdpDvcSessionState.ConnectedTransport,
                 "RDP_DVC_CONNECTED_TRANSPORT");
@@ -186,21 +186,21 @@ public sealed class RdpDvcSessionStateMachine
     {
         lock (sync)
         {
-        if (!_visibleSurfaceAuthorized ||
-            _state is not
-                (RdpDvcSessionState.Viewing or
-                 RdpDvcSessionState.Controlled) ||
-            !_connectionGeneration.HasValue ||
-            connectionGeneration != _connectionGeneration.Value)
-        {
-            _state = RdpDvcSessionState.Failed;
-            _dvcConnected = false;
-            _visibleSurfaceAuthorized = false;
-            _code = "RDP_DVC_FATAL_UNEXPECTED_VISIBLE_SURFACE";
-            throw new RdpHeadlessViolationException(
-                _code,
-                "A visible RDP surface appeared without an explicit View transition.");
-        }
+            if (!_visibleSurfaceAuthorized ||
+                _state is not
+                    (RdpDvcSessionState.Viewing or
+                     RdpDvcSessionState.Controlled) ||
+                !_connectionGeneration.HasValue ||
+                connectionGeneration != _connectionGeneration.Value)
+            {
+                _state = RdpDvcSessionState.Failed;
+                _dvcConnected = false;
+                _visibleSurfaceAuthorized = false;
+                _code = "RDP_DVC_FATAL_UNEXPECTED_VISIBLE_SURFACE";
+                throw new RdpHeadlessViolationException(
+                    _code,
+                    "A visible RDP surface appeared without an explicit View transition.");
+            }
             return SnapshotCore();
         }
     }

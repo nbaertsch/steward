@@ -5,9 +5,9 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Steward.Application;
 using Steward.Orchestration;
+using Steward.PortableState;
 using Steward.Providers.Abstractions;
 using Steward.Providers.DevBox;
-using Steward.PortableState;
 using Steward.Transport;
 
 namespace Steward.Stack.Local;
@@ -75,10 +75,12 @@ public static class LocalStackComposition
         services.AddSingleton<IControlIdentityGrantCatalog>(provider =>
             provider.GetRequiredService<LocalControlIdentityGrantCatalog>());
         services.AddSingleton<DirectSessionControlIdentityHandler>();
+        services.AddSingleton<ControlMaintenanceDispatcher>();
         services.AddSingleton<LocalPortableReceiveHandler>();
         services.AddSingleton<IAuxiliaryTransportStreamHandler>(provider =>
             provider.GetRequiredService<LocalPortableReceiveHandler>());
         services.AddHostedService<LocalControlSessionWorker>();
+        services.AddHostedService<RdpDvcControlSessionWorker>();
         return services;
     }
 

@@ -155,26 +155,436 @@ public interface IRdpDvcRuntimeEvidenceSource
         RdpDvcRuntimeEvidenceTicket ticket);
 }
 
+public interface IRdpDvcLocalCarrierLease : IAsyncDisposable
+{
+    Task Completion { get; }
+}
+
 public interface IRdpDvcLocalCarrier
 {
-    Task<IAsyncDisposable> ConnectAsync(
+    Task<IRdpDvcLocalCarrierLease> ConnectAsync(
         RdpDvcRuntimeEvidenceTicket ticket,
         CancellationToken cancellationToken);
 }
 
-public sealed class ProtectedFileRdpDvcLocalCarrier(
-    string dvcKeyFile,
-    string controlSigningPrivateKeyFile,
-    string nodeSigningPublicKeyFile,
-    string controlIdentity,
-    string nodeIdentity,
-    string evidencePipeName,
-    string evidenceKeyFile,
-    Action<string>? diagnosticSink = null) :
-    IRdpDvcLocalCarrier
+internal interface IRdpDvcLocalCarrierAttempt : IAsyncDisposable
 {
-    public async Task<IAsyncDisposable> ConnectAsync(
+    Task Completion { get; }
+}
+
+internal interface IRdpDvcLocalCarrierAttemptFactory
+{
+    Task<IRdpDvcLocalCarrierAttempt> ConnectAsync(
+        CancellationToken cancellationToken);
+}
+
+internal sealed class RdpDvcLocalCarrierReconnectSupervisor :
+    IRdpDvcLocalCarrierLease
+{
+    private readonly IRdpDvcLocalCarrierAttemptFactory factory;
+    private readonly Func<int, TimeSpan> delayFactory;
+    private readonly Func<TimeSpan, CancellationToken, Task> delayAsync;
+    private readonly CancellationTokenSource stop = new();
+    private readonly Task stopped;
+    private readonly Task lifetime;
+    private IRdpDvcLocalCarrierAttempt? current;
+    private int disposed;
+
+    public RdpDvcLocalCarrierReconnectSupervisor(
+        IRdpDvcLocalCarrierAttempt initialAttempt,
+        IRdpDvcLocalCarrierAttemptFactory factory,
+        Func<int, TimeSpan> delayFactory,
+        Func<TimeSpan, CancellationToken, Task>? delayAsync = null)
+    {
+        current = initialAttempt ??
+            throw new ArgumentNullException(nameof(initialAttempt));
+        this.factory = factory ??
+            throw new ArgumentNullException(nameof(factory));
+        this.delayFactory = delayFactory ??
+            throw new ArgumentNullException(nameof(delayFactory));
+        this.delayAsync = delayAsync ?? Task.Delay;
+        stopped = Task.Delay(Timeout.InfiniteTimeSpan, stop.Token);
+        lifetime = RunAsync();
+    }
+
+    public Task Completion => lifetime;
+
+    public async ValueTask DisposeAsync()
+    {
+        if (Interlocked.Exchange(ref disposed, 1) != 0)
+            return;
+        stop.Cancel();
+        try
+        {
+            await lifetime.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+            when (stop.IsCancellationRequested)
+        {
+        }
+        finally
+        {
+            stop.Dispose();
+        }
+    }
+
+    private async Task RunAsync()
+    {
+        var failures = 0;
+        try
+        {
+            while (!stop.IsCancellationRequested)
+            {
+                var active = current ??
+                    throw new InvalidOperationException(
+                        "The reconnect supervisor has no active attempt.");
+                var completed = await Task.WhenAny(
+                        active.Completion,
+                        stopped)
+                    .ConfigureAwait(false);
+                if (completed == stopped)
+                    return;
+                try
+                {
+                    await active.Completion.ConfigureAwait(false);
+                    failures = 0;
+                }
+                catch (Exception exception)
+                    when (IsRecoverable(exception))
+                {
+                    failures = 1;
+                }
+                await active.DisposeAsync().ConfigureAwait(false);
+                current = null;
+                await delayAsync(
+                        delayFactory(failures),
+                        stop.Token)
+                    .ConfigureAwait(false);
+
+                while (!stop.IsCancellationRequested)
+                {
+                    try
+                    {
+                        current = await factory.ConnectAsync(stop.Token)
+                            .ConfigureAwait(false) ??
+                            throw new InvalidOperationException(
+                                "The reconnect attempt factory returned no attempt.");
+                        failures = 0;
+                        break;
+                    }
+                    catch (Exception exception)
+                        when (IsRecoverable(exception))
+                    {
+                        failures = Math.Min(failures + 1, 17);
+                        await delayAsync(
+                                delayFactory(failures),
+                                stop.Token)
+                            .ConfigureAwait(false);
+                    }
+                }
+            }
+        }
+        finally
+        {
+            if (current is not null)
+                await current.DisposeAsync().ConfigureAwait(false);
+        }
+    }
+
+    private static bool IsRecoverable(Exception exception) =>
+        exception is
+            EndOfStreamException or
+            IOException or
+            TimeoutException or
+            RdpDvcProtocolException or
+            TransportProtocolException or
+            CryptographicException or
+            TransportDisconnectedException or
+            TransientTransportException;
+}
+internal enum RdpDvcLocalCarrierMode
+{
+    ReconnectV2,
+    RetainedV1Migration
+}
+
+internal static class RdpDvcLocalCarrierCompatibility
+{
+    internal static RdpDvcLocalCarrierMode Select(
+        RdpDvcEvidenceRoute route)
+    {
+        ArgumentNullException.ThrowIfNull(route);
+        try
+        {
+            _ = route.Validate();
+        }
+        catch (ArgumentException exception)
+        {
+            throw new InvalidDataException(
+                "The DVC carrier compatibility state is invalid.",
+                exception);
+        }
+
+        if (route.ProtocolVersion == 2 &&
+            route.RetainedV1Endpoint is null)
+            return RdpDvcLocalCarrierMode.ReconnectV2;
+        if (route.ProtocolVersion == 1 &&
+            route.RetainedV1Endpoint is { } retained)
+        {
+            _ = retained.Validate();
+            return RdpDvcLocalCarrierMode.RetainedV1Migration;
+        }
+        throw new InvalidDataException(
+            "The DVC carrier protocol downgrade is not authorized.");
+    }
+}
+internal interface IRdpDvcLocalCarrierV2Connection : IAsyncDisposable
+{
+    RdpDvcCarrierAttemptIdentity Identity { get; }
+    Stream Stream { get; }
+    RdpDvcCarrierAuthenticationV2 Authentication { get; }
+}
+
+internal interface IRdpDvcLocalCarrierV2Connector
+{
+    Task<IRdpDvcLocalCarrierV2Connection> ConnectAsync(
+        RdpDvcEvidenceTicketIdentity ticket,
+        ReadOnlyMemory<byte> carrierSecret,
+        CancellationToken cancellationToken);
+}
+
+internal sealed class NamedPipeRdpDvcLocalCarrierV2Connector(
+    string dvcBrokerPipeName) : IRdpDvcLocalCarrierV2Connector
+{
+    public async Task<IRdpDvcLocalCarrierV2Connection> ConnectAsync(
+        RdpDvcEvidenceTicketIdentity ticket,
+        ReadOnlyMemory<byte> carrierSecret,
+        CancellationToken cancellationToken)
+    {
+        var route = ticket.Route.Validate();
+        var brokerPipeName = RdpDvcPerConnectionRoute.Create(
+            Path.GetTempPath(),
+            dvcBrokerPipeName,
+            ticket.ConnectionId).BrokerPipeName;
+        var source = new RdpDvcCarrierV2NamedPipeWireChannelSource(
+            new(
+                route.SessionId,
+                new HostId(route.HostId),
+                new NodeIncarnationId(route.NodeIncarnationId),
+                ExpectedReconnectGeneration: null,
+                ExpectedAttemptId: null,
+                ExpectedRdpSessionId:
+                    route.IsWtsWildcard ? null : route.WtsSessionId),
+            carrierSecret.Span,
+            brokerPipeName,
+            TimeSpan.FromMinutes(5));
+        var wire = await source.OpenChannelAsync(cancellationToken)
+            .ConfigureAwait(false);
+        var selected = source.SelectedIdentity ??
+            throw new InvalidDataException(
+                "The DVC broker returned no authenticated reconnect identity.");
+        var carrier = await RdpDvcCarrierHandshakeV2.RespondAsync(
+                wire,
+                selected,
+                carrierSecret,
+                TimeSpan.FromMinutes(5),
+                cancellationToken)
+            .ConfigureAwait(false);
+        return new Connection(selected, carrier);
+    }
+
+    private sealed class Connection(
+        RdpDvcCarrierAttemptIdentity identity,
+        RdpDvcConnectedStreamV2 carrier) :
+        IRdpDvcLocalCarrierV2Connection
+    {
+        public RdpDvcCarrierAttemptIdentity Identity { get; } = identity;
+        public Stream Stream => carrier.Stream;
+        public RdpDvcCarrierAuthenticationV2 Authentication =>
+            carrier.Authentication;
+        public ValueTask DisposeAsync() => carrier.DisposeAsync();
+    }
+}
+
+public sealed class ProtectedFileRdpDvcLocalCarrier : IRdpDvcLocalCarrier
+{
+    private readonly string dvcKeyFile;
+    private readonly string dvcBrokerPipeName;
+    private readonly string evidencePipeName;
+    private readonly string evidenceKeyFile;
+    private readonly IConnectionReconnectHighWaterStore reconnectHighWater;
+    private readonly IRdpDvcOpaqueControlBridge controlBridge;
+    private readonly IRdpDvcLocalCarrierV2Connector v2Connector;
+    private readonly Action<string>? diagnosticSink;
+
+    public ProtectedFileRdpDvcLocalCarrier(
+        string dvcKeyFile, string dvcBrokerPipeName,
+        string evidencePipeName, string evidenceKeyFile,
+        IConnectionReconnectHighWaterStore reconnectHighWater,
+        IRdpDvcOpaqueControlBridge controlBridge,
+        Action<string>? diagnosticSink = null)
+        : this(dvcKeyFile, dvcBrokerPipeName, evidencePipeName,
+            evidenceKeyFile, reconnectHighWater, controlBridge,
+            new NamedPipeRdpDvcLocalCarrierV2Connector(dvcBrokerPipeName),
+            diagnosticSink)
+    {
+    }
+
+    internal ProtectedFileRdpDvcLocalCarrier(
+        string dvcKeyFile, string dvcBrokerPipeName,
+        string evidencePipeName, string evidenceKeyFile,
+        IConnectionReconnectHighWaterStore reconnectHighWater,
+        IRdpDvcOpaqueControlBridge controlBridge,
+        IRdpDvcLocalCarrierV2Connector v2Connector,
+        Action<string>? diagnosticSink = null)
+    {
+        this.dvcKeyFile = dvcKeyFile;
+        this.dvcBrokerPipeName = dvcBrokerPipeName;
+        this.evidencePipeName = evidencePipeName;
+        this.evidenceKeyFile = evidenceKeyFile;
+        this.reconnectHighWater = reconnectHighWater;
+        this.controlBridge = controlBridge;
+        this.v2Connector = v2Connector ??
+            throw new ArgumentNullException(nameof(v2Connector));
+        this.diagnosticSink = diagnosticSink;
+    }
+    public async Task<IRdpDvcLocalCarrierLease> ConnectAsync(
         RdpDvcRuntimeEvidenceTicket ticket,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(ticket);
+        var mode = RdpDvcLocalCarrierCompatibility.Select(
+            ticket.Identity.Route);
+        if (mode == RdpDvcLocalCarrierMode.RetainedV1Migration)
+            return await ConnectRetainedV1Async(
+                    ticket,
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+        var initial = await ConnectAttemptAsync(
+                ticket,
+                publishInitialEvidence: true,
+                cancellationToken)
+            .ConfigureAwait(false);
+        return new RdpDvcLocalCarrierReconnectSupervisor(
+            initial,
+            new AttemptFactory(this, ticket),
+            CreateReconnectDelay);
+    }
+
+    private async Task<IRdpDvcLocalCarrierLease>
+        ConnectRetainedV1Async(
+            RdpDvcRuntimeEvidenceTicket ticket,
+            CancellationToken cancellationToken)
+    {
+        diagnosticSink?.Invoke("key-read");
+        var key = await File.ReadAllBytesAsync(
+                Path.GetFullPath(dvcKeyFile),
+                cancellationToken)
+            .ConfigureAwait(false);
+        AuthenticatedRdpDvcEvidencePublisher? publisher = null;
+        RdpDvcConnectedStream? carrier = null;
+        IRdpDvcOpaqueControlBridgeLease? bridgeLease = null;
+        try
+        {
+            var route = ticket.Identity.Route.Validate();
+            var retained = route.RetainedV1Endpoint?.Validate() ??
+                throw new InvalidDataException(
+                    "The retained v1 endpoint state is unavailable.");
+            var authentication = new RdpDvcAuthenticationOptions(
+                new(
+                    route.SessionId,
+                    route.HostId,
+                    route.NodeIncarnationId,
+                    route.IsWtsWildcard
+                        ? null
+                        : route.WtsSessionId,
+                    route.ConnectionNonce),
+                key);
+            var brokerPipeName = RdpDvcPerConnectionRoute.Create(
+                Path.GetTempPath(),
+                dvcBrokerPipeName,
+                ticket.Identity.ConnectionId).BrokerPipeName;
+            var source = new RdpDvcNamedPipeWireChannelSource(
+                authentication,
+                brokerPipeName,
+                TimeSpan.FromMinutes(5));
+            diagnosticSink?.Invoke("pipe-open-start");
+            var wire = await source.OpenChannelAsync(cancellationToken)
+                .ConfigureAwait(false);
+            carrier = await RdpDvcStreamHandshake.RespondAsync(
+                    wire,
+                    authentication,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            publisher =
+                AuthenticatedRdpDvcEvidencePublisher.FromProtectedFile(
+                    evidencePipeName,
+                    evidenceKeyFile);
+            var evidence = publisher.CreateTransportSession(
+                ticket.Identity);
+            var authenticatedRoute = RdpDvcEvidenceRoute.From(
+                carrier.Handshake) with
+            {
+                RetainedV1Endpoint = retained
+            };
+            evidence.BindAuthenticatedRoute(authenticatedRoute);
+            await evidence.PublishAsync(
+                    RdpDvcEvidencePublicationEvent
+                        .DvcHmacAuthenticated,
+                    cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+            var attachment = new RetainedV1CarrierAttachment(
+                carrier.Handshake.SessionId,
+                new HostId(carrier.Handshake.HostId),
+                new NodeIncarnationId(
+                    carrier.Handshake.NodeIncarnationId),
+                carrier.Handshake.RdpSessionId,
+                carrier.Handshake.Nonce,
+                retained)
+            {
+                RouteId = route.HostId
+            };
+            bridgeLease = await controlBridge.AttachAsync(
+                    carrier.Stream,
+                    attachment,
+                    new(
+                        ticket.Identity.ConnectionId,
+                        ticket.Identity.ConnectionGeneration),
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (bridgeLease.Completion.IsCompleted)
+                throw new TransportDisconnectedException(
+                    "The retained v1 Control session closed during attachment.");
+            await evidence.PublishAsync(
+                    RdpDvcEvidencePublicationEvent
+                        .SecurePeerAuthenticated,
+                    cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+            diagnosticSink?.Invoke("control-secure-accept-complete");
+            var result = new LocalCarrierAttempt(
+                bridgeLease,
+                carrier,
+                publisher);
+            bridgeLease = null;
+            carrier = null;
+            publisher = null;
+            return result;
+        }
+        finally
+        {
+            if (bridgeLease is not null)
+                await bridgeLease.DisposeAsync().ConfigureAwait(false);
+            if (carrier is not null)
+                await carrier.DisposeAsync().ConfigureAwait(false);
+            if (publisher is not null)
+                await publisher.DisposeAsync().ConfigureAwait(false);
+            CryptographicOperations.ZeroMemory(key);
+        }
+    }
+    private async Task<IRdpDvcLocalCarrierAttempt> ConnectAttemptAsync(
+        RdpDvcRuntimeEvidenceTicket ticket,
+        bool publishInitialEvidence,
         CancellationToken cancellationToken)
     {
         diagnosticSink?.Invoke("key-read");
@@ -183,109 +593,129 @@ public sealed class ProtectedFileRdpDvcLocalCarrier(
                 cancellationToken)
             .ConfigureAwait(false);
         AuthenticatedRdpDvcEvidencePublisher? publisher = null;
-        RdpDvcEvidencePublishingConnectionAcceptor? acceptor = null;
+        IRdpDvcLocalCarrierV2Connection? carrier = null;
+        IRdpDvcOpaqueControlBridgeLease? bridgeLease = null;
         try
         {
-            var route = ticket.Identity.Route;
-            var options = new RdpDvcAuthenticationOptions(
-                new(
-                    route.SessionId,
-                    route.HostId,
-                    route.NodeIncarnationId,
-                    route.IsWtsWildcard ? null : route.WtsSessionId,
-                    route.ConnectionNonce),
-                key);
-            var source = new RdpDvcNamedPipeWireChannelSource(
-                options,
-                connectTimeout: TimeSpan.FromMinutes(5));
-            var controlKey = ECDsa.Create();
-            controlKey.ImportFromPem(
-                await File.ReadAllTextAsync(
-                        Path.GetFullPath(controlSigningPrivateKeyFile),
-                        cancellationToken)
-                    .ConfigureAwait(false));
-            using var nodeKey = ECDsa.Create();
-            nodeKey.ImportFromPem(
-                await File.ReadAllTextAsync(
-                        Path.GetFullPath(nodeSigningPublicKeyFile),
-                        cancellationToken)
-                    .ConfigureAwait(false));
-            publisher =
-                AuthenticatedRdpDvcEvidencePublisher.FromProtectedFile(
-                    evidencePipeName,
-                    evidenceKeyFile);
-            acceptor = new(
-                source,
-                options,
-                new(
-                    TransportEndpointRole.Control,
-                    new EcdsaEndpointSigningKey(
-                        controlIdentity,
-                        controlKey),
-                    new(
-                        nodeIdentity,
-                        nodeKey.ExportSubjectPublicKeyInfo()),
-                    HandshakeTimeout: TimeSpan.FromMinutes(5),
-                    OperationTimeout: TimeSpan.FromMinutes(5)),
-                publisher,
-                ticket.Identity);
             diagnosticSink?.Invoke("pipe-open-start");
-            var connection = await acceptor.AcceptAsync(
-                    CreateHello(route),
+            carrier = await v2Connector.ConnectAsync(
+                    ticket.Identity,
+                    key,
                     cancellationToken)
                 .ConfigureAwait(false);
-            diagnosticSink?.Invoke("secure-accept-complete");
-            return new LocalCarrierLease(
-                connection,
-                acceptor,
+            var selected = carrier.Identity;
+            RdpDvcEvidencePublisherSession? evidence = null;
+            if (publishInitialEvidence)
+            {
+                publisher =
+                    AuthenticatedRdpDvcEvidencePublisher.FromProtectedFile(
+                        evidencePipeName,
+                        evidenceKeyFile);
+                evidence = publisher.CreateTransportSession(
+                    ticket.Identity);
+                var authenticatedRoute = new RdpDvcEvidenceRoute(
+                    selected.SessionId,
+                    selected.HostId.Value,
+                    selected.NodeIncarnationId.Value,
+                    selected.RdpSessionId,
+                    selected.AttemptId,
+                    ProtocolVersion: 2);
+                evidence.BindAuthenticatedReconnectRoute(
+                    authenticatedRoute);
+                await evidence.PublishAsync(
+                        RdpDvcEvidencePublicationEvent
+                            .DvcHmacAuthenticated,
+                        cancellationToken: cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
+            bridgeLease = await controlBridge.AttachAsync(
+                    carrier.Stream,
+                    new ReconnectCarrierAttachment(
+                        selected.SessionId,
+                        carrier.Authentication.ToTransportBinding()),
+                    new(
+                        ticket.Identity.ConnectionId,
+                        ticket.Identity.ConnectionGeneration),
+                    cancellationToken)
+                .ConfigureAwait(false);
+            await reconnectHighWater.ObserveAsync(
+                    ticket.Identity.ConnectionId,
+                    selected,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (bridgeLease.Completion.IsCompleted)
+                throw new TransportDisconnectedException(
+                    "The authenticated Control session closed during attachment.");
+            if (evidence is not null)
+            {
+                await evidence.PublishAsync(
+                        RdpDvcEvidencePublicationEvent
+                            .SecurePeerAuthenticated,
+                        cancellationToken: cancellationToken)
+                    .ConfigureAwait(false);
+                diagnosticSink?.Invoke(
+                    "control-secure-accept-complete");
+            }
+
+            var result = new LocalCarrierAttempt(
+                bridgeLease,
+                carrier,
                 publisher);
-        }
-        catch
-        {
-            if (acceptor is not null)
-                await acceptor.DisposeAsync().ConfigureAwait(false);
-            if (publisher is not null)
-                await publisher.DisposeAsync().ConfigureAwait(false);
-            throw;
+            bridgeLease = null;
+            carrier = null;
+            publisher = null;
+            return result;
         }
         finally
         {
+            if (bridgeLease is not null)
+                await bridgeLease.DisposeAsync().ConfigureAwait(false);
+            if (carrier is not null)
+                await carrier.DisposeAsync().ConfigureAwait(false);
+            if (publisher is not null)
+                await publisher.DisposeAsync().ConfigureAwait(false);
             CryptographicOperations.ZeroMemory(key);
         }
     }
 
-    private static SessionHello CreateHello(RdpDvcEvidenceRoute route) =>
-        new(
-            route.SessionId,
-            new NodeIncarnationId(route.NodeIncarnationId),
-            1,
-            0,
-            new HashSet<string>(StringComparer.Ordinal)
-            {
-                "rdp-dvc-secure",
-                "orchestration-v1",
-                "reconciliation-v1",
-                "resume-cursors-v1"
-            },
-            new HashSet<string>(StringComparer.Ordinal),
-            new Dictionary<StreamKind, long>(),
-            new(64 * 1024, 8));
-
-    private sealed class LocalCarrierLease(
-        ITransportConnection connection,
-        RdpDvcEvidencePublishingConnectionAcceptor acceptor,
-        AuthenticatedRdpDvcEvidencePublisher publisher) :
-        IAsyncDisposable
+    private static TimeSpan CreateReconnectDelay(int failures) =>
+        RdpDvcReconnectBackoff.CreateDelay(failures);
+    private sealed class AttemptFactory(
+        ProtectedFileRdpDvcLocalCarrier owner,
+        RdpDvcRuntimeEvidenceTicket ticket) :
+        IRdpDvcLocalCarrierAttemptFactory
     {
+        public Task<IRdpDvcLocalCarrierAttempt> ConnectAsync(
+            CancellationToken cancellationToken) =>
+            owner.ConnectAttemptAsync(
+                ticket,
+                publishInitialEvidence: false,
+                cancellationToken);
+    }
+
+    private sealed class LocalCarrierAttempt(
+        IRdpDvcOpaqueControlBridgeLease bridgeLease,
+        IAsyncDisposable carrier,
+        AuthenticatedRdpDvcEvidencePublisher? publisher) :
+        IRdpDvcLocalCarrierAttempt,
+        IRdpDvcLocalCarrierLease
+    {
+        private int disposed;
+
+        public Task Completion => bridgeLease.Completion;
+
         public async ValueTask DisposeAsync()
         {
-            await connection.DisposeAsync().ConfigureAwait(false);
-            await acceptor.DisposeAsync().ConfigureAwait(false);
-            await publisher.DisposeAsync().ConfigureAwait(false);
+            if (Interlocked.Exchange(ref disposed, 1) != 0)
+                return;
+            await bridgeLease.DisposeAsync().ConfigureAwait(false);
+            await carrier.DisposeAsync().ConfigureAwait(false);
+            if (publisher is not null)
+                await publisher.DisposeAsync().ConfigureAwait(false);
         }
     }
 }
-
 public sealed record RdpDvcRuntimeEvidenceTicket(
     Guid TicketId,
     RdpDvcEvidenceTicketIdentity Identity)
@@ -308,20 +738,23 @@ public sealed class ProductionRdCoreConnectionRuntime :
     private readonly IRdCoreConnectionLeaseFactory leaseFactory;
     private readonly IRdpDvcRuntimeEvidenceSource evidenceSource;
     private readonly IRdpDvcLocalCarrier? localCarrier;
+    private readonly IConnectionGenerationStore generationStore;
     private readonly TimeSpan evidenceTimeout;
     private readonly ConcurrentDictionary<string, OwnedConnection> leases =
         new(StringComparer.Ordinal);
-    private long nextGeneration = DateTimeOffset.UtcNow.UtcTicks;
 
     public ProductionRdCoreConnectionRuntime(
         IRdCoreConnectionLeaseFactory leaseFactory,
         IRdpDvcRuntimeEvidenceSource evidenceSource,
         TimeSpan? evidenceTimeout = null,
-        IRdpDvcLocalCarrier? localCarrier = null)
+        IRdpDvcLocalCarrier? localCarrier = null,
+        IConnectionGenerationStore? generationStore = null)
     {
         this.leaseFactory = leaseFactory;
         this.evidenceSource = evidenceSource;
         this.localCarrier = localCarrier;
+        this.generationStore = generationStore ??
+            new InMemoryConnectionGenerationStore();
         this.evidenceTimeout = evidenceTimeout ?? TimeSpan.FromSeconds(30);
         if (this.evidenceTimeout <= TimeSpan.Zero ||
             this.evidenceTimeout > TimeSpan.FromMinutes(5))
@@ -338,7 +771,10 @@ public sealed class ProductionRdCoreConnectionRuntime :
             throw new ConnectionHostOperationException(
                 "CONNECTION_HOST_DVC_EVIDENCE_SOURCE_UNAVAILABLE",
                 "Authenticated DVC evidence is not configured.");
-        var generation = Interlocked.Increment(ref nextGeneration);
+        var generation = await generationStore.ReserveAsync(
+                request.ConnectionId,
+                cancellationToken)
+            .ConfigureAwait(false);
         var runtimeId = Guid.NewGuid().ToString("N");
         if (string.IsNullOrWhiteSpace(request.DvcEvidenceReference))
             throw new ConnectionHostOperationException(
@@ -352,7 +788,7 @@ public sealed class ProductionRdCoreConnectionRuntime :
                 cancellationToken)
             .ConfigureAwait(false);
         IRdCoreConnectionLeaseHandle? lease = null;
-        IAsyncDisposable? carrier = null;
+        IRdpDvcLocalCarrierLease? carrier = null;
         try
         {
             lease = await leaseFactory.CreateAsync(
@@ -420,7 +856,6 @@ public sealed class ProductionRdCoreConnectionRuntime :
                     await externallyProven.ConnectionFailure
                         .ConfigureAwait(false);
                 external = await evidenceTask.ConfigureAwait(false);
-                externallyProven.ConfirmConnected();
             }
             else
             {
@@ -433,8 +868,6 @@ public sealed class ProductionRdCoreConnectionRuntime :
                         timeout.Token)
                     .ConfigureAwait(false);
             }
-            lock (runtimeEvents)
-                ValidateRuntimeEvents(runtimeEvents);
             ValidateExternalEvidence(
                 request.ConnectionId,
                 runtimeId,
@@ -448,6 +881,11 @@ public sealed class ProductionRdCoreConnectionRuntime :
             };
             evidence.AddRange(external.Evidence);
             ValidateCompleteEvidence(request.Registration, generation, evidence);
+            if (lease is IExternallyProvenRdCoreConnectionLeaseHandle
+                externallyValidated)
+                externallyValidated.ConfirmConnected();
+            lock (runtimeEvents)
+                ValidateRuntimeEvents(runtimeEvents);
             await evidenceSource.CancelAsync(ticket).ConfigureAwait(false);
             ticketReleased = true;
             var result = new RdCoreConnectionRuntimeResult(
@@ -460,9 +898,18 @@ public sealed class ProductionRdCoreConnectionRuntime :
                         false,
                         false,
                         "RDCORE_SAME_CONNECTION_PRESENTATION_UNPROVEN"));
-            if (!leases.TryAdd(runtimeId, new(lease, carrier, result)))
+            var ownedConnection = new OwnedConnection(
+                lease,
+                carrier,
+                result);
+            if (!leases.TryAdd(runtimeId, ownedConnection))
                 throw new InvalidOperationException(
                     "The RDCore runtime connection ID collided.");
+            if (carrier is not null)
+                _ = RemoveOnCarrierCompletionAsync(
+                    runtimeId,
+                    generation,
+                    carrier);
             carrier = null;
             if (lease is IExternallyProvenRdCoreConnectionLeaseHandle
                 externallyProvenLease)
@@ -624,7 +1071,7 @@ public sealed class ProductionRdCoreConnectionRuntime :
             evidence.Evidence.Count != 5 ||
             evidence.AuthenticatedRoute is not { WtsSessionId: > 0 }
                 authenticatedRoute ||
-            !preauthorizedRoute.HasSamePreauthorizedBase(
+            !preauthorizedRoute.MatchesAuthenticatedRoute(
                 authenticatedRoute))
             throw new InvalidDataException(
                 "DVC evidence did not match the RDCore connection.");
@@ -670,6 +1117,34 @@ public sealed class ProductionRdCoreConnectionRuntime :
                 "RDCore runtime evidence arrived out of order.");
     }
 
+    private async Task RemoveOnCarrierCompletionAsync(
+        string runtimeConnectionId,
+        long connectionGeneration,
+        IRdpDvcLocalCarrierLease carrier)
+    {
+        try
+        {
+            await carrier.Completion.ConfigureAwait(false);
+        }
+        catch (Exception exception)
+            when (IsExpectedConnectionTermination(exception))
+        {
+        }
+        catch (Exception exception)
+        {
+            System.Diagnostics.Trace.TraceError(
+                "DVC reconnect supervisor failed: {0}; 0x{1:X8}.",
+                exception.GetType().Name,
+                exception.HResult);
+        }
+        await RemoveOwnedConnectionAsync(
+                runtimeConnectionId,
+                connectionGeneration,
+                expectedLease: null,
+                carrier)
+            .ConfigureAwait(false);
+    }
+
     private async Task RemoveOnExternalFailureAsync(
         string runtimeConnectionId,
         long connectionGeneration,
@@ -680,12 +1155,37 @@ public sealed class ProductionRdCoreConnectionRuntime :
             await lease.ConnectionFailure.ConfigureAwait(false);
             return;
         }
-        catch
+        catch (Exception exception)
+            when (IsExpectedConnectionTermination(exception))
         {
         }
+        catch (Exception exception)
+        {
+            System.Diagnostics.Trace.TraceError(
+                "External RDCore lease failed unexpectedly: {0}; 0x{1:X8}.",
+                exception.GetType().Name,
+                exception.HResult);
+        }
+        await RemoveOwnedConnectionAsync(
+                runtimeConnectionId,
+                connectionGeneration,
+                lease,
+                expectedCarrier: null)
+            .ConfigureAwait(false);
+    }
+
+    private async Task RemoveOwnedConnectionAsync(
+        string runtimeConnectionId,
+        long connectionGeneration,
+        IRdCoreConnectionLeaseHandle? expectedLease,
+        IRdpDvcLocalCarrierLease? expectedCarrier)
+    {
         if (!leases.TryGetValue(runtimeConnectionId, out var owned) ||
             owned.Result.ConnectionGeneration != connectionGeneration ||
-            !ReferenceEquals(owned.Lease, lease) ||
+            expectedLease is not null &&
+            !ReferenceEquals(owned.Lease, expectedLease) ||
+            expectedCarrier is not null &&
+            !ReferenceEquals(owned.Carrier, expectedCarrier) ||
             !leases.TryRemove(
                 new KeyValuePair<string, OwnedConnection>(
                     runtimeConnectionId,
@@ -695,17 +1195,34 @@ public sealed class ProductionRdCoreConnectionRuntime :
         {
             if (owned.Carrier is not null)
                 await owned.Carrier.DisposeAsync().ConfigureAwait(false);
-            await lease.DisposeAsync().ConfigureAwait(false);
+            if (owned.Lease.State == RdCoreConnectionState.Connected)
+                await owned.Lease.DisconnectAsync(CancellationToken.None)
+                    .ConfigureAwait(false);
+            await owned.Lease.DisposeAsync().ConfigureAwait(false);
         }
         catch (Exception exception)
         {
             System.Diagnostics.Trace.TraceError(
-                "External RDCore lease cleanup failed: {0}; 0x{1:X8}.",
+                "RDCore connection cleanup failed: {0}; 0x{1:X8}.",
                 exception.GetType().Name,
                 exception.HResult);
         }
     }
 
+    private static bool IsExpectedConnectionTermination(
+        Exception exception) =>
+        exception is
+            OperationCanceledException or
+            EndOfStreamException or
+            IOException or
+            TimeoutException or
+            InvalidDataException or
+            InvalidOperationException or
+            RdpDvcProtocolException or
+            TransportProtocolException or
+            CryptographicException or
+            TransportDisconnectedException or
+            TransientTransportException;
     private static ConnectionHostOperationException
         UnsupportedPresentationException() =>
         new(
@@ -727,6 +1244,6 @@ public sealed class ProductionRdCoreConnectionRuntime :
 
     private sealed record OwnedConnection(
         IRdCoreConnectionLeaseHandle Lease,
-        IAsyncDisposable? Carrier,
+        IRdpDvcLocalCarrierLease? Carrier,
         RdCoreConnectionRuntimeResult Result);
 }

@@ -55,6 +55,12 @@ try
     if (options.Consent != Consent)
         throw new InvalidOperationException(
             $"Live customization is disabled. Pass --consent {Consent}.");
+    if (options.InspectStaging ||
+        options.ProbeEndpoint ||
+        options.RestartOnlyId is not null ||
+        (!options.InspectRecovery && !options.InspectOperation))
+        throw new NotSupportedException(
+            "Chunked Dev Box customization delivery, probes, and lifecycle mutation are quarantined. Use the signed catalog MSI bootstrap.");
 
     stage = "keys";
     checkpointKey = ReadKey(
@@ -112,7 +118,8 @@ try
     for (var index = 0; index < planned.Groups.Count; index++)
         Console.Error.WriteLine(
             $"BOOTSTRAP PLAN GROUP {index}: tasks={planned.Groups[index].Tasks.Count}; " +
-            $"commandChars={planned.Groups[index].Tasks.Sum(task => task.Parameters.Values.Sum(value => value.Length))}");
+            $"commandChars={planned.Groups[index].Tasks.Sum(task => task.Parameters.Values.Sum(value => value.Length))}; " +
+            $"payloadBytes={DevBoxCustomizationClient.MeasureApplyRequestBytes(planned.Groups[index].Tasks)}");
 
     stage = "identity";
     var defaultStore = new DevBoxIdentityStore();
@@ -133,6 +140,261 @@ try
     var customization = new DevBoxCustomizationClient(
         options.Endpoint,
         new AzurePipelineDevBoxCustomizationTransport(sdkClient.Pipeline));
+    if (options.RestartOnlyId is not null)
+    {
+        stage = "restart-only";
+        await RestartDevBoxAsync(
+                sdkClient,
+                options,
+                "manual-" + options.RestartOnlyId,
+                cancellation.Token)
+            .ConfigureAwait(false);
+        return 0;
+    }
+    if (options.InspectRecovery)
+    {
+        stage = "recovery-inspection";
+        var recoveryPrefix =
+            $"steward-rdp-{request.OperationId.Value:N}-recovery";
+        var recoveryGroups = (await customization.ListAsync(
+                request.Project,
+                request.User,
+                request.DevBox,
+                cancellation.Token)
+            .ConfigureAwait(false))
+            .Where(group => group.Name.StartsWith(
+                recoveryPrefix,
+                StringComparison.Ordinal))
+            .OrderBy(group => group.Name, StringComparer.Ordinal)
+            .ToArray();
+        foreach (var summary in recoveryGroups.TakeLast(10))
+        {
+            Console.WriteLine(
+                $"RECOVERY {summary.Name}: {summary.Status}; " +
+                $"started={summary.StartTime?.ToString("O") ?? "none"}; " +
+                $"ended={summary.EndTime?.ToString("O") ?? "none"}");
+            if (!Terminal(summary.Status))
+                continue;
+            var group = await customization.GetAsync(
+                    request.Project,
+                    request.User,
+                    request.DevBox,
+                    summary.Name,
+                    cancellation.Token)
+                .ConfigureAwait(false);
+            foreach (var task in group.Tasks)
+            {
+                var log = await ReadHydratedTaskLogAsync(
+                        customization,
+                        task.LogUri,
+                        cancellation.Token)
+                    .ConfigureAwait(false);
+                Console.WriteLine(
+                    $"  TASK {task.Status}: " +
+                    $"{SafeBootstrapLogDiagnostic(log)}");
+            }
+        }
+        return 0;
+    }
+    if (options.InspectStaging)
+    {
+        stage = "staging-inspection";
+        var probePrefix =
+            $"steward-rdp-{request.OperationId.Value:N}-staging-probe";
+        var probeGroups = (await customization.ListAsync(
+                options.Project,
+                options.User,
+                options.DevBox,
+                cancellation.Token)
+            .ConfigureAwait(false))
+            .Where(group => group.Name.StartsWith(
+                probePrefix,
+                StringComparison.Ordinal))
+            .ToArray();
+        var probeName =
+            $"{probePrefix}-{probeGroups.Length:D4}";
+        var probe = await customization.ApplyAsync(
+                request.Project,
+                request.User,
+                request.DevBox,
+                probeName,
+                [
+                    DevBoxRdpDvcBootstrapPlan.CreateStagingProbeTask(
+                        request,
+                        bundle)
+                ],
+                cancellation.Token)
+            .ConfigureAwait(false);
+        var probeDeadline =
+            DateTimeOffset.UtcNow + TimeSpan.FromMinutes(2);
+        while (!Terminal(probe.Status))
+        {
+            if (DateTimeOffset.UtcNow >= probeDeadline)
+                throw new TimeoutException(
+                    "The RDP DVC staging probe did not complete.");
+            await Task.Delay(options.PollInterval, cancellation.Token)
+                .ConfigureAwait(false);
+            probe = await customization.GetAsync(
+                    request.Project,
+                    request.User,
+                    request.DevBox,
+                    probeName,
+                    cancellation.Token)
+                .ConfigureAwait(false);
+        }
+        if (!Succeeded(probe.Status) ||
+            probe.Tasks.Count != 1 ||
+            !Succeeded(probe.Tasks[0].Status))
+            throw new InvalidOperationException(
+                "The RDP DVC staging probe failed.");
+        var probeLog = await ReadHydratedTaskLogAsync(
+                customization,
+                probe.Tasks[0].LogUri,
+                cancellation.Token)
+            .ConfigureAwait(false);
+        const string probeMarker = "STEWARD_RDP_DVC_STAGING_PROBE:";
+        var markerIndex = probeLog.LastIndexOf(
+            probeMarker,
+            StringComparison.Ordinal);
+        if (markerIndex < 0)
+            throw new InvalidDataException(
+                "The RDP DVC staging probe marker is missing.");
+        var probeLine = probeLog[markerIndex..];
+        var probeEnd = probeLine.IndexOfAny(['\r', '\n']);
+        Console.WriteLine(probeEnd < 0
+            ? probeLine
+            : probeLine[..probeEnd]);
+        return 0;
+    }
+    if (options.ProbeEndpoint)
+    {
+        stage = "endpoint-probe";
+        var probePrefix =
+            $"steward-rdp-{request.OperationId.Value:N}-probe";
+        var probeGroups = (await customization.ListAsync(
+                options.Project,
+                options.User,
+                options.DevBox,
+                cancellation.Token)
+            .ConfigureAwait(false))
+            .Where(group => group.Name.StartsWith(
+                probePrefix,
+                StringComparison.Ordinal))
+            .ToArray();
+        var probeName =
+            $"{probePrefix}-{probeGroups.Length:D4}";
+        var probe = await customization.ApplyAsync(
+                request.Project,
+                request.User,
+                request.DevBox,
+                probeName,
+                [DevBoxRdpDvcBootstrapPlan.CreateEndpointProbeTask(request)],
+                cancellation.Token)
+            .ConfigureAwait(false);
+        var probeDeadline =
+            DateTimeOffset.UtcNow + TimeSpan.FromMinutes(2);
+        while (!Terminal(probe.Status))
+        {
+            if (DateTimeOffset.UtcNow >= probeDeadline)
+                throw new TimeoutException(
+                    "The RDP DVC endpoint probe did not complete.");
+            await Task.Delay(options.PollInterval, cancellation.Token)
+                .ConfigureAwait(false);
+            probe = await customization.GetAsync(
+                    request.Project,
+                    request.User,
+                    request.DevBox,
+                    probeName,
+                    cancellation.Token)
+                .ConfigureAwait(false);
+        }
+        if (probe.Tasks.Count != 1)
+            throw new InvalidDataException(
+                "The RDP DVC endpoint probe result is invalid.");
+        var probeLog = await ReadHydratedTaskLogAsync(
+                customization,
+                probe.Tasks[0].LogUri,
+                cancellation.Token)
+            .ConfigureAwait(false);
+        var probeMarker = "STEWARD_RDP_DVC_PROBE:";
+        var markerIndex = probeLog.LastIndexOf(
+            probeMarker,
+            StringComparison.Ordinal);
+        if (markerIndex < 0)
+        {
+            Console.Error.WriteLine(
+                $"BOOTSTRAP PROBE DIAGNOSTIC: " +
+                $"{SafeBootstrapLogDiagnostic(probeLog)}");
+            Console.Error.WriteLine(
+                "BOOTSTRAP PROBE RAW: " +
+                probeLog.Replace('\r', ' ').Replace('\n', '|'));
+            throw new InvalidDataException(
+                "The RDP DVC endpoint probe marker is missing.");
+        }
+        var probeLine = probeLog[markerIndex..];
+        var probeEnd = probeLine.IndexOfAny(['\r', '\n']);
+        if (probeEnd >= 0)
+            probeLine = probeLine[..probeEnd];
+        Console.WriteLine(probeLine);
+        return 0;
+    }
+    if (options.InspectOperation)
+    {
+        stage = "operation-inspection";
+        using var inspectProtector =
+            new AesGcmDevBoxRdpDvcBootstrapCheckpointProtector(
+                checkpointKey);
+        var inspectStore = new EncryptedFileDevBoxRdpDvcBootstrapStore(
+            Path.Combine(options.StateDirectory, "operations"),
+            inspectProtector);
+        var inspect = await inspectStore.LoadAsync(
+                options.OperationId,
+                options.IdempotencyKey,
+                cancellation.Token)
+            .ConfigureAwait(false);
+        if (inspect is null)
+        {
+            Console.WriteLine("OPERATION CHECKPOINT: absent");
+            return 0;
+        }
+        Console.WriteLine(
+            $"OPERATION CHECKPOINT: group={inspect.GroupIndex}/" +
+            $"{inspect.Operation.Groups.Count}; completed={inspect.Completed}");
+        if (!inspect.Completed &&
+            inspect.GroupIndex < inspect.Operation.Groups.Count)
+        {
+            var active = await customization.GetAsync(
+                    request.Project,
+                    request.User,
+                    request.DevBox,
+                    inspect.Operation.Groups[inspect.GroupIndex].Name,
+                    cancellation.Token)
+                .ConfigureAwait(false);
+            Console.WriteLine(
+                $"OPERATION ACTIVE GROUP: {active.Status}; " +
+                $"started={active.StartTime?.ToString("O") ?? "none"}; " +
+                $"ended={active.EndTime?.ToString("O") ?? "none"}");
+            foreach (var task in active.Tasks)
+            {
+                Console.WriteLine($"  OPERATION TASK: {task.Status}");
+                if (Terminal(task.Status) &&
+                    !Succeeded(task.Status))
+                {
+                    var log = await ReadHydratedTaskLogAsync(
+                            customization,
+                            task.LogUri,
+                            cancellation.Token)
+                        .ConfigureAwait(false);
+                    Console.WriteLine(
+                        $"    ERROR-CODE: {ClassifyBootstrapLog(log)}");
+                    Console.WriteLine(
+                        $"    SAFE-DIAGNOSTIC: " +
+                        $"{SafeBootstrapLogDiagnostic(log)}");
+                }
+            }
+        }
+        return 0;
+    }
     var nonterminalGroups = (await customization.ListAsync(
             options.Project,
             options.User,
@@ -155,14 +417,31 @@ try
         Console.Error.WriteLine(
             $"  QUEUED GROUP: {group.Name}; status={group.Status}; " +
             $"started={group.StartTime?.ToString("O") ?? "none"}");
-    if (options.RestartStalledCustomization &&
+    var restartQueued = options.RestartStalledCustomization &&
         nonterminalGroups is
         [
             {
                 Status: "NotStarted",
                 StartTime: null
             }
-        ])
+        ] &&
+        DevBoxRdpDvcBootstrapRecovery.CanRestartWithoutLosingStaging(
+            nonterminalGroups[0].Name,
+            planned.Groups[0].Name);
+    var restartRunning = options.RestartStalledStatus &&
+        nonterminalGroups is
+        [
+            {
+                Status: "Running",
+                StartTime: { } started
+            }
+        ] &&
+        DevBoxRdpDvcBootstrapRecovery.CanRestartWithoutLosingStaging(
+            nonterminalGroups[0].Name,
+            planned.Groups[0].Name) &&
+        started <= DateTimeOffset.UtcNow.Subtract(
+            TimeSpan.FromMinutes(5));
+    if (restartQueued || restartRunning)
     {
         stage = "dispatch-recovery";
         await RecoverStalledDispatchAsync(
@@ -170,6 +449,7 @@ try
                 planned,
                 nonterminalGroups,
                 options,
+                restartRunning,
                 cancellation.Token)
             .ConfigureAwait(false);
     }
@@ -188,6 +468,7 @@ try
             options.IdempotencyKey,
             cancellation.Token)
         .ConfigureAwait(false);
+    DevBoxCustomizationGroupResult? priorActive = null;
     if (prior is not null)
     {
         Console.Error.WriteLine(
@@ -204,22 +485,30 @@ try
                         prior.Operation.Groups[prior.GroupIndex].Name,
                         cancellation.Token)
                     .ConfigureAwait(false);
+                priorActive = active;
                 Console.Error.WriteLine(
                     $"BOOTSTRAP ACTIVE GROUP: {active.Status}; tasks={active.Tasks.Count}");
                 foreach (var task in active.Tasks)
                 {
                     Console.Error.WriteLine(
                         $"  ACTIVE TASK: {task.Status}");
-                    if (task.Status.Equals(
-                            "Failed",
+                    if (!Succeeded(task.Status) &&
+                        !task.Status.Equals(
+                            "Running",
+                            StringComparison.OrdinalIgnoreCase) &&
+                        !task.Status.Equals(
+                            "NotStarted",
                             StringComparison.OrdinalIgnoreCase))
                     {
-                        var log = await customization.GetTaskLogAsync(
+                        var log = await ReadHydratedTaskLogAsync(
+                                customization,
                                 task.LogUri,
                                 cancellation.Token)
                             .ConfigureAwait(false);
                         Console.Error.WriteLine(
                             $"    ERROR-CODE: {ClassifyBootstrapLog(log)}");
+                        Console.Error.WriteLine(
+                            $"    SAFE-DIAGNOSTIC: {SafeBootstrapLogDiagnostic(log)}");
                     }
                 }
             }
@@ -229,6 +518,198 @@ try
                     $"BOOTSTRAP ACTIVE GROUP: unavailable ({exception.GetType().Name})");
             }
         }
+    }
+    if (prior is
+        {
+            Completed: false
+        } &&
+        prior.GroupIndex == planned.Groups.Count - 1 &&
+        priorActive is { Tasks: [var failedInstallerTask] } &&
+        DevBoxRdpDvcBootstrapRecovery.CanRecoverFinalInstaller(
+            priorActive.Status,
+            priorActive.Tasks.Select(task => task.Status).ToArray()))
+    {
+        stage = "failed-installer-recovery";
+        await MaterializeBootstrapEnvelopeAsync(
+                customization,
+                failedInstallerTask.LogUri,
+                bootstrapEncryption,
+                request,
+                options.AuthenticationKeyFile,
+                options.PollInterval,
+                TimeSpan.FromSeconds(30),
+                cancellation.Token)
+            .ConfigureAwait(false);
+        var recoveryPrefix =
+            $"steward-rdp-{request.OperationId.Value:N}-recovery";
+        var recoveryGroups = (await customization.ListAsync(
+                request.Project,
+                request.User,
+                request.DevBox,
+                cancellation.Token)
+            .ConfigureAwait(false))
+            .Where(group => group.Name.StartsWith(
+                recoveryPrefix,
+                StringComparison.Ordinal))
+            .ToArray();
+        var inFlightRecovery = options.RestartStalledStatus
+            ? null
+            : recoveryGroups.SingleOrDefault(group =>
+                !Succeeded(group.Status) &&
+                !group.Status.Equals(
+                    "Failed",
+                    StringComparison.OrdinalIgnoreCase) &&
+                !group.Status.Equals(
+                    "ValidationFailed",
+                    StringComparison.OrdinalIgnoreCase));
+        var recoveryGroupName = inFlightRecovery?.Name ??
+            $"{recoveryPrefix}-{recoveryGroups.Length:D4}";
+        DevBoxCustomizationGroupResult recovery;
+        try
+        {
+            recovery = await customization.ApplyAsync(
+                    request.Project,
+                    request.User,
+                    request.DevBox,
+                    recoveryGroupName,
+                    [
+                        DevBoxRdpDvcBootstrapPlan
+                            .CreateEndpointRecoveryTask(request, bundle)
+                    ],
+                    cancellation.Token)
+                .ConfigureAwait(false);
+        }
+        catch (RequestFailedException exception)
+            when (exception.Status == 409)
+        {
+            recovery = await customization.GetAsync(
+                    request.Project,
+                    request.User,
+                    request.DevBox,
+                    recoveryGroupName,
+                    cancellation.Token)
+                .ConfigureAwait(false);
+        }
+        var recoveryDeadline =
+            DateTimeOffset.UtcNow + options.Timeout;
+        while (!Terminal(recovery.Status))
+        {
+            if (DateTimeOffset.UtcNow >= recoveryDeadline)
+                throw new TimeoutException(
+                    "The recovered RDP DVC endpoint did not become ready.");
+            await Task.Delay(options.PollInterval, cancellation.Token)
+                .ConfigureAwait(false);
+            recovery = await customization.GetAsync(
+                    request.Project,
+                    request.User,
+                    request.DevBox,
+                    recoveryGroupName,
+                    cancellation.Token)
+                .ConfigureAwait(false);
+        }
+        if (!Succeeded(recovery.Status) ||
+            recovery.Tasks.Count != 1 ||
+            !Succeeded(recovery.Tasks[0].Status))
+        {
+            Console.Error.WriteLine(
+                $"BOOTSTRAP RECOVERY GROUP: {recovery.Status}; tasks={recovery.Tasks.Count}");
+            foreach (var task in recovery.Tasks)
+            {
+                Console.Error.WriteLine(
+                    $"  RECOVERY TASK: {task.Status}");
+                if (!Succeeded(task.Status) &&
+                    !task.Status.Equals(
+                        "Running",
+                        StringComparison.OrdinalIgnoreCase) &&
+                    !task.Status.Equals(
+                        "NotStarted",
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    var log = await customization.GetTaskLogAsync(
+                            task.LogUri,
+                            cancellation.Token)
+                        .ConfigureAwait(false);
+                    Console.Error.WriteLine(
+                        $"    ERROR-CODE: {ClassifyBootstrapLog(log)}");
+                    Console.Error.WriteLine(
+                        $"    SAFE-DIAGNOSTIC: {SafeBootstrapLogDiagnostic(log)}");
+                }
+            }
+            throw new InvalidOperationException(
+                "The recovered RDP DVC endpoint failed to start.");
+        }
+        var recoveryLog = await ReadHydratedTaskLogAsync(
+                customization,
+                recovery.Tasks[0].LogUri,
+                cancellation.Token)
+            .ConfigureAwait(false);
+        foreach (var marker in new[]
+                 {
+                     "STEWARD_RDP_DVC_REMOTE_READINESS:",
+                     "STEWARD_RDP_DVC_REMOTE_FAILURE:",
+                     "STEWARD_RDP_DVC_REMOTE_LAUNCHER:",
+                     "STEWARD_RDP_DVC_REMOTE_SERVER_ERROR:",
+                     "STEWARD_RDP_DVC_STARTUP:"
+                 })
+        {
+            var markerIndex = recoveryLog.LastIndexOf(
+                marker,
+                StringComparison.Ordinal);
+            if (markerIndex < 0)
+                continue;
+            var line = recoveryLog[markerIndex..];
+            var lineEnd = line.IndexOfAny(['\r', '\n']);
+            if (lineEnd >= 0)
+                line = line[..lineEnd];
+            Console.Error.WriteLine(
+                $"BOOTSTRAP RECOVERY MARKER: " +
+                $"{(line.Length <= 2048 ? line : line[..2048])}");
+        }
+        Console.Error.WriteLine(
+            $"BOOTSTRAP RECOVERY DIAGNOSTIC: " +
+            $"{SafeBootstrapLogDiagnostic(recoveryLog)}");
+        if (options.RestartAfterBootstrap)
+        {
+            stage = "post-recovery-restart";
+            await RestartDevBoxAsync(
+                    sdkClient,
+                    options,
+                    recoveryGroupName,
+                    cancellation.Token)
+                .ConfigureAwait(false);
+        }
+        var pendingResult = new ProviderOperationResult(
+            ProviderOperationStatus.Running,
+            prior.Handle,
+            null);
+        var pendingReceipt =
+            DevBoxRdpDvcBootstrapReceipts.CreateDeploymentPending(
+                request,
+                bundle,
+                pendingResult);
+        await DevBoxRdpDvcBootstrapReceipts.SaveAsync(
+                options.ReceiptPath,
+                pendingReceipt,
+                cancellation.Token)
+            .ConfigureAwait(false);
+        if (options.NodeSigningPrivateKeyFile is not null)
+        {
+            using var controlKey = ReadSigningKey(
+                options.ControlSigningPrivateKeyFile!);
+            var attested =
+                DevBoxRdpDvcBootstrapReceipts.AttestPending(
+                    pendingReceipt,
+                    options.ControlIdentity!,
+                    controlKey);
+            await DevBoxRdpDvcBootstrapReceipts.SaveAsync(
+                    options.AttestedReceiptPath!,
+                    attested,
+                    cancellation.Token)
+                .ConfigureAwait(false);
+        }
+        Console.WriteLine(
+            "Recovered protected bootstrap secrets from the failed installer; awaiting headless RDCore user session.");
+        return 0;
     }
 
     stage = "deploy";
@@ -339,7 +820,8 @@ try
                     "Running bootstrap operation has no durable handle."),
                 cancellation.Token)
             .ConfigureAwait(false);
-        if (options.RestartStalledCustomization &&
+        if ((options.RestartStalledCustomization ||
+             options.RestartStalledStatus) &&
             result.Status is
                 ProviderOperationStatus.Accepted or
                 ProviderOperationStatus.Running)
@@ -365,7 +847,11 @@ try
                         Status: "NotStarted",
                         StartTime: null
                     } stalled
-                ])
+                ] &&
+                DevBoxRdpDvcBootstrapRecovery
+                    .CanRestartWithoutLosingStaging(
+                        stalled.Name,
+                        planned.Groups[0].Name))
             {
                 var now = DateTimeOffset.UtcNow;
                 if (!notStartedSince.TryGetValue(
@@ -382,11 +868,40 @@ try
                             planned,
                             queued,
                             options,
+                            recoverRunning: false,
                             cancellation.Token)
                         .ConfigureAwait(false);
                     notStartedSince.Remove(stalled.Name);
                     stage = "reconcile";
                 }
+            }
+            else if (options.RestartStalledStatus &&
+                     queued is
+                     [
+                         {
+                             Status: "Running",
+                             StartTime: { } runningSince
+                         }
+                     ] &&
+                     DevBoxRdpDvcBootstrapRecovery
+                         .CanRestartWithoutLosingStaging(
+                             queued[0].Name,
+                             planned.Groups[0].Name) &&
+                     queued[0].Name != planned.Groups[^1].Name &&
+                     runningSince <= DateTimeOffset.UtcNow.Subtract(
+                         TimeSpan.FromMinutes(5)))
+            {
+                stage = "dispatch-recovery";
+                await RecoverStalledDispatchAsync(
+                        sdkClient,
+                        planned,
+                        queued,
+                        options,
+                        recoverRunning: true,
+                        cancellation.Token)
+                    .ConfigureAwait(false);
+                notStartedSince.Clear();
+                stage = "reconcile";
             }
             else
             {
@@ -602,6 +1117,28 @@ static async Task MaterializeBootstrapEnvelopeAsync(
     }
 }
 
+static async Task<string> ReadHydratedTaskLogAsync(
+    DevBoxCustomizationClient client,
+    Uri logUri,
+    CancellationToken cancellationToken)
+{
+    var deadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(30);
+    while (true)
+    {
+        var log = await client.GetTaskLogAsync(
+                logUri,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (!string.IsNullOrWhiteSpace(log) ||
+            DateTimeOffset.UtcNow >= deadline)
+            return log;
+        await Task.Delay(
+                TimeSpan.FromSeconds(2),
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+}
+
 static void WritePrivateFile(string path, ReadOnlySpan<byte> content)
 {
     var fullPath = Path.GetFullPath(path);
@@ -685,8 +1222,12 @@ static async Task PrintSafeTaskStatusesAsync(
             {
                 Console.Error.WriteLine(
                     $"  TASK {task.DisplayName}: {task.Status}");
-                if (task.Status.Equals(
-                        "Failed",
+                if (!Succeeded(task.Status) &&
+                    !task.Status.Equals(
+                        "Running",
+                        StringComparison.OrdinalIgnoreCase) &&
+                    !task.Status.Equals(
+                        "NotStarted",
                         StringComparison.OrdinalIgnoreCase))
                 {
                     var log = await client.GetTaskLogAsync(
@@ -713,15 +1254,24 @@ static async Task RecoverStalledDispatchAsync(
     DevBoxRdpDvcBootstrapOperation operation,
     IReadOnlyList<DevBoxCustomizationGroupSummary> nonterminalGroups,
     Options options,
+    bool recoverRunning,
     CancellationToken cancellationToken)
 {
     var expected = operation.Groups
         .Select(static group => group.Name)
         .ToHashSet(StringComparer.Ordinal);
+    expected.Add(
+        $"steward-rdp-{operation.Intent.OperationId.Value:N}-recovery");
     if (nonterminalGroups.Count != 1 ||
-        !expected.Contains(nonterminalGroups[0].Name) ||
-        nonterminalGroups[0].Status != "NotStarted" ||
-        nonterminalGroups[0].StartTime is not null)
+        !(expected.Contains(nonterminalGroups[0].Name) ||
+          nonterminalGroups[0].Name.StartsWith(
+              $"steward-rdp-{operation.Intent.OperationId.Value:N}-recovery-",
+              StringComparison.Ordinal)) ||
+        (recoverRunning
+            ? nonterminalGroups[0].Status != "Running" ||
+              nonterminalGroups[0].StartTime is null
+            : nonterminalGroups[0].Status != "NotStarted" ||
+              nonterminalGroups[0].StartTime is not null))
         throw new InvalidOperationException(
             "Dispatch recovery requires exactly the current unstarted bootstrap group.");
     var directory = Path.Combine(
@@ -730,7 +1280,8 @@ static async Task RecoverStalledDispatchAsync(
     Directory.CreateDirectory(directory);
     var path = Path.Combine(
         directory,
-        $"{options.OperationId.Value:N}-{nonterminalGroups[0].Name}.phase");
+        $"{options.OperationId.Value:N}-{nonterminalGroups[0].Name}" +
+        $"{(recoverRunning ? ".status" : string.Empty)}.phase");
     var phase = File.Exists(path)
         ? await File.ReadAllTextAsync(path, cancellationToken)
             .ConfigureAwait(false)
@@ -931,7 +1482,13 @@ static string SafeBootstrapLogDiagnostic(string log)
              line.Contains("failed", StringComparison.OrdinalIgnoreCase) ||
              line.Contains("unavailable", StringComparison.OrdinalIgnoreCase) ||
              line.Contains("mismatch", StringComparison.OrdinalIgnoreCase) ||
-             line.Contains("limit", StringComparison.OrdinalIgnoreCase)))
+             line.Contains("limit", StringComparison.OrdinalIgnoreCase) ||
+             line.Contains("ParserError", StringComparison.OrdinalIgnoreCase) ||
+             line.Contains("CategoryInfo", StringComparison.OrdinalIgnoreCase) ||
+             line.Contains("FullyQualifiedErrorId", StringComparison.OrdinalIgnoreCase) ||
+             line.Contains("At line:", StringComparison.OrdinalIgnoreCase) ||
+             line.Contains("not recognized", StringComparison.OrdinalIgnoreCase) ||
+             line.Contains("cannot", StringComparison.OrdinalIgnoreCase)))
             .TakeLast(8));
     var diagnostic = string.Join(" | ", candidates);
     if (diagnostic.Length == 0)
@@ -967,6 +1524,10 @@ static string SafeBootstrapLogDiagnostic(string log)
 static bool Terminal(string status) =>
     Succeeded(status) ||
     status.Equals("Failed", StringComparison.OrdinalIgnoreCase) ||
+    status.Equals("TimedOut", StringComparison.OrdinalIgnoreCase) ||
+    status.Equals(
+        "ValidationFailed",
+        StringComparison.OrdinalIgnoreCase) ||
     status.Equals("Canceled", StringComparison.OrdinalIgnoreCase) ||
     status.Equals("Cancelled", StringComparison.OrdinalIgnoreCase);
 
@@ -1197,7 +1758,12 @@ internal sealed record Options(
     string? AttestedReceiptPath,
     bool RestartStalledCustomization,
     bool RestartAfterBootstrap,
-    bool RestartStalledStatus)
+    bool RestartStalledStatus,
+    bool ProbeEndpoint,
+    bool InspectRecovery,
+    bool InspectStaging,
+    bool InspectOperation,
+    string? RestartOnlyId)
 {
     private const string RestartConsent =
         "I_CONFIRM_THIS_DEV_BOX_HAS_NO_ACTIVE_WORK_AND_MAY_BE_RESTARTED";
@@ -1258,6 +1824,45 @@ internal sealed record Options(
             restartStalledStatus != RestartConsent)
             throw new ArgumentException(
                 "The stalled-status restart consent is invalid.");
+        var probeEndpoint = Optional(
+            values,
+            "--probe-endpoint");
+        if (probeEndpoint is not null &&
+            !bool.TryParse(probeEndpoint, out _))
+            throw new ArgumentException(
+                "The endpoint probe option must be true or false.");
+        var inspectRecovery = Optional(
+            values,
+            "--inspect-recovery");
+        if (inspectRecovery is not null &&
+            !bool.TryParse(inspectRecovery, out _))
+            throw new ArgumentException(
+                "The recovery inspection option must be true or false.");
+        var inspectStaging = Optional(
+            values,
+            "--inspect-staging");
+        if (inspectStaging is not null &&
+            !bool.TryParse(inspectStaging, out _))
+            throw new ArgumentException(
+                "The staging inspection option must be true or false.");
+        var inspectOperation = Optional(
+            values,
+            "--inspect-operation");
+        if (inspectOperation is not null &&
+            !bool.TryParse(inspectOperation, out _))
+            throw new ArgumentException(
+                "The operation inspection option must be true or false.");
+        var restartOnlyId = Optional(
+            values,
+            "--restart-only-id");
+        if (restartOnlyId is not null &&
+            (restartAfterBootstrap is null ||
+             restartOnlyId.Length is < 3 or > 128 ||
+             restartOnlyId.Any(character =>
+                 !char.IsAsciiLetterOrDigit(character) &&
+                 character is not '-' and not '_' and not '.')))
+            throw new ArgumentException(
+                "Restart-only requires restart consent and a bounded identifier.");
         var attestationCount = new[]
         {
             nodeKey,
@@ -1302,7 +1907,14 @@ internal sealed record Options(
             attestedPath is null ? null : Path.GetFullPath(attestedPath),
             restart is not null,
             restartAfterBootstrap is not null,
-            restartStalledStatus is not null);
+            restartStalledStatus is not null,
+            bool.TryParse(probeEndpoint, out var probe) && probe,
+            bool.TryParse(inspectRecovery, out var inspect) && inspect,
+            bool.TryParse(inspectStaging, out var inspectStage) &&
+            inspectStage,
+            bool.TryParse(inspectOperation, out var inspectOp) &&
+            inspectOp,
+            restartOnlyId);
     }
 
     private static readonly HashSet<string> Known =
@@ -1335,7 +1947,12 @@ internal sealed record Options(
         "--attested-receipt",
         "--restart-stalled-customization",
         "--restart-after-bootstrap",
-        "--restart-stalled-status"
+        "--restart-stalled-status",
+        "--probe-endpoint",
+        "--inspect-recovery",
+        "--inspect-staging",
+        "--inspect-operation",
+        "--restart-only-id"
     ];
 
     private static string Required(

@@ -10,6 +10,7 @@
   <ItemGroup>
     <InternalsVisibleTo Include="Steward.Transport.Rdp.Windows.Tests" />
     <InternalsVisibleTo Include="Steward.RdpDvc.Client.Windows" />
+    <InternalsVisibleTo Include="Steward.Transport.Rdp.Windows" />
   </ItemGroup>
   <ItemGroup>
     <None Include="..\Steward.Transport.Rdp.Windows\Microsoft.RdpDvcSamples.LICENSE.txt"

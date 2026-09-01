@@ -10,7 +10,8 @@ namespace Steward.ConnectionHost.Windows;
 
 public sealed class WindowsAppIsolatedConnectionLeaseFactory(
     RdCoreCapabilityReport capability,
-    IWindows365EndUserResourceCatalog resourceCatalog) :
+    IWindows365EndUserResourceCatalog resourceCatalog,
+    RdpDvcPerConnectionConfiguration? dvcConfiguration = null) :
     IRdCoreConnectionLeaseFactory
 {
     public async Task<IRdCoreConnectionLeaseHandle> CreateAsync(
@@ -54,9 +55,21 @@ public sealed class WindowsAppIsolatedConnectionLeaseFactory(
             parsedEntityId == Guid.Empty)
             throw new InvalidDataException(
                 "The Windows 365 entity ID must be a nonempty GUID.");
-        return new WindowsAppIsolatedConnectionLease(
-            capability.Artifacts,
-            parsedEntityId);
+        var route = dvcConfiguration?.Create(request.ConnectionId);
+        try
+        {
+            return new WindowsAppIsolatedConnectionLease(
+                capability.Artifacts,
+                parsedEntityId,
+                route?.ConfigurationPath);
+        }
+        catch
+        {
+            if (route is not null)
+                RdpDvcEmbeddingConfigurationStore.Delete(
+                    route.ConfigurationPath);
+            throw;
+        }
     }
 
     private static string ReadUniqueQueryValue(Uri uri, string name)
@@ -85,7 +98,8 @@ public sealed class WindowsAppIsolatedConnectionLeaseFactory(
 
 internal sealed class WindowsAppIsolatedConnectionLease(
     RdCorePackageArtifacts artifacts,
-    Guid entityId) :
+    Guid entityId,
+    string? embeddingConfigurationPath = null) :
     IExternallyProvenRdCoreConnectionLeaseHandle,
     IRdCorePresentationLeaseHandle
 {
@@ -146,7 +160,7 @@ internal sealed class WindowsAppIsolatedConnectionLease(
                     "The isolated Windows App lease was already started.");
             try
             {
-                Start();
+                Start(cancellationToken);
             }
             catch (Exception startupFailure)
             {
@@ -171,6 +185,7 @@ internal sealed class WindowsAppIsolatedConnectionLease(
     {
         if (containmentFailure.Task.IsCompleted)
             containmentFailure.Task.GetAwaiter().GetResult();
+        WindowsAppOutOfProcOverride? startupOverride;
         lock (sync)
         {
             ObjectDisposedException.ThrowIf(disposed, this);
@@ -180,7 +195,10 @@ internal sealed class WindowsAppIsolatedConnectionLease(
             Volatile.Write(
                 ref state,
                 (int)RdCoreConnectionState.Connected);
+            startupOverride = outOfProcOverride;
+            outOfProcOverride = null;
         }
+        startupOverride?.Dispose();
         Connected?.Invoke(this, EventArgs.Empty);
         WtsPluginsLoaded?.Invoke(this, EventArgs.Empty);
     }
@@ -256,11 +274,6 @@ internal sealed class WindowsAppIsolatedConnectionLease(
         if (!Native.TerminateJob(job, 1) &&
             !stopped)
             throw new Win32Exception(Marshal.GetLastWin32Error());
-        if (!Native.TerminateOtherPackageProcesses(
-                ownedProcessId,
-                artifacts.PackageRoot))
-            throw new InvalidDataException(
-                "A Windows App service process could not be terminated.");
         Volatile.Write(
             ref state,
             (int)RdCoreConnectionState.Disconnected);
@@ -326,16 +339,17 @@ internal sealed class WindowsAppIsolatedConnectionLease(
                 outOfProcOverride = null;
             }
             containmentStop.Dispose();
+            if (embeddingConfigurationPath is not null)
+                RdpDvcEmbeddingConfigurationStore.Delete(
+                    embeddingConfigurationPath);
         }
     }
 
-    private void Start()
+    private void Start(CancellationToken cancellationToken)
     {
-        outOfProcOverride = WindowsAppOutOfProcOverride.Disable();
-        if (Native.HasPackageProcessInCurrentSession(
-                artifacts.PackageRoot))
-            throw new InvalidOperationException(
-                "Windows App is already running, so isolated activation cannot be attempted.");
+        outOfProcOverride =
+            WindowsAppOutOfProcOverride.Disable(cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
         var executable = Path.GetFullPath(
             Path.Combine(
                 artifacts.PackageRoot,
@@ -365,7 +379,8 @@ internal sealed class WindowsAppIsolatedConnectionLease(
 
         var desktopPointer = Marshal.StringToHGlobalUni(
             @"winsta0\" + desktopName);
-        var environment = CreateEnvironmentBlock();
+        var environment = CreateEnvironmentBlock(
+            embeddingConfigurationPath);
         try
         {
             var commandLine = new StringBuilder(
@@ -394,6 +409,7 @@ internal sealed class WindowsAppIsolatedConnectionLease(
             processId = created.ProcessId;
             try
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 var packageFullName = Native.GetPackageFullName(process);
                 if (!string.Equals(
                         packageFullName,
@@ -454,9 +470,6 @@ internal sealed class WindowsAppIsolatedConnectionLease(
             Native.TerminateJob(job, 1);
         else if (process != 0)
             Native.TerminateProcess(process, 1);
-        Native.TerminateOtherPackageProcesses(
-            processId,
-            artifacts.PackageRoot);
         if (process != 0)
         {
             Native.CloseHandle(process);
@@ -476,7 +489,8 @@ internal sealed class WindowsAppIsolatedConnectionLease(
         outOfProcOverride = null;
     }
 
-    private static nint CreateEnvironmentBlock()
+    private static nint CreateEnvironmentBlock(
+        string? embeddingConfigurationPath)
     {
         var hook = Path.GetFullPath(
             Path.Combine(
@@ -512,6 +526,11 @@ internal sealed class WindowsAppIsolatedConnectionLease(
         values["STEWARD_RDCORE_HARMONY_PATH"] = harmony;
         values["STEWARD_RDCORE_SHIM_PATH"] = shim;
         values["STEWARD_RDCORE_MANAGED_PLUGIN_PATH"] = managedPlugin;
+        if (embeddingConfigurationPath is not null)
+            values[
+                RdpDvcEmbeddingConfigurationStore
+                    .ConfigurationPathEnvironmentVariable] =
+                embeddingConfigurationPath;
         var evidenceDirectory = Path.Combine(
             Environment.GetFolderPath(
                 Environment.SpecialFolder.LocalApplicationData),
@@ -571,31 +590,11 @@ internal sealed class WindowsAppIsolatedConnectionLease(
         }
         catch (Exception exception)
         {
-            Exception failure = exception;
-            try
-            {
-                if (!Native.TerminateOtherPackageProcesses(
-                        processId,
-                        artifacts.PackageRoot))
-                    failure = new AggregateException(
-                        exception,
-                        new InvalidDataException(
-                            "Package sibling cleanup was incomplete."));
-            }
-            catch (Exception cleanupException)
-            {
-                failure = new AggregateException(
-                    exception,
-                    cleanupException);
-            }
-            finally
-            {
-                Native.TerminateJob(job, 1);
-            }
+            Native.TerminateJob(job, 1);
             Volatile.Write(
                 ref state,
                 (int)RdCoreConnectionState.Failed);
-            containmentFailure.TrySetException(failure);
+            containmentFailure.TrySetException(exception);
         }
     }
 
@@ -632,10 +631,6 @@ internal sealed class WindowsAppIsolatedConnectionLease(
         internal static bool IsProcessRunning(nint handle) =>
             GetExitCodeProcess(handle, out var code) && code == 259;
 
-        internal static bool HasPackageProcessInCurrentSession(
-            string packageRoot) =>
-            HasOtherPackageProcessInCurrentSession(0, packageRoot);
-
         internal static bool HasOtherPackageProcessInCurrentSession(
             uint allowedProcessId,
             string packageRoot)
@@ -663,41 +658,6 @@ internal sealed class WindowsAppIsolatedConnectionLease(
                 }
             }
             return found;
-        }
-
-        internal static bool TerminateOtherPackageProcesses(
-            uint allowedProcessId,
-            string packageRoot)
-        {
-            var succeeded = true;
-            var candidates = SnapshotPackageProcesses(
-                packageRoot,
-                out var complete);
-            succeeded = complete;
-            foreach (var candidate in candidates)
-            {
-                try
-                {
-                    if (candidate.Id == allowedProcessId)
-                        continue;
-                    candidate.Kill(entireProcessTree: true);
-                    if (!candidate.WaitForExit(5000))
-                        succeeded = false;
-                }
-                catch (InvalidOperationException)
-                {
-                }
-                catch (Exception exception)
-                    when (exception is Win32Exception or AggregateException)
-                {
-                    succeeded = false;
-                }
-                finally
-                {
-                    candidate.Dispose();
-                }
-            }
-            return succeeded;
         }
 
         internal static bool ValidateOtherPackageProcesses(
@@ -1002,8 +962,8 @@ internal sealed class WindowsAppIsolatedConnectionLease(
             }
             try
             {
-            var capacity = 32768;
-            var buffer = new StringBuilder(capacity);
+                var capacity = 32768;
+                var buffer = new StringBuilder(capacity);
                 if (QueryFullProcessImageName(
                         handle,
                         0,

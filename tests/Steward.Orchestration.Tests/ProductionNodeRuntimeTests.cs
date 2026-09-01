@@ -1,6 +1,8 @@
+using System.Text.Json;
 using Steward.Domain;
 using Steward.Node.Host;
 using Steward.PortableState;
+using Steward.RdpDvc.Server.Windows;
 using Steward.Stack.Local;
 using Steward.Transport;
 
@@ -8,6 +10,202 @@ namespace Steward.Orchestration.Tests;
 
 public sealed class ProductionNodeRuntimeTests
 {
+    [Fact]
+    public async Task Reconnect_ledger_reservations_survive_restart_and_never_reuse_generation()
+    {
+        var root = Path.Combine(
+            AppContext.BaseDirectory,
+            "reconnect-ledger-test",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var path = Path.Combine(root, "reconnect.db");
+            var session = Guid.NewGuid();
+            var host = Guid.NewGuid();
+            var incarnation = Guid.NewGuid();
+            var firstAttempt = Guid.NewGuid();
+            var first = await new ReconnectLedger(path).ReserveAsync(
+                session,
+                host,
+                incarnation,
+                firstAttempt,
+                DateTimeOffset.UtcNow);
+            var secondAttempt = Guid.NewGuid();
+            var restarted = new ReconnectLedger(path);
+            var second = await restarted.ReserveAsync(
+                session,
+                host,
+                incarnation,
+                secondAttempt,
+                DateTimeOffset.UtcNow);
+
+            Assert.Equal(1, first.Generation);
+            Assert.Equal(2, second.Generation);
+            Assert.Equal(
+                firstAttempt,
+                (await restarted.LoadAsync(1))!.AttemptId);
+            Assert.Equal(
+                secondAttempt,
+                (await restarted.LoadAsync(2))!.AttemptId);
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Reconnect_ledger_rejects_wrong_attempt_and_endpoint_identity()
+    {
+        var root = Path.Combine(
+            AppContext.BaseDirectory,
+            "reconnect-ledger-identity-test",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var ledger = new ReconnectLedger(
+                Path.Combine(root, "reconnect.db"));
+            var session = Guid.NewGuid();
+            var host = Guid.NewGuid();
+            var incarnation = Guid.NewGuid();
+            var attempt = Guid.NewGuid();
+            var reserved = await ledger.ReserveAsync(
+                session,
+                host,
+                incarnation,
+                attempt,
+                DateTimeOffset.UtcNow);
+
+            await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                ledger.TransitionAsync(
+                    session,
+                    host,
+                    incarnation,
+                    reserved.Generation,
+                    Guid.NewGuid(),
+                    ReconnectAttemptState.Reserved,
+                    ReconnectAttemptState.CarrierAuthenticated,
+                    DateTimeOffset.UtcNow));
+            await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                ledger.ReserveAsync(
+                    session,
+                    Guid.NewGuid(),
+                    incarnation,
+                    Guid.NewGuid(),
+                    DateTimeOffset.UtcNow));
+            var authenticated = await ledger.TransitionAsync(
+                session,
+                host,
+                incarnation,
+                reserved.Generation,
+                attempt,
+                ReconnectAttemptState.Reserved,
+                ReconnectAttemptState.CarrierAuthenticated,
+                DateTimeOffset.UtcNow);
+            Assert.Equal(
+                ReconnectAttemptState.CarrierAuthenticated,
+                authenticated.State);
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Reconnect_ledger_parallel_reservations_are_unique_and_supersede_older_attempts()
+    {
+        var root = Path.Combine(
+            AppContext.BaseDirectory,
+            "reconnect-ledger-concurrency-test",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var path = Path.Combine(root, "reconnect.db");
+            var session = Guid.NewGuid();
+            var host = Guid.NewGuid();
+            var incarnation = Guid.NewGuid();
+            var attempts = Enumerable.Range(0, 16)
+                .Select(_ => Task.Run(() =>
+                    new ReconnectLedger(path).ReserveAsync(
+                        session,
+                        host,
+                        incarnation,
+                        Guid.NewGuid(),
+                        DateTimeOffset.UtcNow)))
+                .ToArray();
+            var reserved = await Task.WhenAll(attempts);
+
+            Assert.Equal(
+                Enumerable.Range(1, 16).Select(value => (long)value),
+                reserved.Select(value => value.Generation).Order());
+            var ledger = new ReconnectLedger(path);
+            for (var generation = 1; generation < 16; generation++)
+                Assert.Equal(
+                    ReconnectAttemptState.Abandoned,
+                    (await ledger.LoadAsync(generation))!.State);
+            Assert.Equal(
+                ReconnectAttemptState.Reserved,
+                (await ledger.LoadAsync(16))!.State);
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Reconnect_ledger_rejects_stale_generation_after_new_reservation()
+    {
+        var root = Path.Combine(
+            AppContext.BaseDirectory,
+            "reconnect-ledger-stale-test",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var ledger = new ReconnectLedger(
+                Path.Combine(root, "reconnect.db"));
+            var session = Guid.NewGuid();
+            var host = Guid.NewGuid();
+            var incarnation = Guid.NewGuid();
+            var first = await ledger.ReserveAsync(
+                session,
+                host,
+                incarnation,
+                Guid.NewGuid(),
+                DateTimeOffset.UtcNow);
+            _ = await ledger.ReserveAsync(
+                session,
+                host,
+                incarnation,
+                Guid.NewGuid(),
+                DateTimeOffset.UtcNow);
+
+            await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                ledger.TransitionAsync(
+                    session,
+                    host,
+                    incarnation,
+                    first.Generation,
+                    first.AttemptId,
+                    ReconnectAttemptState.Reserved,
+                    ReconnectAttemptState.CarrierAuthenticated,
+                    DateTimeOffset.UtcNow));
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
     [Fact]
     public async Task Runtime_creates_processor_and_runs_session_over_in_memory_transport()
     {
@@ -142,6 +340,54 @@ public sealed class ProductionNodeRuntimeTests
     }
 
     [Fact]
+    public async Task Runtime_does_not_treat_legacy_clock_boot_record_as_verified()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var root = Path.Combine(
+            AppContext.BaseDirectory,
+            "node-boot-identity-test",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var options = CreateNodeHostOptions(root);
+            var legacyBootId = Guid.NewGuid();
+            File.WriteAllText(
+                options.JournalPath + ".boot.json",
+                JsonSerializer.Serialize(new
+                {
+                    Id = legacyBootId,
+                    ObservedBootUtc = DateTimeOffset.Parse(
+                        "2026-08-31T20:00:00Z")
+                }));
+            var validated = options.Validate();
+
+            await using var runtime = await ProductionNodeRuntime.CreateAsync(
+                validated,
+                Path.Combine(root, "credentials"),
+                CreatePortableStore(Path.Combine(root, "objects")),
+                new LocalPortableTransferClient(),
+                cancellationToken: CancellationToken.None);
+
+            using var persisted = JsonDocument.Parse(
+                File.ReadAllText(options.JournalPath + ".boot.json"));
+            Assert.NotEqual(
+                legacyBootId,
+                persisted.RootElement.GetProperty("Id").GetGuid());
+            Assert.True(persisted.RootElement.TryGetProperty(
+                "SystemBootIdentity", out _));
+            Assert.True(persisted.RootElement.TryGetProperty(
+                "Verified", out _));
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            if (Directory.Exists(root))
+                Directory.Delete(root, true);
+        }
+    }
+
+    [Fact]
     public void Session_binding_validation_rejects_mismatched_session()
     {
         var session = new NegotiatedSession(
@@ -250,13 +496,11 @@ public sealed class ProductionNodeRuntimeTests
         {
             // Create dummy files for required paths.
             var authKeyFile = Path.Combine(root, "auth.key");
-            var nonceFile = Path.Combine(root, "nonce.seq");
             var receiptFile = Path.Combine(root, "readiness.json");
             var configFile = Path.Combine(root, "node-host.json");
             var nodeSigningFile = Path.Combine(root, "node-signing.pk8");
             var controlSigningFile = Path.Combine(root, "control-signing.spki");
             File.WriteAllBytes(authKeyFile, new byte[32]);
-            File.WriteAllBytes(nonceFile, new byte[1]);
             File.WriteAllText(configFile, "{}");
             using (var nodeSigning = System.Security.Cryptography.ECDsa.Create(
                        System.Security.Cryptography.ECCurve.NamedCurves.nistP256))
@@ -275,7 +519,7 @@ public sealed class ProductionNodeRuntimeTests
                 "--host-id", Guid.NewGuid().ToString(),
                 "--incarnation-id", Guid.NewGuid().ToString(),
                 "--auth-key-file", authKeyFile,
-                "--nonce-sequence-file", nonceFile,
+                "--reconnect-ledger-file", Path.Combine(root, "reconnect.db"),
                 "--readiness-receipt-file", receiptFile,
                 "--node-signing-key-file", nodeSigningFile,
                 "--node-identity", "node",

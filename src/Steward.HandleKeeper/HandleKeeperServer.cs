@@ -19,10 +19,12 @@ public sealed record HandleKeeperOptions(
     int MaximumCachedRequests,
     TimeSpan RequestTimeout,
     TimeSpan IdempotencyTtl,
-    int MaximumRetainedLeases);
+    int MaximumRetainedLeases,
+    string? TrustedMaintenanceImagePath = null,
+    string? TrustedProvisionerImagePath = null);
 
 [SupportedOSPlatform("windows")]
-public sealed class HandleKeeperServer(HandleKeeperOptions options) : IDisposable
+public sealed class HandleKeeperServer : IDisposable
 {
     private const uint ProcessDuplicateHandle = 0x0040;
     private const uint DuplicateSameAccess = 0x00000002;
@@ -30,20 +32,44 @@ public sealed class HandleKeeperServer(HandleKeeperOptions options) : IDisposabl
     private const uint FileFlagFirstPipeInstance = 0x00080000;
     private const uint FileFlagOverlapped = 0x40000000;
     private const uint PipeRejectRemoteClients = 0x00000008;
-    private readonly SecurityIdentifier expectedNodeSid = ResolveSid(options.ExpectedNodeAccount);
+    private readonly SecurityIdentifier expectedNodeSid;
+    private readonly SecurityIdentifier systemSid = new(
+        WellKnownSidType.LocalSystemSid,
+        null);
+    private readonly HandleKeeperOptions options;
+    private readonly HandleKeeperDrainFenceState drainFence;
     private readonly ConcurrentDictionary<string, Lease> leases = new(StringComparer.Ordinal);
     private readonly Dictionary<string, CachedRequest> requests = new(StringComparer.Ordinal);
     private readonly object requestGate = new();
+    public HandleKeeperServer(HandleKeeperOptions options) :
+        this(options, new HandleKeeperDrainFenceState())
+    {
+    }
+
+    internal HandleKeeperServer(
+        HandleKeeperOptions options,
+        HandleKeeperDrainFenceState drainFence)
+    {
+        this.options = options ?? throw new ArgumentNullException(nameof(options));
+        expectedNodeSid = ResolveSid(this.options.ExpectedNodeAccount);
+        this.drainFence = drainFence ??
+            throw new ArgumentNullException(nameof(drainFence));
+    }
     private long revokedProvisionalOpenCount;
     private bool disposed;
 
     private sealed record Lease(JobLeaseIdentity Identity, SafeFileHandle Handle);
-    private sealed record ClientIdentity(uint ProcessId, long CreationTimeUtcTicks, SecurityIdentifier Sid);
+    private sealed record ClientIdentity(
+        uint ProcessId,
+        long CreationTimeUtcTicks,
+        SecurityIdentifier Sid,
+        string ImagePath,
+        string ImageSha256);
     private enum OpenHandleOwnership { None, Keeper, Client, Closed }
     private sealed record CachedRequest(
         uint ClientProcessId,
         long ClientCreationTimeUtcTicks,
-        string Command,
+        JobKeeperCommand Command,
         string PayloadHash,
         JobKeeperResponse Response,
         DateTimeOffset ExpiresAt,
@@ -85,6 +111,10 @@ public sealed class HandleKeeperServer(HandleKeeperOptions options) : IDisposabl
         var security = new PipeSecurity();
         security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
         security.AddAccessRule(new PipeAccessRule(expectedNodeSid, PipeAccessRights.ReadWrite, AccessControlType.Allow));
+        security.AddAccessRule(new PipeAccessRule(
+            new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null),
+            PipeAccessRights.FullControl,
+            AccessControlType.Allow));
         using var serviceIdentity = WindowsIdentity.GetCurrent();
         if (serviceIdentity.User is null) throw new InvalidOperationException("Keeper service identity has no SID.");
         security.AddAccessRule(new PipeAccessRule(serviceIdentity.User, PipeAccessRights.FullControl, AccessControlType.Allow));
@@ -125,9 +155,9 @@ public sealed class HandleKeeperServer(HandleKeeperOptions options) : IDisposabl
             if (!NativeMethods.GetNamedPipeClientProcessId(pipe.SafePipeHandle, out var clientPid))
                 throw new Win32Exception(Marshal.GetLastWin32Error(), nameof(NativeMethods.GetNamedPipeClientProcessId));
             caller = GetClientIdentity(pipe, clientPid);
-            if (!caller.Sid.Equals(expectedNodeSid)) throw new KeeperProtocolException("unauthorized", "Caller is not authorized.");
             request = await JobKeeperProtocol.ReadAsync<JobKeeperRequest>(pipe, options.MaximumMessageBytes, cancellationToken);
             ValidateEnvelope(request);
+            Authorize(request.Command, caller);
             var payloadHash = PayloadHash(request);
             lock (requestGate)
             {
@@ -136,7 +166,7 @@ public sealed class HandleKeeperServer(HandleKeeperOptions options) : IDisposabl
                 {
                     if (cached.ClientProcessId != caller.ProcessId ||
                         cached.ClientCreationTimeUtcTicks != caller.CreationTimeUtcTicks ||
-                        !StringComparer.Ordinal.Equals(cached.Command, request.Command) ||
+                        cached.Command != request.Command ||
                         !StringComparer.Ordinal.Equals(cached.PayloadHash, payloadHash))
                         throw new KeeperProtocolException("request_id_conflict", "Request ID was reused with different authenticated content.");
                     response = cached.OpenHandleOwnership == OpenHandleOwnership.Closed
@@ -153,7 +183,7 @@ public sealed class HandleKeeperServer(HandleKeeperOptions options) : IDisposabl
                     response = response with { RequiresAcknowledgement = true };
                     requests.Add(request.RequestId, new(caller.ProcessId, caller.CreationTimeUtcTicks,
                         request.Command, payloadHash, response, DateTimeOffset.UtcNow + options.IdempotencyTtl, false, true,
-                        request.Command == "open" && response.Success ? OpenHandleOwnership.Keeper : OpenHandleOwnership.None));
+                        request.Command == JobKeeperCommand.Open && response.Success ? OpenHandleOwnership.Keeper : OpenHandleOwnership.None));
                 }
                 cacheable = true;
             }
@@ -214,51 +244,84 @@ public sealed class HandleKeeperServer(HandleKeeperOptions options) : IDisposabl
     {
         return request.Command switch
         {
-            "retain" => Retain(request, caller),
-            "open" => Open(request, caller),
-            "release" => Release(request),
-            "abandon" => Abandon(request, caller),
-            "list" => List(),
-            "health" => new(JobKeeperProtocol.Version, true, RetainedLeaseCount: leases.Count,
-                RevokedProvisionalOpenCount: Interlocked.Read(ref revokedProvisionalOpenCount)),
+            JobKeeperCommand.Retain => Retain(request, caller),
+            JobKeeperCommand.Open => Open(request, caller),
+            JobKeeperCommand.Release => Release(request),
+            JobKeeperCommand.Abandon => Abandon(request, caller),
+            JobKeeperCommand.List => List(),
+            JobKeeperCommand.Health => FenceResponse(success: true),
+            JobKeeperCommand.AcquireDrainFence => AcquireDrainFence(request),
+            JobKeeperCommand.ReleaseDrainFence => ReleaseDrainFence(request),
+            JobKeeperCommand.TransferDrainFence => TransferDrainFence(request),
+            JobKeeperCommand.RollbackDrainFence => RollbackDrainFence(request),
+            JobKeeperCommand.ReleaseTransferredDrainFence =>
+                ReleaseTransferredDrainFence(request, caller),
             _ => throw new KeeperProtocolException("unknown_command", "Command is not supported.")
         };
     }
 
-    private JobKeeperResponse Retain(JobKeeperRequest request, ClientIdentity caller)
-    {
-        var identity = RequireIdentity(request);
-        if (request.HandleValue is 0 or -1) throw new ArgumentException("Retain requires a valid source handle.");
-        using var client = OpenVerifiedClient(caller, ProcessDuplicateHandle);
-        if (!NativeMethods.DuplicateHandle(client, new IntPtr(request.HandleValue), NativeMethods.GetCurrentProcess(),
-                out var duplicate, 0, false, DuplicateSameAccess))
-            throw new Win32Exception(Marshal.GetLastWin32Error(), nameof(NativeMethods.DuplicateHandle));
-        if (!NativeMethods.IsJobHandle(duplicate))
+    private JobKeeperResponse Retain(
+        JobKeeperRequest request,
+        ClientIdentity caller) =>
+        drainFence.ExecuteRetain(() =>
         {
-            duplicate.Dispose();
-            throw new UnauthorizedAccessException("Transferred handle is not a Job Object.");
-        }
+            var identity = RequireIdentity(request);
+            if (request.HandleValue is 0 or -1)
+                throw new ArgumentException(
+                    "Retain requires a valid source handle.");
+            using var client = OpenVerifiedClient(
+                caller,
+                ProcessDuplicateHandle);
+            if (!NativeMethods.DuplicateHandle(
+                    client,
+                    new IntPtr(request.HandleValue),
+                    NativeMethods.GetCurrentProcess(),
+                    out var duplicate,
+                    0,
+                    false,
+                    DuplicateSameAccess))
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    nameof(NativeMethods.DuplicateHandle));
+            if (!NativeMethods.IsJobHandle(duplicate))
+            {
+                duplicate.Dispose();
+                throw new UnauthorizedAccessException(
+                    "Transferred handle is not a Job Object.");
+            }
 
-        if (leases.TryGetValue(identity.JobName, out var existing))
-        {
-            duplicate.Dispose();
-            if (existing.Identity != identity) throw new UnauthorizedAccessException("Job name is bound to another immutable identity.");
-            return new(JobKeeperProtocol.Version, true);
-        }
-        if (leases.Count >= options.MaximumRetainedLeases)
-        {
-            duplicate.Dispose();
-            throw new KeeperProtocolException("lease_capacity", "Retained lease capacity is exhausted.");
-        }
-        if (!leases.TryAdd(identity.JobName, new(identity, duplicate)))
-        {
-            duplicate.Dispose();
-            throw new InvalidOperationException("Concurrent Job retention conflict.");
-        }
-        return new(JobKeeperProtocol.Version, true);
-    }
+            if (leases.TryGetValue(identity.JobName, out var existing))
+            {
+                duplicate.Dispose();
+                if (existing.Identity != identity)
+                    throw new UnauthorizedAccessException(
+                        "Job name is bound to another immutable identity.");
+                return new JobKeeperResponse(
+                    JobKeeperProtocol.Version,
+                    true);
+            }
+            if (leases.Count >= options.MaximumRetainedLeases)
+            {
+                duplicate.Dispose();
+                throw new KeeperProtocolException(
+                    "lease_capacity",
+                    "Retained lease capacity is exhausted.");
+            }
+            if (!leases.TryAdd(
+                    identity.JobName,
+                    new(identity, duplicate)))
+            {
+                duplicate.Dispose();
+                throw new InvalidOperationException(
+                    "Concurrent Job retention conflict.");
+            }
+            return new JobKeeperResponse(
+                JobKeeperProtocol.Version,
+                true);
+        });
 
-    private JobKeeperResponse Open(JobKeeperRequest request, ClientIdentity caller)
+    private JobKeeperResponse Open(JobKeeperRequest request, ClientIdentity caller) =>
+        drainFence.ExecuteRetain(() =>
     {
         var identity = RequireIdentity(request);
         if (!leases.TryGetValue(identity.JobName, out var lease))
@@ -269,16 +332,25 @@ public sealed class HandleKeeperServer(HandleKeeperOptions options) : IDisposabl
                 out var targetHandle, 0, false, DuplicateSameAccess))
             throw new Win32Exception(Marshal.GetLastWin32Error(), nameof(NativeMethods.DuplicateHandle));
         return new(JobKeeperProtocol.Version, true, HandleValue: targetHandle.ToInt64());
-    }
+    });
 
-    private JobKeeperResponse Release(JobKeeperRequest request)
-    {
-        var identity = RequireIdentity(request);
-        if (!leases.TryGetValue(identity.JobName, out var lease)) return new(JobKeeperProtocol.Version, true);
-        if (lease.Identity != identity) throw new UnauthorizedAccessException("Job lease identity mismatch.");
-        if (leases.TryRemove(identity.JobName, out lease)) lease.Handle.Dispose();
-        return new(JobKeeperProtocol.Version, true);
-    }
+    private JobKeeperResponse Release(JobKeeperRequest request) =>
+        drainFence.ExecuteLeaseMutation(() =>
+        {
+            var identity = RequireIdentity(request);
+            if (!leases.TryGetValue(identity.JobName, out var lease))
+                return new JobKeeperResponse(
+                    JobKeeperProtocol.Version,
+                    true);
+            if (lease.Identity != identity)
+                throw new UnauthorizedAccessException(
+                    "Job lease identity mismatch.");
+            if (leases.TryRemove(identity.JobName, out lease))
+                lease.Handle.Dispose();
+            return new JobKeeperResponse(
+                JobKeeperProtocol.Version,
+                true);
+        });
 
     private JobKeeperResponse Abandon(JobKeeperRequest request, ClientIdentity caller)
     {
@@ -286,7 +358,7 @@ public sealed class HandleKeeperServer(HandleKeeperOptions options) : IDisposabl
             return Error("not_found", "Related Open request was not found.");
         if (original.ClientProcessId != caller.ProcessId ||
             original.ClientCreationTimeUtcTicks != caller.CreationTimeUtcTicks ||
-            original.Command != "open")
+            original.Command != JobKeeperCommand.Open)
             throw new KeeperProtocolException("request_id_conflict", "Related Open request identity does not match.");
         if (original.OpenHandleOwnership is OpenHandleOwnership.Keeper or OpenHandleOwnership.Client)
         {
@@ -297,29 +369,222 @@ public sealed class HandleKeeperServer(HandleKeeperOptions options) : IDisposabl
         return new(JobKeeperProtocol.Version, true);
     }
 
+    private JobKeeperResponse AcquireDrainFence(JobKeeperRequest request)
+    {
+        var fence = RequireFence(request);
+        var result = drainFence.Acquire(
+            new HandleKeeperFenceAcquireRequest(
+                fence.TransactionId,
+                fence.ScopeId,
+                Capability(fence.Capability),
+                fence.ExpectedGeneration),
+            () => leases.Count);
+        return result.Status == HandleKeeperFenceAcquireStatus.Acquired
+            ? FenceResponse(success: true)
+            : FenceResponse(
+                success: false,
+                errorCode: "active_leases",
+                error: "HandleKeeper retains active Job leases.");
+    }
+
+    private JobKeeperResponse ReleaseDrainFence(JobKeeperRequest request)
+    {
+        var fence = RequireFence(request);
+        _ = drainFence.Release(new HandleKeeperFenceReleaseRequest(
+            fence.TransactionId,
+            fence.ScopeId,
+            Capability(fence.Capability),
+            fence.ExpectedGeneration));
+        return FenceResponse(success: true);
+    }
+
+    private JobKeeperResponse TransferDrainFence(JobKeeperRequest request)
+    {
+        var fence = RequireFence(request);
+        if (fence.TargetCapability is null ||
+            fence.ProvisionerImageSha256 is null)
+            throw new KeeperProtocolException(
+                "invalid_request",
+                "Fence transfer target is incomplete.");
+        _ = drainFence.Transfer(new HandleKeeperFenceTransferRequest(
+            fence.TransactionId,
+            Capability(fence.Capability),
+            fence.ExpectedGeneration,
+            Capability(fence.TargetCapability),
+            fence.ProvisionerImageSha256));
+        return FenceResponse(success: true);
+    }
+
+    private JobKeeperResponse RollbackDrainFence(JobKeeperRequest request)
+    {
+        var fence = RequireFence(request);
+        _ = drainFence.RollbackTransfer(
+            fence.TransactionId,
+            Capability(fence.Capability),
+            fence.ExpectedGeneration);
+        return FenceResponse(success: true);
+    }
+
+    private JobKeeperResponse ReleaseTransferredDrainFence(
+        JobKeeperRequest request,
+        ClientIdentity caller)
+    {
+        var fence = RequireFence(request);
+        _ = drainFence.ReleaseTransferred(
+            new HandleKeeperTransferredReleaseRequest(
+                fence.TransactionId,
+                Capability(fence.Capability),
+                fence.ExpectedGeneration,
+                caller.ImageSha256));
+        return FenceResponse(success: true);
+    }
+
+    private JobKeeperResponse FenceResponse(
+        bool success,
+        string? errorCode = null,
+        string? error = null)
+    {
+        var snapshot = drainFence.Snapshot;
+        return new JobKeeperResponse(
+            JobKeeperProtocol.Version,
+            success,
+            error,
+            ErrorCode: errorCode,
+            RetainedLeaseCount: leases.Count,
+            RevokedProvisionalOpenCount:
+                Interlocked.Read(ref revokedProvisionalOpenCount),
+            DrainFenced: snapshot.Phase != HandleKeeperFencePhase.Unfenced,
+            FenceGeneration: snapshot.Generation,
+            FenceDepth: snapshot.Depth,
+            FencePhase: ToProtocolPhase(snapshot.Phase));
+    }
+
+    private static JobKeeperFenceDto RequireFence(JobKeeperRequest request) =>
+        request.Fence ?? throw new KeeperProtocolException(
+            "invalid_request",
+            "Fence command requires typed ownership.");
+
+    private static HandleKeeperFenceCapability Capability(
+        JobKeeperFenceCapability capability) => new(capability.Encoded);
+
+    private static JobKeeperFencePhase ToProtocolPhase(
+        HandleKeeperFencePhase phase) => phase switch
+        {
+            HandleKeeperFencePhase.Unfenced =>
+                JobKeeperFencePhase.Unfenced,
+            HandleKeeperFencePhase.MaintenanceOwned =>
+                JobKeeperFencePhase.MaintenanceOwned,
+            HandleKeeperFencePhase.ProvisionerOwned =>
+                JobKeeperFencePhase.ProvisionerOwned,
+            _ => throw new InvalidOperationException(
+                "HandleKeeper fence phase is unsupported.")
+        };
+    private void Authorize(
+        JobKeeperCommand command,
+        ClientIdentity caller)
+    {
+        var maintenance = command is
+            JobKeeperCommand.AcquireDrainFence or
+            JobKeeperCommand.ReleaseDrainFence or
+            JobKeeperCommand.TransferDrainFence or
+            JobKeeperCommand.RollbackDrainFence;
+        var provisioner = command ==
+            JobKeeperCommand.ReleaseTransferredDrainFence;
+        var health = command == JobKeeperCommand.Health;
+        var authorized = maintenance
+            ? caller.Sid.Equals(systemSid) &&
+              options.TrustedMaintenanceImagePath is { } maintenanceImage &&
+              string.Equals(
+                  caller.ImagePath,
+                  Path.GetFullPath(maintenanceImage),
+                  StringComparison.OrdinalIgnoreCase)
+            : provisioner
+                ? caller.Sid.Equals(systemSid) &&
+                  options.TrustedProvisionerImagePath is { } provisionerImage &&
+                  string.Equals(
+                      caller.ImagePath,
+                      Path.GetFullPath(provisionerImage),
+                      StringComparison.OrdinalIgnoreCase)
+                : health
+                    ? caller.Sid.Equals(systemSid) ||
+                      caller.Sid.Equals(expectedNodeSid)
+                    : caller.Sid.Equals(expectedNodeSid);
+        if (!authorized)
+            throw new KeeperProtocolException(
+                "unauthorized",
+                "Caller is not authorized for this HandleKeeper operation.");
+    }
+
     private void ValidateEnvelope(JobKeeperRequest request)
     {
         if (request.ProtocolVersion != JobKeeperProtocol.Version)
             throw new KeeperProtocolException("unsupported_version", "Protocol version is unsupported.");
         if (request.RequestId.Length != 32 || !request.RequestId.All(Uri.IsHexDigit))
             throw new KeeperProtocolException("invalid_request_id", "Request ID is invalid.");
-        if (request.Command is not ("retain" or "open" or "release" or "abandon" or "list" or "health"))
+        if (!Enum.IsDefined(request.Command))
             throw new KeeperProtocolException("unknown_command", "Command is not supported.");
-        if (request.Command is "retain" or "open" or "release")
+        if (request.Command is JobKeeperCommand.Retain or
+            JobKeeperCommand.Open or JobKeeperCommand.Release)
+        {
             _ = RequireIdentity(request);
-        else if (request.Command == "abandon")
+            if (request.Fence is not null)
+                throw new KeeperProtocolException(
+                    "invalid_request",
+                    "Lease command cannot contain fence ownership.");
+        }
+        else if (request.Command == JobKeeperCommand.Abandon)
         {
             if (request.Lease is not null || request.HandleValue != 0 ||
-                request.RelatedRequestId is null || request.RelatedRequestId.Length != 32 ||
+                request.Fence is not null ||
+                request.RelatedRequestId is null ||
+                request.RelatedRequestId.Length != 32 ||
                 !request.RelatedRequestId.All(Uri.IsHexDigit))
-                throw new KeeperProtocolException("invalid_request", "Abandon payload is invalid.");
+                throw new KeeperProtocolException(
+                    "invalid_request",
+                    "Abandon payload is invalid.");
         }
-        else if (request.Lease is not null || request.HandleValue != 0 || request.RelatedRequestId is not null)
-            throw new KeeperProtocolException("invalid_request", "Command payload is invalid.");
-        if (request.Command != "retain" && request.HandleValue != 0)
-            throw new KeeperProtocolException("invalid_request", "Only Retain accepts a handle.");
+        else if (request.Command is
+            JobKeeperCommand.AcquireDrainFence or
+            JobKeeperCommand.ReleaseDrainFence or
+            JobKeeperCommand.TransferDrainFence or
+            JobKeeperCommand.RollbackDrainFence or
+            JobKeeperCommand.ReleaseTransferredDrainFence)
+        {
+            ValidateFenceRequest(request);
+        }
+        else if (request.Lease is not null || request.HandleValue != 0 ||
+                 request.RelatedRequestId is not null ||
+                 request.Fence is not null)
+            throw new KeeperProtocolException(
+                "invalid_request",
+                "Command payload is invalid.");
+        if (request.Command != JobKeeperCommand.Retain &&
+            request.HandleValue != 0)
+            throw new KeeperProtocolException(
+                "invalid_request",
+                "Only Retain accepts a handle.");
     }
 
+    private static void ValidateFenceRequest(JobKeeperRequest request)
+    {
+        var fence = request.Fence ?? throw new KeeperProtocolException(
+            "invalid_request",
+            "Fence ownership payload is required.");
+        if (request.Lease is not null || request.HandleValue != 0 ||
+            request.RelatedRequestId is not null ||
+            fence.TransactionId == Guid.Empty || fence.ScopeId == Guid.Empty)
+            throw new KeeperProtocolException(
+                "invalid_request",
+                "Fence ownership payload is invalid.");
+        var transfer = request.Command == JobKeeperCommand.TransferDrainFence;
+        if (transfer != (fence.TargetCapability is not null) ||
+            transfer != (fence.ProvisionerImageSha256 is not null) ||
+            fence.ProvisionerImageSha256 is { } digest &&
+            (digest.Length != 64 || !digest.All(char.IsAsciiHexDigit)))
+            throw new KeeperProtocolException(
+                "invalid_request",
+                "Fence transfer target is invalid.");
+    }
     private static JobLeaseIdentity RequireIdentity(JobKeeperRequest request)
     {
         var identity = request.Lease?.ToIdentity() ?? throw new ArgumentException("Command requires a lease identity.");
@@ -355,7 +620,15 @@ public sealed class HandleKeeperServer(HandleKeeperOptions options) : IDisposabl
         }
         if (!NativeMethods.GetProcessTimes(process, out var creation, out _, out _, out _))
             throw new Win32Exception(Marshal.GetLastWin32Error(), nameof(NativeMethods.GetProcessTimes));
-        return new(clientPid, DateTime.FromFileTimeUtc(creation.ToLong()).Ticks, impersonatedSid);
+        var imagePath = QueryProcessImagePath(process);
+        var imageSha256 = Convert.ToHexString(
+            SHA256.HashData(File.ReadAllBytes(imagePath)));
+        return new ClientIdentity(
+            clientPid,
+            DateTime.FromFileTimeUtc(creation.ToLong()).Ticks,
+            impersonatedSid,
+            imagePath,
+            imageSha256);
     }
 
     private void ValidateOptions()
@@ -366,6 +639,12 @@ public sealed class HandleKeeperServer(HandleKeeperOptions options) : IDisposabl
             options.RequestTimeout < TimeSpan.FromMilliseconds(100) || options.RequestTimeout > TimeSpan.FromSeconds(30) ||
             options.IdempotencyTtl < TimeSpan.FromSeconds(1) || options.IdempotencyTtl > TimeSpan.FromMinutes(10) ||
             options.MaximumRetainedLeases is <= 0 or > 65536 ||
+            options.TrustedMaintenanceImagePath is not null &&
+            !Path.IsPathFullyQualified(
+                options.TrustedMaintenanceImagePath) ||
+            options.TrustedProvisionerImagePath is not null &&
+            !Path.IsPathFullyQualified(
+                options.TrustedProvisionerImagePath) ||
             options.PipeName.Length > 128 ||
             options.PipeName.Any(c => !(char.IsLetterOrDigit(c) || c is '-' or '_' or '.')))
             throw new ArgumentException("Handle keeper configuration is invalid.");
@@ -386,10 +665,14 @@ public sealed class HandleKeeperServer(HandleKeeperOptions options) : IDisposabl
         exception switch
         {
             KeeperProtocolException protocol => Error(protocol.Code, protocol.Message),
+            HandleKeeperFenceException fence => Error(fence.Code, fence.Message),
             InvalidDataException or JsonException => Error("malformed_message", "Request message is malformed."),
             UnauthorizedAccessException => Error("unauthorized", "Caller is not authorized."),
             ArgumentException or FormatException => Error("invalid_request", "Request fields are invalid."),
             Win32Exception => Error("win32_failure", "Required Windows operation failed."),
+            HandleKeeperFencedException => Error(
+                "keeper_fenced",
+                "HandleKeeper is fenced for maintenance."),
             _ => Error("internal_error", "Keeper request failed.")
         };
 
@@ -401,7 +684,8 @@ public sealed class HandleKeeperServer(HandleKeeperOptions options) : IDisposabl
             request.Command,
             request.Lease,
             request.HandleValue,
-            request.RelatedRequestId
+            request.RelatedRequestId,
+            request.Fence
         });
         return Convert.ToHexString(SHA256.HashData(payload));
     }
@@ -433,7 +717,12 @@ public sealed class HandleKeeperServer(HandleKeeperOptions options) : IDisposabl
 
     private static void CloseRemoteHandle(CachedRequest cached)
     {
-        var caller = new ClientIdentity(cached.ClientProcessId, cached.ClientCreationTimeUtcTicks, null!);
+        var caller = new ClientIdentity(
+            cached.ClientProcessId,
+            cached.ClientCreationTimeUtcTicks,
+            null!,
+            string.Empty,
+            string.Empty);
         using var process = OpenVerifiedClient(caller, ProcessDuplicateHandle, verifySid: false);
         if (!NativeMethods.DuplicateHandle(process, new IntPtr(cached.Response.HandleValue), NativeMethods.GetCurrentProcess(),
                 out var local, 0, false, DuplicateSameAccess | 0x00000001))
@@ -470,6 +759,26 @@ public sealed class HandleKeeperServer(HandleKeeperOptions options) : IDisposabl
         return process;
     }
 
+    private static string QueryProcessImagePath(SafeFileHandle process)
+    {
+        var capacity = 32_768;
+        var value = new System.Text.StringBuilder(capacity);
+        if (!NativeMethods.QueryFullProcessImageName(
+                process,
+                0,
+                value,
+                ref capacity) || capacity <= 0)
+            throw new Win32Exception(
+                Marshal.GetLastWin32Error(),
+                nameof(NativeMethods.QueryFullProcessImageName));
+        var path = Path.GetFullPath(value.ToString());
+        if (!File.Exists(path) ||
+            File.GetAttributes(path).HasFlag(FileAttributes.ReparsePoint))
+            throw new KeeperProtocolException(
+                "caller_unverifiable",
+                "Caller image cannot be verified.");
+        return path;
+    }
     private static SecurityIdentifier ReadTokenSid(SafeFileHandle token)
     {
         _ = NativeMethods.GetTokenInformation(token, 1, IntPtr.Zero, 0, out var required);
@@ -550,6 +859,17 @@ public sealed class HandleKeeperServer(HandleKeeperOptions options) : IDisposabl
         internal static extern bool OpenThreadToken(IntPtr thread, uint desiredAccess,
             [MarshalAs(UnmanagedType.Bool)] bool openAsSelf, out SafeFileHandle token);
 
+        [DllImport(
+            "kernel32.dll",
+            EntryPoint = "QueryFullProcessImageNameW",
+            SetLastError = true,
+            CharSet = CharSet.Unicode)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool QueryFullProcessImageName(
+            SafeFileHandle process,
+            uint flags,
+            System.Text.StringBuilder imagePath,
+            ref int size);
         [DllImport("kernel32.dll", SetLastError = true)]
         internal static extern SafeFileHandle OpenProcess(uint access, [MarshalAs(UnmanagedType.Bool)] bool inherit, uint processId);
 
