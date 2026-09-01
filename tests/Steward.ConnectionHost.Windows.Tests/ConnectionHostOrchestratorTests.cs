@@ -1051,4 +1051,52 @@ public sealed class ConnectionHostOrchestratorTests
             return Task.CompletedTask;
         }
     }
+
+    [Fact]
+    public async Task Three_connections_operate_independently_and_hung_startup_does_not_starve_others()
+    {
+        var fixture = new HostFixture(enableConnections: true);
+        await using var host = fixture.CreateHost();
+        await host.InitializeAsync();
+
+        // Prepare three connections representing three nodes
+        await fixture.ResolveAndPrepareAsync(host, "node-a");
+        await fixture.ResolveAndPrepareAsync(host, "node-b");
+        await fixture.ResolveAndPrepareAsync(host, "node-c");
+        fixture.Authorization.Register("token-a");
+        fixture.Authorization.Register("token-b");
+        fixture.Authorization.Register("token-c");
+
+        // Block node-a's connect — it should not starve node-b and node-c
+        fixture.Runtime.BlockedConnectionId = "node-a";
+        var blockedConnect = host.ExecuteAsync(
+            fixture.Command(ConnectionHostOperation.Connect, "node-a", token: "token-a"));
+        await fixture.Runtime.ConnectStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        // node-b and node-c should proceed independently
+        var statusB = await host.ExecuteAsync(
+            fixture.Command(ConnectionHostOperation.Status, "node-b"))
+            .WaitAsync(TimeSpan.FromSeconds(2));
+        var statusC = await host.ExecuteAsync(
+            fixture.Command(ConnectionHostOperation.Status, "node-c"))
+            .WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.True(statusB.Accepted);
+        Assert.True(statusC.Accepted);
+        Assert.False(blockedConnect.IsCompleted,
+            "Hung node-a must not have completed while b and c operated");
+
+        // Release the blocked connect
+        fixture.Runtime.ReleaseBlockedConnect.TrySetResult(true);
+        var resultA = await blockedConnect.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.True(resultA.Accepted);
+
+        // All three connections tracked
+        var allStatus = await host.ExecuteAsync(
+            fixture.Command(ConnectionHostOperation.Status));
+        Assert.Equal(3, allStatus.Connections!.Count);
+        Assert.Equal(
+            new[] { "node-a", "node-b", "node-c" },
+            allStatus.Connections.Select(c => c.ConnectionId).Order());
+    }
 }

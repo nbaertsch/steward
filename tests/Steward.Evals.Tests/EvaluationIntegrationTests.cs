@@ -712,6 +712,28 @@ public sealed class EvaluationIntegrationTests
     }
 
     [Fact]
+    public void Saber_planner_also_supports_N_replicas()
+    {
+        var adapter = new SaberEvaluationAdapter(new("saber", "1.2", "profile-2",
+            @"C:\tools\saber.exe", ["run", "{caseId}", "--dataset", "{datasetHash}"]));
+        var planner = new SaberEvaluationPlanner(adapter, Setup());
+        var cases = Enumerable.Range(0, 5).Select(i => EvaluationCase.Create($"s{i}", new { })).ToArray();
+        var input = Input(cases) with { ReplicaCount = 3, Runtime = new("1.2", "setup-1") };
+        var plan = planner.Plan(new(WorkloadId.New(), PlanRevisionId.New(), input));
+        var evalTasks = plan.Tasks.Where(x => x.LogicalKey.StartsWith("eval/", StringComparison.Ordinal)).ToArray();
+
+        Assert.Equal(15, evalTasks.Length); // 5 cases × 3 replicas
+        Assert.Equal(15, evalTasks.Select(x => x.TaskId).Distinct().Count());
+        Assert.Equal("saber-evaluation", plan.PlannerType);
+        // Each case has exactly 3 replicas
+        foreach (var caseId in new[] { "s0", "s1", "s2", "s3", "s4" })
+        {
+            var replicas = evalTasks.Where(x => x.LogicalKey.StartsWith($"eval/{caseId}/r", StringComparison.Ordinal)).ToArray();
+            Assert.Equal(3, replicas.Length);
+        }
+    }
+
+    [Fact]
     public void Optional_live_fixture_is_explicitly_opt_in()
     {
         var enabled = string.Equals(Environment.GetEnvironmentVariable("STEWARD_RUN_LIVE_EVAL_FIXTURES"), "1",
