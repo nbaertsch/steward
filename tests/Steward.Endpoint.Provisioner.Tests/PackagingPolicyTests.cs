@@ -395,6 +395,30 @@ public sealed class PackagingPolicyTests
             "--reconnect-ledger-file",
             source,
             StringComparison.Ordinal);
+        Assert.Contains(
+            "Path.GetDirectoryName(stateRoot)",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "register-endpoint-",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "\"icacls.exe\"",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "\"*S-1-5-18:(OI)(CI)F\"",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "\"*S-1-5-32-544:(OI)(CI)F\"",
+            source,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "Path.Combine(\r\n            installRoot,\r\n            $\".register-endpoint-",
+            source,
+            StringComparison.Ordinal);
         Assert.DoesNotContain(
             "$\"--nonce-sequence-file",
             source,

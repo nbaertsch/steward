@@ -3660,9 +3660,22 @@ internal sealed class PowerShellTaskRegistrar : IEndpointTaskRegistrar
             !File.Exists(provisioner))
             throw new FileNotFoundException(
                 "Self-contained endpoint executables are unavailable.");
+        var scriptRoot = Path.Combine(
+            Path.GetDirectoryName(stateRoot) ??
+                throw new InvalidDataException(
+                    "Endpoint state root has no parent."),
+            "install");
+        Directory.CreateDirectory(scriptRoot);
+        EndpointProvisioner.Run(
+            "icacls.exe",
+            scriptRoot,
+            "/inheritance:r",
+            "/grant:r",
+            "*S-1-5-18:(OI)(CI)F",
+            "*S-1-5-32-544:(OI)(CI)F");
         var scriptPath = Path.Combine(
-            installRoot,
-            $".register-endpoint-{Guid.NewGuid():N}.ps1");
+            scriptRoot,
+            $"register-endpoint-{Guid.NewGuid():N}.ps1");
         var script = $$"""
             $ErrorActionPreference='Stop'
             $keeperName='HandleKeeper-{{identity.HostId:N}}'
