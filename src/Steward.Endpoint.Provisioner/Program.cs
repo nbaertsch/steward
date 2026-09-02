@@ -3704,30 +3704,8 @@ internal sealed class PowerShellTaskRegistrar : IEndpointTaskRegistrar
             $bUserSid=if($null-ne$b){Resolve-TaskUserSid $b.Principal.UserId}else{$null}
             $canonical=@($a,$b).Where({
               if($null-eq$_-or$_.Triggers.Count-ne2-or
-                $null-eq$_.Settings-or
-                $null-eq$_.Settings.IdleSettings-or
-                $null-eq$_.Settings.NetworkSettings){return $false}
-              $settings=$_.Settings
-              $settings.AllowDemandStart-and
-              $settings.AllowHardTerminate-and
-              $settings.Compatibility-eq'Win7'-and
-              [string]::IsNullOrEmpty($settings.DeleteExpiredTaskAfter)-and
-              $settings.Priority-eq7-and
-              $settings.RestartCount-eq999-and
-              $settings.RestartInterval-eq'PT1M'-and
-              !$settings.RunOnlyIfIdle-and
-              !$settings.RunOnlyIfNetworkAvailable-and
-              !$settings.WakeToRun-and
-              !$settings.DisallowStartOnRemoteAppSession-and
-              $settings.UseUnifiedSchedulingEngine-and
-              !$settings.Volatile-and
-              $settings.IdleSettings.IdleDuration-eq'PT10M'-and
-              !$settings.IdleSettings.RestartOnIdle-and
-              $settings.IdleSettings.StopOnIdleEnd-and
-              $settings.IdleSettings.WaitTimeout-eq'PT1H'-and
-              [string]::IsNullOrEmpty($settings.NetworkSettings.Id)-and
-              [string]::IsNullOrEmpty($settings.NetworkSettings.Name)-and
-              $null-eq$settings.MaintenanceSettings
+                $null-eq$_.Settings){return $false}
+              $_.Settings.Enabled-and$_.Settings.Hidden-and$_.Settings.StartWhenAvailable
             }).Count-eq2
             $aTriggers=if($null-ne$a){@($a.Triggers)}else{@()}
             $bTriggers=if($null-ne$b){@($b.Triggers)}else{@()}
