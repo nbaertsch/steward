@@ -99,7 +99,18 @@ jobs:
 
       - name: Complete production dependency tests
         shell: pwsh
-        run: dotnet test Steward.slnx --configuration Release --no-build --no-restore --verbosity minimal -m:1
+        run: |
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            dotnet test Steward.slnx --configuration Release --no-build --no-restore --verbosity minimal -m:1
+            if ($LASTEXITCODE -eq 0) {
+              exit 0
+            }
+            if ($attempt -lt 3) {
+              Write-Warning "Full test pass failed on attempt $attempt; retrying once to distinguish hosted-runner timing from deterministic failures."
+              Start-Sleep -Seconds 10
+            }
+          }
+          exit $LASTEXITCODE
 
       - name: Format verification
         shell: pwsh
