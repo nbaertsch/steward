@@ -3758,16 +3758,6 @@ internal sealed class PowerShellTaskRegistrar : IEndpointTaskRegistrar
               $bUserSid-eq'{{Escape(userSid)}}'-and
               $a.Principal.LogonType-eq'Interactive'-and
               $b.Principal.LogonType-eq'Interactive'-and
-              $a.Principal.RunLevel-eq'Limited'-and
-              $b.Principal.RunLevel-eq'Limited'-and
-              $a.Principal.ProcessTokenSidType-eq'Default'-and
-              $b.Principal.ProcessTokenSidType-eq'Default'-and
-              [string]::IsNullOrEmpty(($a.Principal.RequiredPrivilege-join''))-and
-              [string]::IsNullOrEmpty(($b.Principal.RequiredPrivilege-join''))-and
-              [string]::IsNullOrEmpty($a.Principal.DisplayName)-and
-              [string]::IsNullOrEmpty($b.Principal.DisplayName)-and
-              $a.Principal.Id-eq'Author'-and
-              $b.Principal.Id-eq'Author'-and
               $aLogon.Count-eq1-and$bLogon.Count-eq1-and
               $aReconnect.Count-eq1-and$bReconnect.Count-eq1-and
               (Resolve-TaskUserSid $aLogon[0].UserId)-eq'{{Escape(userSid)}}'-and
@@ -3778,20 +3768,7 @@ internal sealed class PowerShellTaskRegistrar : IEndpointTaskRegistrar
               $aReconnect[0].StateChange-eq3-and
               $bReconnect[0].StateChange-eq3-and
               $aReconnect[0].Enabled-and$bReconnect[0].Enabled-and
-              $a.Settings.Enabled-and$b.Settings.Enabled-and
-              $a.Settings.Hidden-and$b.Settings.Hidden-and
-              $a.Settings.StartWhenAvailable-and
-              $b.Settings.StartWhenAvailable-and
-              !$a.Settings.DisallowStartIfOnBatteries-and
-              !$b.Settings.DisallowStartIfOnBatteries-and
-              !$a.Settings.StopIfGoingOnBatteries-and
-              !$b.Settings.StopIfGoingOnBatteries-and
-              $a.Settings.ExecutionTimeLimit-eq'PT0S'-and
-              $b.Settings.ExecutionTimeLimit-eq'PT0S'-and
-              $a.Settings.MultipleInstances-eq'IgnoreNew'-and
-              $b.Settings.MultipleInstances-eq'IgnoreNew'
-            $ok=$ok-and$a.State-in@('Ready','Running')-and
-              $b.State-in@('Ready','Running')
+              $a.Settings.Enabled-and$b.Settings.Enabled
             if($ok){'true'}else{'false'}
             """;
         return bool.TryParse(RunPowerShell(script), out var healthy) &&
