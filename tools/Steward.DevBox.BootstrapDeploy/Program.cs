@@ -266,7 +266,6 @@ if (args is
         throw new ArgumentException(
             "Expected endpoint release provenance is invalid.");
     var receiptText = File.ReadAllText(Path.GetFullPath(receiptLogPath));
-    var rawReceipt = true;
     JsonDocument document;
     try
     {
@@ -274,7 +273,6 @@ if (args is
     }
     catch (JsonException)
     {
-        rawReceipt = false;
         var line = receiptText.Split(
                 ['\r', '\n'],
                 StringSplitOptions.RemoveEmptyEntries)
@@ -311,13 +309,12 @@ if (args is
         nodeVerifier.ImportSubjectPublicKeyInfo(
             nodePublic,
             out var nodeRead);
-        if (rawReceipt &&
-            (nodeRead != nodePublic.Length ||
+        if (nodeRead != nodePublic.Length ||
             !nodeVerifier.VerifyData(
                 canonical,
                 signature,
                 HashAlgorithmName.SHA256,
-                DSASignatureFormat.Rfc3279DerSequence)))
+                DSASignatureFormat.Rfc3279DerSequence))
             throw new CryptographicException(
                 "The endpoint receipt signature is invalid.");
         if (body.GetProperty("version").GetInt32() != 2 ||
