@@ -44,14 +44,14 @@ if ($TestBuild) {
     }
 } else {
     if ($env:GITHUB_ACTIONS -ne 'true' -or
-        $Version -ne '1.0.32' -or
+        $Version -ne '1.0.33' -or
         [string]::IsNullOrWhiteSpace($SourceRepository) -or
         $SourceCommit -notmatch '^[0-9A-Fa-f]{40}$' -or
         $SourceRef -ne 'refs/heads/main' -or
         $SignerWorkflow -ne
             "$SourceRepository/.github/workflows/release-endpoint.yml" -or
         [string]::IsNullOrWhiteSpace($SourceRunId)) {
-        throw 'Production endpoint MSI builds require exact 1.0.32 GitHub Actions provenance.'
+        throw 'Production endpoint MSI builds require exact 1.0.33 GitHub Actions provenance.'
     }
 }
 

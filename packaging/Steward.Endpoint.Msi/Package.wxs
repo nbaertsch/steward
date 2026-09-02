@@ -57,21 +57,21 @@
     <CustomAction
         Id="RollbackStewardEndpointProvisioning"
         FileRef="EndpointProvisionerExe"
-        ExeCommand="--r &quot;[ProductCode]&quot; --g &quot;[STEWARD_CONFIG]&quot; --a &quot;[STEWARD_ATTESTATION]&quot;"
+        ExeCommand="--r &quot;[ProductCode]&quot; --i &quot;[INSTALLFOLDER]&quot; --g &quot;[STEWARD_CONFIG]&quot; --a &quot;[STEWARD_ATTESTATION]&quot;"
         Execute="rollback"
         Impersonate="no"
         Return="check" />
     <CustomAction
         Id="ProvisionStewardEndpoint"
         FileRef="EndpointProvisionerExe"
-        ExeCommand="--p &quot;[ProductCode]&quot; --g &quot;[STEWARD_CONFIG]&quot; --a &quot;[STEWARD_ATTESTATION]&quot;"
+        ExeCommand="--p &quot;[ProductCode]&quot; --i &quot;[INSTALLFOLDER]&quot; --g &quot;[STEWARD_CONFIG]&quot; --a &quot;[STEWARD_ATTESTATION]&quot;"
         Execute="deferred"
         Impersonate="no"
         Return="check" />
     <CustomAction
         Id="CommitStewardEndpointProvisioning"
         FileRef="EndpointProvisionerExe"
-        ExeCommand="--c &quot;[ProductCode]&quot; --g &quot;[STEWARD_CONFIG]&quot; --a &quot;[STEWARD_ATTESTATION]&quot;"
+        ExeCommand="--c &quot;[ProductCode]&quot; --i &quot;[INSTALLFOLDER]&quot; --g &quot;[STEWARD_CONFIG]&quot; --a &quot;[STEWARD_ATTESTATION]&quot;"
         Execute="commit"
         Impersonate="no"
         Return="check" />
