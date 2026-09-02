@@ -295,6 +295,7 @@ jobs:
               $rsa.ExportSubjectPublicKeyInfo())
             $controlPublic = [Convert]::ToBase64String(
               $control.ExportSubjectPublicKeyInfo())
+            $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
             .\scripts\Test-StewardEndpointMsi.ps1 `
               -CatalogDirectory '${{ runner.temp }}\steward-endpoint\catalog' `
               -LegacyCatalogDirectory $env:STEWARD_LEGACY_CATALOG `
@@ -302,7 +303,7 @@ jobs:
               -BootstrapEncryptionPublicKeyBase64 $bootstrap `
               -ControlSigningPublicKeyBase64 $controlPublic `
               -ControlIdentity 'steward.control.release-gate' `
-              -NodeUserAccount 'release-gate@example.com' `
+              -NodeUserAccount $identity.Name `
               -NodeUserSid 'S-1-12-1-1-2-3-4' `
               -Machine
           } finally {
