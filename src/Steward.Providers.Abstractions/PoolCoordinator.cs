@@ -48,7 +48,8 @@ public sealed record PoolMember(
     PoolMemberState State,
     DateTimeOffset LastActiveAt,
     string? AffinityKey = null,
-    string? DemandId = null)
+    string? DemandId = null,
+    string? ProviderResourceId = null)
 {
     [JsonIgnore]
     public Host Host => new(HostId, PoolId, IncarnationId);
@@ -169,6 +170,58 @@ public sealed class PoolCoordinator(IPoolStateStore store)
             members[index] = members[index] with { State = state, LastActiveAt = now };
             var next = current with { Revision = current.Revision + 1, Members = members };
             if (await store.TrySaveAsync(next, current.Revision, cancellationToken).ConfigureAwait(false))
+                return;
+        }
+    }
+
+    public async Task BindProviderResourceAsync(
+        PoolId poolId,
+        HostId hostId,
+        string resourceName,
+        string providerResourceId,
+        DateTimeOffset now,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(resourceName);
+        ArgumentException.ThrowIfNullOrWhiteSpace(providerResourceId);
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var current = await store.LoadAsync(
+                poolId,
+                cancellationToken).ConfigureAwait(false);
+            var members = current.Members.ToList();
+            var index = members.FindIndex(x => x.HostId == hostId);
+            if (index < 0)
+                throw new InvalidOperationException(
+                    "Pool member does not exist.");
+            var member = members[index];
+            if (member.ProviderResourceId is not null &&
+                (!string.Equals(
+                    member.ProviderResourceId,
+                    providerResourceId,
+                    StringComparison.Ordinal) ||
+                 !string.Equals(
+                    member.ProviderResourceName,
+                    resourceName,
+                    StringComparison.Ordinal)))
+                throw new InvalidDataException(
+                    "Pool member is already bound to another provider resource.");
+            members[index] = member with
+            {
+                ProviderResourceName = resourceName,
+                ProviderResourceId = providerResourceId,
+                LastActiveAt = now
+            };
+            var next = current with
+            {
+                Revision = current.Revision + 1,
+                Members = members
+            };
+            if (await store.TrySaveAsync(
+                    next,
+                    current.Revision,
+                    cancellationToken).ConfigureAwait(false))
                 return;
         }
     }

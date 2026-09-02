@@ -492,6 +492,23 @@ internal sealed class WindowsAppIsolatedConnectionLease(
     private static nint CreateEnvironmentBlock(
         string? embeddingConfigurationPath)
     {
+        var values = BuildChildEnvironmentValues(
+            embeddingConfigurationPath);
+        var block = string.Join(
+                '\0',
+                values.OrderBy(
+                        static value => value.Key,
+                        StringComparer.OrdinalIgnoreCase)
+                    .Select(static value =>
+                        value.Key + "=" + value.Value)) +
+            "\0\0";
+        return Marshal.StringToHGlobalUni(block);
+    }
+
+    internal static IReadOnlyDictionary<string, string>
+        BuildChildEnvironmentValues(
+            string? embeddingConfigurationPath)
+    {
         var hook = Path.GetFullPath(
             Path.Combine(
                 AppContext.BaseDirectory,
@@ -543,15 +560,7 @@ internal sealed class WindowsAppIsolatedConnectionLease(
         values["STEWARD_RDCORE_SHIM_EVIDENCE_PATH"] = Path.Combine(
             evidenceDirectory,
             "rdcore-shim-" + Guid.NewGuid().ToString("N") + ".log");
-        var block = string.Join(
-                '\0',
-                values.OrderBy(
-                        static value => value.Key,
-                        StringComparer.OrdinalIgnoreCase)
-                    .Select(static value =>
-                        value.Key + "=" + value.Value)) +
-            "\0\0";
-        return Marshal.StringToHGlobalUni(block);
+        return values;
     }
 
     private async Task MonitorContainmentAsync(

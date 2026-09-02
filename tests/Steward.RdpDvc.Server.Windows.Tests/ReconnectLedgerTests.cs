@@ -258,6 +258,91 @@ public sealed class ReconnectLedgerTests : IDisposable
             "--control-identity", "control"
         ]));
     }
+
+    [Fact]
+    public async Task Retained_v1_restart_commits_readiness_before_nonce_crash_exactly_once()
+    {
+        var files = CreateV1MigrationFiles("1.0.23");
+        var nonceStore = new DvcConnectionNonceSequenceStore(
+            files.NonceFile);
+        var sequence = await nonceStore.InspectAsync(
+            files.SessionId,
+            files.HostId,
+            files.IncarnationId,
+            CancellationToken.None);
+        var authenticated = sequence.Nonces.Select(
+                (nonce, index) => new DvcAuthenticatedGeneration(
+                    index,
+                    nonce,
+                    100 + index,
+                    1,
+                    DateTimeOffset.UtcNow.AddSeconds(index)))
+            .ToArray();
+        var readiness = new DvcEndpointReadinessStore(
+            files.ReadinessFile,
+            files.SessionId,
+            files.HostId,
+            files.IncarnationId,
+            sequence.Nonces);
+        await readiness.WriteAsync(
+            DvcEndpointReadinessState.Completed,
+            authenticated,
+            authenticated.Length,
+            CancellationToken.None);
+        var arguments = new[]
+        {
+            "--session-id", files.SessionId.ToString("D"),
+            "--host-id", files.HostId.ToString("D"),
+            "--incarnation-id", files.IncarnationId.ToString("D"),
+            "--auth-key-file", files.AuthenticationKeyFile,
+            "--nonce-sequence-file", files.NonceFile,
+            "--v1-migration-authorization-file", files.AuthorizationFile,
+            "--readiness-receipt-file", files.ReadinessFile,
+            "--node-signing-key-file", files.NodeSigningKeyFile,
+            "--node-identity", "node",
+            "--control-signing-key-file", files.ControlSigningKeyFile,
+            "--control-identity", "control",
+            "--once"
+        };
+
+        var firstExit = await Program.Main(arguments);
+        Assert.True(
+            firstExit == 0,
+            File.Exists(files.ReadinessFile + ".failure")
+                ? await File.ReadAllTextAsync(
+                    files.ReadinessFile + ".failure")
+                : $"Unexpected exit code {firstExit}.");
+        var secondExit = await Program.Main(arguments);
+        Assert.True(
+            secondExit == 0,
+            File.Exists(files.ReadinessFile + ".failure")
+                ? await File.ReadAllTextAsync(
+                    files.ReadinessFile + ".failure")
+                : $"Unexpected exit code {secondExit}.");
+
+        var committed = await nonceStore.InspectAsync(
+            files.SessionId,
+            files.HostId,
+            files.IncarnationId,
+            CancellationToken.None);
+        Assert.Equal(2, committed.NextIndex);
+        Assert.Equal(2, committed.Nonces.Count);
+        var receipt = await readiness.LoadAsync(CancellationToken.None);
+        Assert.NotNull(receipt);
+        Assert.Equal(DvcEndpointReadinessState.Completed, receipt.State);
+        Assert.Equal(2, receipt.NextGeneration);
+        Assert.Equal(2, receipt.AuthenticatedGenerations.Count);
+        _ = ServerOptions.Parse(arguments);
+        using var authorization = JsonDocument.Parse(
+            await File.ReadAllBytesAsync(files.AuthorizationFile));
+        Assert.Equal(
+            2,
+            authorization.RootElement
+                .GetProperty("body")
+                .GetProperty("nextIndex")
+                .GetInt32());
+    }
+
     [Fact]
     public async Task Ten_thousand_reservations_are_durable_and_monotonic()
     {
@@ -602,4 +687,3 @@ public sealed class ReconnectLedgerTests : IDisposable
             new(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid());
     }
 }
-

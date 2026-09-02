@@ -122,6 +122,7 @@ public sealed class PackagingPolicyTests
                  })
             Assert.Contains(excluded, script, StringComparison.Ordinal);
         Assert.Contains("GITHUB_ACTIONS", script, StringComparison.Ordinal);
+        Assert.Contains("$Version -ne '1.0.24'", script, StringComparison.Ordinal);
         Assert.Contains("SourceRepository", script, StringComparison.Ordinal);
         Assert.Contains("SourceCommit", script, StringComparison.Ordinal);
         Assert.Contains("SignerWorkflow", script, StringComparison.Ordinal);
@@ -182,7 +183,27 @@ public sealed class PackagingPolicyTests
         Assert.Contains("--deny-self-hosted-runners", workflow, StringComparison.Ordinal);
         Assert.Contains("--source-digest '${{ github.sha }}'", workflow, StringComparison.Ordinal);
         Assert.Contains("refs/heads/main", workflow, StringComparison.Ordinal);
+        Assert.Contains(
+            "must be exactly Steward endpoint 1.0.24",
+            workflow,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "[Version]::Parse($Matches[1]) -ge $requested",
+            workflow,
+            StringComparison.Ordinal);
         Assert.Contains("gh release create", workflow, StringComparison.Ordinal);
+        Assert.Contains(
+            "Execute generated catalog bootstrap validation",
+            workflow,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "Get-StewardEndpointEphemeralReleaseUrl.ps1",
+            workflow,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "-ValidateOnly",
+            workflow,
+            StringComparison.Ordinal);
         Assert.DoesNotContain(
             "STEWARD_BOOTSTRAP_ENCRYPTION_PUBLIC_KEY",
             workflow,
@@ -234,8 +255,28 @@ public sealed class PackagingPolicyTests
         Assert.Contains("--prepare-msi-transaction", source, StringComparison.Ordinal);
         Assert.Contains("--rollback-msi-transaction", source, StringComparison.Ordinal);
         Assert.Contains("--commit-msi-transaction", source, StringComparison.Ordinal);
+        Assert.Equal(
+            3,
+            source.Split(
+                "--legacy-state-root",
+                StringSplitOptions.None).Length - 1);
+        Assert.Contains(
+            "Steward\\install\\Endpoint",
+            source,
+            StringComparison.Ordinal);
         Assert.Contains("After=\"StartServices\"", source, StringComparison.Ordinal);
-        Assert.DoesNotContain("ACTION &lt;&gt; &quot;ADMIN&quot;", source, StringComparison.Ordinal);
+        Assert.Equal(
+            3,
+            source.Split(
+                "ACTION &lt;&gt; &quot;ADMIN&quot;",
+                StringSplitOptions.None).Length - 1);
+        Assert.Contains("--verify-installed", File.ReadAllText(
+            Path.Combine(
+                Repository,
+                "catalog",
+                "devbox",
+                "steward-endpoint",
+                "Install-Steward.ps1")), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -357,6 +398,26 @@ public sealed class PackagingPolicyTests
             Assert.Contains(gate, workflow, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("STEWARD_1_0_23_RELEASE_INPUT", workflow, StringComparison.Ordinal);
         Assert.Contains("Authentic Steward 1.0.23 release input is required", workflow, StringComparison.Ordinal);
+        Assert.Contains(
+            "$repository -ne '${{ github.repository }}'",
+            workflow,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "$tag -ne 'steward-endpoint-v1.0.23'",
+            workflow,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "Authentic Steward 1.0.23 provenance verification failed",
+            workflow,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "contents/catalog/devbox/steward-endpoint/Install-Steward.ps1?ref=",
+            workflow,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "-LegacyReleaseAssetUrl $env:STEWARD_LEGACY_RELEASE_URL",
+            workflow,
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -384,7 +445,57 @@ public sealed class PackagingPolicyTests
             source,
             StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void DevBoxEndpointInstallUsesExactReleasedCatalogTask()
+    {
+        var source = File.ReadAllText(
+            Path.Combine(
+                Repository,
+                "tools",
+                "Steward.DevBox.BootstrapDeploy",
+                "Program.cs"));
+
+        Assert.Contains(
+            "ListTaskDefinitionsAsync",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "\"install-steward-endpoint\"",
+            source,
+            StringComparison.Ordinal);
+        foreach (var parameter in new[]
+                 {
+                     "releaseAssetUrl",
+                     "bootstrapEncryptionPublicKeyBase64",
+                     "controlSigningPublicKeyBase64",
+                     "controlIdentity",
+                     "nodeUserAccount",
+                     "nodeUserSid"
+                 })
+            Assert.Contains(
+                $"\"{parameter}\"",
+                source,
+                StringComparison.Ordinal);
+        Assert.Contains(
+            "definition.Parameters.SetEquals(expectedParameters)",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "[\"controlIdentity\"] = installControlIdentity",
+            source,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "[\"controlIdentity\"] = \"control\"",
+            source,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "8db99e3377fe4799234e8b9deca631c63cb479b9",
+            source,
+            StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(
+            "C07BFE96AA88492C94EBCA1614885E3081AE2CB0944FE670000C23FB838DF68A",
+            source,
+            StringComparison.OrdinalIgnoreCase);
+    }
 }
-
-
-

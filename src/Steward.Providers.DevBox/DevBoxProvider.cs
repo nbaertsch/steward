@@ -148,6 +148,25 @@ public sealed class DevBoxProvider(
         {
             return ProviderOperationResult.CapabilityUnavailable(effect, capability, "Current identity lacks mutation authority.");
         }
+        catch (RequestFailedException exception)
+            when (exception.Status == 409 &&
+                  string.Equals(
+                      exception.ErrorCode,
+                      "DevBoxUsageExceeded",
+                      StringComparison.Ordinal))
+        {
+            return new(
+                ProviderOperationStatus.Failed,
+                null,
+                null,
+                "ProviderCapacityExceeded",
+                "The Dev Box project user capacity limit is exhausted.",
+                new Dictionary<string, string>
+                {
+                    ["operationId"] = effect.OperationId.ToString(),
+                    ["operation"] = kind
+                });
+        }
         catch (NotSupportedException exception)
         {
             return ProviderOperationResult.CapabilityUnavailable(effect, capability, exception.Message);

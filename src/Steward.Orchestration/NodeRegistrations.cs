@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Microsoft.Data.Sqlite;
 using Steward.Contracts;
 using Steward.Domain;
@@ -74,6 +75,112 @@ public sealed record NodeEndpointRegistration(
 
 public sealed class ControlNodeRegistrationStore(SqliteControlStore controlStore)
 {
+    public async Task RotatePeerAsync(
+        NodeEndpointRegistration registration,
+        CancellationToken cancellationToken = default)
+    {
+        registration.Validate();
+        await using var connection =
+            await controlStore.OpenConnectionAsync(cancellationToken);
+        await using var transaction =
+            connection.BeginTransaction(deferred: false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT registration_json
+            FROM orchestration_node_endpoints
+            WHERE host_id=$host AND node_incarnation_id=$incarnation
+            """;
+        command.Parameters.AddWithValue(
+            "$host",
+            registration.HostId.ToString());
+        command.Parameters.AddWithValue(
+            "$incarnation",
+            registration.NodeIncarnationId.ToString());
+        var storedJson = Convert.ToString(
+            await command.ExecuteScalarAsync(cancellationToken))
+            ?? throw new KeyNotFoundException(
+                "The Node registration does not exist.");
+        var stored = JsonSerializer.Deserialize<NodeEndpointRegistration>(
+            storedJson,
+            StewardJson.Options)
+            ?? throw new InvalidDataException(
+                "The durable Node registration is invalid.");
+        if (stored.HostId != registration.HostId ||
+            stored.NodeIncarnationId != registration.NodeIncarnationId ||
+            stored.PoolId != registration.PoolId ||
+            !SameTransport(stored.Transport, registration.Transport) ||
+            stored.Capacity != registration.Capacity ||
+            !stored.Capabilities.SequenceEqual(
+                registration.Capabilities,
+                StringComparer.Ordinal) ||
+            !stored.SetupFingerprints.SequenceEqual(
+                registration.SetupFingerprints,
+                StringComparer.Ordinal) ||
+            stored.Enabled != registration.Enabled)
+            throw new InvalidOperationException(
+                "Node peer rotation cannot change registration identity or capabilities. " +
+                $"pool={stored.PoolId == registration.PoolId};" +
+                $"transport={stored.Transport == registration.Transport};" +
+                $"capacity={stored.Capacity == registration.Capacity};" +
+                $"capabilities={stored.Capabilities.SequenceEqual(registration.Capabilities, StringComparer.Ordinal)};" +
+                $"setup={stored.SetupFingerprints.SequenceEqual(registration.SetupFingerprints, StringComparer.Ordinal)};" +
+                $"enabled={stored.Enabled == registration.Enabled}");
+        var json = JsonSerializer.Serialize(
+            registration,
+            StewardJson.Options);
+        command.CommandText = """
+            UPDATE orchestration_node_endpoints
+            SET peer_identity=$identity,
+                peer_public_key_reference=$key,
+                registration_json=$json,
+                observed_at=$observed
+            WHERE host_id=$host AND node_incarnation_id=$incarnation
+            """;
+        command.Parameters.AddWithValue(
+            "$identity",
+            registration.PeerIdentity);
+        command.Parameters.AddWithValue(
+            "$key",
+            registration.PeerPublicKeyReference);
+        command.Parameters.AddWithValue("$json", json);
+        command.Parameters.AddWithValue(
+            "$observed",
+            registration.ObservedAt.ToUniversalTime().ToString("O"));
+        if (await command.ExecuteNonQueryAsync(cancellationToken) != 1)
+            throw new InvalidOperationException(
+                "Node peer rotation lost its durable identity.");
+        await transaction.CommitAsync(cancellationToken);
+    }
+
+    private static bool SameTransport(
+        ExtensionMetadataDto left,
+        ExtensionMetadataDto right)
+    {
+        if (!string.Equals(
+                left.Kind,
+                right.Kind,
+                StringComparison.Ordinal) ||
+            !string.Equals(
+                left.Version,
+                right.Version,
+                StringComparison.Ordinal))
+            return false;
+        var leftJson = JsonSerializer.Serialize(
+            left,
+            StewardJson.Options);
+        var rightJson = JsonSerializer.Serialize(
+            right,
+            StewardJson.Options);
+        using var leftDocument = JsonDocument.Parse(leftJson);
+        using var rightDocument = JsonDocument.Parse(rightJson);
+        return JsonNode.DeepEquals(
+            JsonNode.Parse(
+                leftDocument.RootElement.GetProperty("data").GetRawText()),
+            JsonNode.Parse(
+                rightDocument.RootElement.GetProperty("data").GetRawText()));
+    }
+
     public async Task RegisterAsync(
         NodeEndpointRegistration registration,
         CancellationToken cancellationToken = default)

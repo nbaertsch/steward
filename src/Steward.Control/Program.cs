@@ -48,9 +48,15 @@ builder.Services.AddSingleton<NotificationApplicationService>();
 builder.Services.AddSingleton<DoctorApplicationService>();
 builder.Services.AddSingleton<BackupApplicationService>();
 var devBoxIdentity = new DevBoxIdentityService(new DevBoxIdentityStore());
+var devBoxCredential = new DevBoxSilentTokenCredential(devBoxIdentity);
+Steward.Control.ControlProviderBootstrapComposition
+    .AddStewardControlProviderBootstrap(
+        builder.Services,
+        builder.Configuration,
+        devBoxCredential);
 builder.Services.AddStewardLocalStack(
     builder.Configuration,
-    new DevBoxSilentTokenCredential(devBoxIdentity));
+    devBoxCredential);
 Steward.Control.OrchestrationComposition.AddStewardOrchestration(
     builder.Services, builder.Configuration, databasePath);
 builder.Services.AddStewardLocalControlTransport();
@@ -378,6 +384,31 @@ app.MapPost("/nodes", async (
     var registration = request.ToRegistration();
     await registrations.RegisterAsync(registration, token);
     return Results.Created($"/nodes/{registration.NodeIncarnationId}", registration);
+});
+app.MapPost("/nodes/{id}/rotate-peer", async (
+    string id,
+    RegisterNodeRequest request,
+    ControlNodeRegistrationStore registrations,
+    ControlNodeLivenessRegistry liveness,
+    CancellationToken token) =>
+{
+    var registration = request.ToRegistration().Validate();
+    if (!NodeIncarnationId.TryParse(id, out var incarnationId) ||
+        incarnationId != registration.NodeIncarnationId)
+        return Problem(
+            "InvalidNodeIncarnationId",
+            "The Node incarnation ID is invalid.",
+            400);
+    if (liveness.TryGetOnline(
+            registration.HostId,
+            registration.NodeIncarnationId,
+            out _))
+        return Problem(
+            "NodeOnline",
+            "Peer identity rotation requires the Node to be offline.",
+            409);
+    await registrations.RotatePeerAsync(registration, token);
+    return Results.Ok(registration);
 });
 app.MapGet("/hosts/{id}", async (
     string id,

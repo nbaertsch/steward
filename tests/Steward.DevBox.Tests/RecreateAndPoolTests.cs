@@ -13,13 +13,14 @@ public sealed class RecreateAndPoolTests
     public async Task RecreateIsDurableDeleteCreateBootstrapStateMachine()
     {
         var client = new FakeDevBoxClient();
-        client.Add(new("box", "box", "Succeeded", "Running"));
+        client.Add(new("project/me/box", "box", "Succeeded", "Running"));
         var provider = TestProvider.Create(client);
         var bootstrap = new FakeBootstrapper();
         var host = ReadyHost();
         var oldIncarnation = host.NodeIncarnationId;
         var state = new DevBoxRecreateCoordinator(provider, bootstrap).Begin(
             ProviderOperationId.New(), "recreate-key", Binding, "box",
+            "project/me/box",
             new DrainRequest(host, [new(InterruptionClass.Restartable)]));
 
         state = await Restarted(provider, bootstrap).AdvanceAsync(state, host, Package(), Claim(state));
@@ -45,12 +46,17 @@ public sealed class RecreateAndPoolTests
     public async Task RecreateExposesBootstrapPartialFailure()
     {
         var client = new FakeDevBoxClient { CompleteImmediately = true };
-        client.Add(new("box", "box", "Succeeded", "Running"));
+        client.Add(new("project/me/box", "box", "Succeeded", "Running"));
         var provider = TestProvider.Create(client);
         var bootstrap = new FakeBootstrapper { Fail = true };
         var host = ReadyHost();
         var coordinator = new DevBoxRecreateCoordinator(provider, bootstrap);
-        var state = coordinator.Begin(ProviderOperationId.New(), "key", Binding, "box",
+        var state = coordinator.Begin(
+            ProviderOperationId.New(),
+            "key",
+            Binding,
+            "box",
+            "project/me/box",
             new DrainRequest(host, []));
         state = await coordinator.AdvanceAsync(state, host, Package(), Claim(state));
         state = await coordinator.AdvanceAsync(state, host, Package(), Claim(state));
@@ -99,6 +105,41 @@ public sealed class RecreateAndPoolTests
         Assert.Equal(afterRestart.State.PoolId, roundTripped.PoolId);
         Assert.Equal(afterRestart.State.Revision, roundTripped.Revision);
         Assert.Equal(afterRestart.State.Members.Select(x => x.HostId), roundTripped.Members.Select(x => x.HostId));
+    }
+
+    [Fact]
+    public async Task ProviderResourceBindingPersistsNameAndCanonicalIdentity()
+    {
+        var store = new InMemoryPoolStateStore();
+        var coordinator = new PoolCoordinator(store);
+        var poolId = PoolId.New();
+        var planned = await coordinator.ReconcileAsync(
+            new(poolId, 0, 1, TimeSpan.Zero),
+            [new("create")],
+            DateTimeOffset.UtcNow,
+            () => NewHost(poolId));
+        var member = Assert.Single(planned.Members);
+
+        await coordinator.BindProviderResourceAsync(
+            poolId,
+            member.HostId,
+            "box",
+            "project/me/box",
+            DateTimeOffset.UtcNow);
+
+        var restarted = await new PoolCoordinator(store).ReconcileAsync(
+            new(poolId, 0, 1, TimeSpan.Zero),
+            [new("create")],
+            DateTimeOffset.UtcNow,
+            () => NewHost(poolId));
+        var bound = Assert.Single(restarted.Members);
+        Assert.Equal("box", bound.ProviderResourceName);
+        Assert.Equal("project/me/box", bound.ProviderResourceId);
+        var roundTrip = JsonSerializer.Deserialize<PoolState>(
+            JsonSerializer.Serialize(restarted.State));
+        Assert.Equal(
+            "project/me/box",
+            Assert.Single(roundTrip!.Members).ProviderResourceId);
     }
 
     [Fact]
@@ -313,7 +354,12 @@ public sealed class RecreateAndPoolTests
     private static DevBoxRecreateCoordinator Restarted(IHostProvider provider, INodeBootstrapper bootstrap) => new(provider, bootstrap);
     private static SignedNodePackage Package() => new(new Uri("https://packages.invalid/node"), "sha256", "signature", "signer");
     private static EnrollmentClaim Claim(DevBoxRecreateState state) =>
-        new("one-time-token", DateTimeOffset.UtcNow.AddMinutes(5), "box", state.HostId, state.NewIncarnationId);
+        new(
+            "one-time-token",
+            DateTimeOffset.UtcNow.AddMinutes(5),
+            state.ProviderResourceId,
+            state.HostId,
+            state.NewIncarnationId);
 
     private static Host ReadyHost()
     {

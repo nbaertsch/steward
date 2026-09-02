@@ -188,12 +188,26 @@ public sealed class ControlSchedulingReconciler(
                         stoppingToken)
                     .ConfigureAwait(false);
                 foreach (var pool in repair.PoolDemands)
-                    _ = await hostPools.ReconcileAsync(
+                {
+                    try
+                    {
+                        _ = await hostPools.ReconcileAsync(
+                                pool.PoolId,
+                                pool.Demands,
+                                now,
+                                stoppingToken)
+                            .ConfigureAwait(false);
+                    }
+                    catch (ApplicationContractException exception)
+                    {
+                        logger.LogWarning(
+                            "Pool {PoolId} reconciliation deferred: " +
+                            "{Code}; disposition={Disposition}.",
                             pool.PoolId,
-                            pool.Demands,
-                            now,
-                            stoppingToken)
-                        .ConfigureAwait(false);
+                            exception.Code,
+                            exception.Disposition);
+                    }
+                }
             }
             catch (OperationCanceledException)
                 when (stoppingToken.IsCancellationRequested)

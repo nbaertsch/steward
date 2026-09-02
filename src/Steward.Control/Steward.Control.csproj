@@ -11,6 +11,7 @@
     <ProjectReference Include="..\Steward.Scheduling\Steward.Scheduling.csproj" />
     <ProjectReference Include="..\Steward.Transport\Steward.Transport.csproj" />
     <ProjectReference Include="..\Steward.Providers.Abstractions\Steward.Providers.Abstractions.csproj" />
+    <ProjectReference Include="..\Steward.Providers.DevBox\Steward.Providers.DevBox.csproj" />
     <ProjectReference Include="..\Steward.Stack.Local\Steward.Stack.Local.csproj" />
     <ProjectReference Include="..\Steward.Tasks.Abstractions\Steward.Tasks.Abstractions.csproj" />
     <ProjectReference Include="..\Steward.Tasks.Agent\Steward.Tasks.Agent.csproj" />

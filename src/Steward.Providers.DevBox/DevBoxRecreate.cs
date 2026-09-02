@@ -19,6 +19,7 @@ public sealed record DevBoxRecreateState(
     string IdempotencyKey,
     ProviderBinding Binding,
     string ResourceName,
+    string ProviderResourceId,
     HostId HostId,
     NodeIncarnationId PreviousIncarnationId,
     NodeIncarnationId NewIncarnationId,
@@ -35,11 +36,14 @@ public sealed class DevBoxRecreateCoordinator(IHostProvider provider, INodeBoots
         string idempotencyKey,
         ProviderBinding binding,
         string resourceName,
+        string providerResourceId,
         DrainRequest drain)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(providerResourceId);
         LifecycleInterlock.BeginDrain(drain);
         drain.Host.TransitionTo(HostLifecycleState.Reimaging);
-        return new(operationId, idempotencyKey, binding, resourceName, drain.Host.Id,
+        return new(operationId, idempotencyKey, binding, resourceName,
+            providerResourceId, drain.Host.Id,
             drain.Host.NodeIncarnationId, NodeIncarnationId.New(), RecreatePhase.Deleting);
     }
 
@@ -152,6 +156,12 @@ public sealed class DevBoxRecreateCoordinator(IHostProvider provider, INodeBoots
             throw new InvalidOperationException("Recreate state belongs to a different Host.");
         if (claim.HostId != state.HostId || claim.IncarnationId != state.NewIncarnationId)
             throw new InvalidOperationException("Enrollment claim is not bound to this Host incarnation.");
+        if (!string.Equals(
+                claim.ExpectedProviderResourceId,
+                state.ProviderResourceId,
+                StringComparison.Ordinal))
+            throw new InvalidOperationException(
+                "Enrollment claim is not bound to this provider resource.");
         claim.Validate(DateTimeOffset.UtcNow);
     }
 }

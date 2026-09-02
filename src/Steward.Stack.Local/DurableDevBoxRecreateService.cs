@@ -29,21 +29,39 @@ public sealed class DurableDevBoxRecreateService(
         var coordinator = new DevBoxRecreateCoordinator(provider, bootstrapper);
         if (state is null)
         {
+            var resource = await provider.InspectAsync(
+                    pool.Provider,
+                    view.ProviderResourceName,
+                    cancellationToken)
+                .ConfigureAwait(false)
+                ?? throw new InvalidOperationException(
+                    "Dev Box recreate cannot inspect the current provider resource.");
+            if (view.ProviderResourceId is not null &&
+                !string.Equals(
+                    view.ProviderResourceId,
+                    resource.ProviderResourceId,
+                    StringComparison.Ordinal))
+                throw new InvalidDataException(
+                    "Persisted provider resource identity does not match inspection.");
             state = coordinator.Begin(
                 operationId, $"recreate:{view.HostId}", pool.Provider,
                 view.ProviderResourceName,
+                resource.ProviderResourceId,
                 new(host, [], force, force ? ["forced recreate"] : null));
             await SaveAsync(state, cancellationToken);
         }
         var claim = await claims.IssueAsync(
-            state.HostId, state.NewIncarnationId, view.ProviderResourceName, cancellationToken);
+            state.HostId,
+            state.NewIncarnationId,
+            state.ProviderResourceId,
+            cancellationToken);
         state = await coordinator.AdvanceAsync(state, host, package, claim, cancellationToken);
         await SaveAsync(state, cancellationToken);
         return state.Phase switch
         {
             RecreatePhase.Completed => new(
                 ProviderOperationStatus.Succeeded, null,
-                new(view.ProviderResourceName, view.ProviderResourceName,
+                new(state.ProviderResourceId, view.ProviderResourceName,
                     ProviderHostStatus.Running, new Dictionary<string, string>
                     {
                         ["nodeIncarnationId"] = state.NewIncarnationId.ToString()

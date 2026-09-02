@@ -111,6 +111,7 @@ public interface IDurableHostRecreator<TState>
         string idempotencyKey,
         ProviderBinding binding,
         string resourceName,
+        string providerResourceId,
         DrainRequest drain);
 
     Task<TState> AdvanceAsync(

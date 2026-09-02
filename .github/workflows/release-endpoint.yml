@@ -92,13 +92,29 @@ jobs:
       - name: Build endpoint catalog
         shell: pwsh
         env:
+          GH_TOKEN: ${{ github.token }}
           VERSION: ${{ inputs.version }}
         run: |
           if ($env:VERSION -notmatch '^\d+\.\d+\.\d+$') {
             throw 'Release version must be a three-part numeric version.'
           }
+          if ($env:VERSION -ne '1.0.24') {
+            throw 'This replacement release must be exactly Steward endpoint 1.0.24.'
+          }
           if ('${{ github.ref }}' -ne 'refs/heads/main') {
             throw 'Endpoint releases must be built from main.'
+          }
+          $requested = [Version]$env:VERSION
+          $existing = @(gh release list --repo '${{ github.repository }}' `
+              --limit 100 --json tagName --jq '.[].tagName')
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Existing endpoint releases could not be inspected.'
+          }
+          foreach ($tag in $existing) {
+            if ($tag -match '^steward-endpoint-v(\d+\.\d+\.\d+)$' -and
+                [Version]::Parse($Matches[1]) -ge $requested) {
+              throw "Endpoint release $tag is not older than requested version."
+            }
           }
           .\scripts\Build-StewardEndpointMsi.ps1 `
             -Version $env:VERSION `
@@ -137,6 +153,10 @@ jobs:
           $repository = $Matches[1]
           $tag = $Matches[2]
           $expectedHash = $Matches[3]
+          if ($repository -ne '${{ github.repository }}' -or
+              $tag -ne 'steward-endpoint-v1.0.23') {
+            throw 'Legacy input must be the approved repository Steward endpoint v1.0.23 release.'
+          }
           $download = '${{ runner.temp }}\steward-1.0.23-download'
           $expanded = '${{ runner.temp }}\steward-1.0.23-catalog'
           New-Item -ItemType Directory -Path $download, $expanded -Force | Out-Null
@@ -158,11 +178,57 @@ jobs:
             Select-Object -Single
           $catalog = Split-Path -Parent $manifest.FullName
           $release = Import-PowerShellDataFile $manifest.FullName
-          if ($release.ProductVersion -ne '1.0.23') {
+          if ($release.ProductVersion -ne '1.0.23' -or
+              $release.SourceRepository -ne '${{ github.repository }}' -or
+              $release.SourceRef -ne 'refs/heads/main' -or
+              $release.SignerWorkflow -ne
+                  '${{ github.repository }}/.github/workflows/release-endpoint.yml' -or
+              $release.SourceCommit -notmatch '^[0-9A-Fa-f]{40}$') {
             throw 'External migration input is not Steward endpoint 1.0.23.'
           }
+          $bundle = Join-Path $catalog $release.AttestationBundleFile
+          foreach ($subject in @(
+              (Join-Path $catalog $release.MsiFile),
+              $manifest.FullName)) {
+            gh attestation verify $subject `
+              --bundle $bundle `
+              --repo '${{ github.repository }}' `
+              --signer-workflow '${{ github.repository }}/.github/workflows/release-endpoint.yml' `
+              --signer-digest $release.SourceCommit `
+              --source-digest $release.SourceCommit `
+              --source-ref 'refs/heads/main' `
+              --deny-self-hosted-runners
+            if ($LASTEXITCODE -ne 0) {
+              throw 'Authentic Steward 1.0.23 provenance verification failed.'
+            }
+          }
+          $legacyInstallerContent = gh api `
+            "repos/$repository/contents/catalog/devbox/steward-endpoint/Install-Steward.ps1?ref=$($release.SourceCommit)" `
+            --jq .content
+          if ($LASTEXITCODE -ne 0 -or
+              [string]::IsNullOrWhiteSpace($legacyInstallerContent)) {
+            throw 'Authentic Steward 1.0.23 installer source could not be retrieved.'
+          }
+          [IO.File]::WriteAllBytes(
+            (Join-Path $catalog 'Install-Steward.ps1'),
+            [Convert]::FromBase64String(
+              (($legacyInstallerContent -join '') -replace '\s', '')))
+          $legacyInstallerPath = Join-Path $catalog 'Install-Steward.ps1'
+          $legacyInstaller = (Get-Content $legacyInstallerPath -Raw).
+            Replace(
+              '__STEWARD_APPROVED_SOURCE_REPOSITORY__',
+              '${{ github.repository }}').
+            Replace(
+              '__STEWARD_APPROVED_SIGNER_WORKFLOW__',
+              '${{ github.repository }}/.github/workflows/release-endpoint.yml')
+          if ($legacyInstaller -match '__STEWARD_APPROVED_') {
+            throw 'Authentic Steward 1.0.23 installer provenance remained unresolved.'
+          }
+          Set-Content $legacyInstallerPath -Value $legacyInstaller -Encoding utf8
           "STEWARD_LEGACY_CATALOG=$catalog" | Out-File `
             -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "STEWARD_LEGACY_RELEASE_URL=https://github.com/$repository/releases/download/$tag/Steward.Endpoint.Catalog.1.0.23.zip" |
+            Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Clean install repair real 1.0.23 upgrade failed activation rollback second upgrade
         shell: pwsh
@@ -179,6 +245,7 @@ jobs:
             .\scripts\Test-StewardEndpointMsi.ps1 `
               -CatalogDirectory '${{ runner.temp }}\steward-endpoint\catalog' `
               -LegacyCatalogDirectory $env:STEWARD_LEGACY_CATALOG `
+              -LegacyReleaseAssetUrl $env:STEWARD_LEGACY_RELEASE_URL `
               -BootstrapEncryptionPublicKeyBase64 $bootstrap `
               -ControlSigningPublicKeyBase64 $controlPublic `
               -ControlIdentity 'steward.control.release-gate' `
@@ -276,6 +343,57 @@ jobs:
             --title "Steward Endpoint $version" `
             --notes "CI-attested Steward endpoint bootstrap." `
             --latest=false
+
+      - name: Execute generated catalog bootstrap validation
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          $bootstrap = '${{ runner.temp }}\steward-endpoint\bootstrap'
+          foreach ($name in @(
+              'Install-Steward.ps1',
+              'task.yaml',
+              'steward-endpoint.dsc.yaml')) {
+            if (-not (Test-Path (Join-Path $bootstrap $name) -PathType Leaf)) {
+              throw "Generated catalog bootstrap omitted $name."
+            }
+          }
+          $generated = Get-ChildItem $bootstrap -File |
+            ForEach-Object { Get-Content $_.FullName -Raw }
+          if (($generated -join "`n") -match '__STEWARD_') {
+            throw 'Generated catalog bootstrap retained a provenance placeholder.'
+          }
+          $releaseUrl = .\scripts\Get-StewardEndpointEphemeralReleaseUrl.ps1 `
+            -Repository '${{ github.repository }}' `
+            -Version $env:VERSION
+          if ($releaseUrl -notmatch
+              '^https://release-assets\.githubusercontent\.com/') {
+            throw 'Ephemeral release URL validation did not return the approved host.'
+          }
+          $rsa = [Security.Cryptography.RSA]::Create(3072)
+          $control = [Security.Cryptography.ECDsa]::Create(
+            [Security.Cryptography.ECCurve]::NamedCurves.nistP256)
+          try {
+            & (Join-Path $bootstrap 'Install-Steward.ps1') `
+              -ReleaseAssetUrl ([uri]$releaseUrl) `
+              -BootstrapEncryptionPublicKeyBase64 (
+                [Convert]::ToBase64String(
+                  $rsa.ExportSubjectPublicKeyInfo())) `
+              -ControlSigningPublicKeyBase64 (
+                [Convert]::ToBase64String(
+                  $control.ExportSubjectPublicKeyInfo())) `
+              -ControlIdentity 'steward.control.release-gate' `
+              -NodeUserAccount 'release-gate@example.com' `
+              -NodeUserSid 'S-1-12-1-1-2-3-4' `
+              -ValidateOnly
+            if ($LASTEXITCODE -ne 0) {
+              throw 'Generated catalog bootstrap validation failed.'
+            }
+          } finally {
+            $rsa.Dispose()
+            $control.Dispose()
+          }
 
       - name: Upload attested catalog archive
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

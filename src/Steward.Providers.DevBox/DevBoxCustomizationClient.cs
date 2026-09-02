@@ -61,6 +61,12 @@ public sealed record DevBoxCustomizationGroupSummary(
     DateTimeOffset? StartTime,
     DateTimeOffset? EndTime);
 
+public sealed record DevBoxCustomizationTaskDefinition(
+    string Name,
+    string CatalogName,
+    string? Description,
+    IReadOnlySet<string> Parameters);
+
 public sealed record DevBoxCustomizationHttpResponse(
     int Status,
     BinaryData Content);
@@ -247,6 +253,7 @@ public sealed class DevBoxCustomizationClient
                         ?? throw new InvalidDataException(
                             "Customization group list is empty.");
             }
+
             catch (JsonException exception)
             {
                 throw new InvalidDataException(
@@ -280,6 +287,78 @@ public sealed class DevBoxCustomizationClient
         }
         throw new InvalidDataException(
             "Customization group pagination exceeded its bound.");
+    }
+
+    public async Task<IReadOnlyList<DevBoxCustomizationTaskDefinition>>
+        ListTaskDefinitionsAsync(
+            string project,
+            CancellationToken cancellationToken)
+    {
+        ValidateIdentifier(project, nameof(project));
+        Uri? requestUri = new(
+            _endpoint,
+            $"projects/{Escape(project)}/customizationTasks" +
+            $"?api-version={ApiVersion}");
+        var results = new List<DevBoxCustomizationTaskDefinition>();
+        var visited = new HashSet<string>(StringComparer.Ordinal);
+        for (var page = 0; requestUri is not null && page < 100; page++)
+        {
+            ValidateServiceUri(requestUri);
+            if (!visited.Add(requestUri.AbsoluteUri))
+                throw new InvalidDataException(
+                    "Customization task pagination contains a cycle.");
+            var response = await _transport.SendAsync(
+                    RequestMethod.Get,
+                    requestUri,
+                    null,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            EnsureSuccess(response);
+            var bytes = response.Content.ToMemory();
+            if (bytes.Length is 0 or > MaximumResponseBytes)
+                throw new InvalidDataException(
+                    "Customization task list is empty or exceeds its bound.");
+            PagedTaskDefinitionResponse value;
+            try
+            {
+                value = JsonSerializer.Deserialize<
+                            PagedTaskDefinitionResponse>(
+                            bytes.Span,
+                            Json)
+                        ?? throw new InvalidDataException(
+                            "Customization task list is empty.");
+            }
+            catch (JsonException exception)
+            {
+                throw new InvalidDataException(
+                    "Customization task list is invalid.",
+                    exception);
+            }
+            foreach (var task in value.Value ?? [])
+            {
+                if (string.IsNullOrWhiteSpace(task.Name) ||
+                    string.IsNullOrWhiteSpace(task.CatalogName) ||
+                    task.Parameters is null)
+                    throw new InvalidDataException(
+                        "Customization task definition is invalid.");
+                results.Add(new(
+                    task.Name,
+                    task.CatalogName,
+                    task.Description,
+                    task.Parameters.Keys.ToHashSet(
+                        StringComparer.Ordinal)));
+            }
+            if (string.IsNullOrWhiteSpace(value.NextLink))
+                return results;
+            if (!Uri.TryCreate(
+                    value.NextLink,
+                    UriKind.Absolute,
+                    out requestUri))
+                throw new InvalidDataException(
+                    "Customization task continuation URI is invalid.");
+        }
+        throw new InvalidDataException(
+            "Customization task pagination exceeded its bound.");
     }
 
     public async Task<string> GetTaskLogAsync(
@@ -537,6 +616,31 @@ public sealed class DevBoxCustomizationClient
 
         [JsonPropertyName("nextLink")]
         public string? NextLink { get; init; }
+    }
+
+    private sealed class PagedTaskDefinitionResponse
+    {
+        [JsonPropertyName("value")]
+        public IReadOnlyList<TaskDefinitionResponse>? Value { get; init; }
+
+        [JsonPropertyName("nextLink")]
+        public string? NextLink { get; init; }
+    }
+
+    private sealed class TaskDefinitionResponse
+    {
+        [JsonPropertyName("name")]
+        public string Name { get; init; } = string.Empty;
+
+        [JsonPropertyName("catalogName")]
+        public string CatalogName { get; init; } = string.Empty;
+
+        [JsonPropertyName("description")]
+        public string? Description { get; init; }
+
+        [JsonPropertyName("parameters")]
+        public IReadOnlyDictionary<string, JsonElement>? Parameters
+        { get; init; }
     }
 
     private sealed class TaskResponse

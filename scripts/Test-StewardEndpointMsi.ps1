@@ -7,6 +7,7 @@ param(
     [string]$NodeUserAccount,
     [string]$NodeUserSid,
     [string]$LegacyCatalogDirectory,
+    [uri]$LegacyReleaseAssetUrl,
     [switch]$Machine,
     [switch]$KeepInstalled
 )
@@ -119,14 +120,25 @@ try {
 if ($Machine) {
     $legacyIdentity = $null
     if (-not [string]::IsNullOrWhiteSpace($LegacyCatalogDirectory)) {
+        if ($null -eq $LegacyReleaseAssetUrl -or
+            -not $LegacyReleaseAssetUrl.IsAbsoluteUri -or
+            $LegacyReleaseAssetUrl.Scheme -ne 'https') {
+            throw 'Authentic legacy testing requires its HTTPS release asset URL.'
+        }
         $legacyCatalog = [IO.Path]::GetFullPath($LegacyCatalogDirectory)
         $legacyManifest = Import-PowerShellDataFile (
             Join-Path $legacyCatalog 'steward-endpoint.release.psd1')
         if ($legacyManifest.ProductVersion -ne '1.0.23') {
             throw 'Authentic legacy catalog must be Steward endpoint 1.0.23.'
         }
-        & $PSCommandPath `
-            -CatalogDirectory $legacyCatalog `
+        $legacyInstall = Join-Path $legacyCatalog 'Install-Steward.ps1'
+        if (-not (Test-Path -LiteralPath $legacyInstall -PathType Leaf)) {
+            throw 'Authentic legacy catalog omitted Install-Steward.ps1.'
+        }
+        $legacyRuntime = Join-Path $env:ProgramData `
+            'Steward\install\Runtime\1.0.23'
+        & $legacyInstall `
+            -ReleaseAssetUrl $LegacyReleaseAssetUrl `
             -BootstrapEncryptionPublicKeyBase64 `
                 $BootstrapEncryptionPublicKeyBase64 `
             -ControlSigningPublicKeyBase64 `
@@ -134,12 +146,19 @@ if ($Machine) {
             -ControlIdentity $ControlIdentity `
             -NodeUserAccount $NodeUserAccount `
             -NodeUserSid $NodeUserSid `
-            -Machine -KeepInstalled
+            -AdministrativeRoot $legacyRuntime
         if ($LASTEXITCODE -ne 0) {
-            throw 'Authentic Steward 1.0.23 clean install/repair gate failed.'
+            throw 'Authentic Steward 1.0.23 administrative deployment failed.'
         }
-        $legacyIdentity = Get-Content (Join-Path $env:ProgramData `
-            'Steward\Endpoint\identity.json') -Raw
+        $legacyState = Join-Path $env:ProgramData `
+            'Steward\install\Endpoint'
+        $legacyPayload = Join-Path $legacyRuntime 'PFiles64\Steward'
+        $legacyIdentityPath = Join-Path $legacyState 'identity.json'
+        if (-not (Test-Path -LiteralPath $legacyPayload -PathType Container) -or
+            -not (Test-Path -LiteralPath $legacyIdentityPath -PathType Leaf)) {
+            throw 'Authentic 1.0.23 administrative layout was not created.'
+        }
+        $legacyIdentity = Get-Content $legacyIdentityPath -Raw
     }
     if ([string]::IsNullOrWhiteSpace(
             $BootstrapEncryptionPublicKeyBase64) -or
@@ -212,6 +231,27 @@ if ($Machine) {
         if ($null -ne $legacyIdentity -and $legacyIdentity -ne $first) {
             throw 'Authentic 1.0.23 upgrade changed the endpoint identity.'
         }
+        if ($null -ne $legacyIdentity) {
+            $legacyState = Join-Path $env:ProgramData `
+                'Steward\install\Endpoint'
+            if (Test-Path -LiteralPath $legacyState) {
+                throw 'Committed upgrade left the legacy administrative state authoritative.'
+            }
+            $legacyRuntimePrefix = [IO.Path]::GetFullPath(
+                (Join-Path $env:ProgramData `
+                    'Steward\install\Runtime\1.0.23'))
+            $scheduled = @(Get-ScheduledTask -TaskPath '\Steward\' `
+                -ErrorAction SilentlyContinue)
+            foreach ($task in $scheduled) {
+                $xml = Export-ScheduledTask -TaskName $task.TaskName `
+                    -TaskPath '\Steward\'
+                if ($xml.IndexOf(
+                        $legacyRuntimePrefix,
+                        [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                    throw 'Committed upgrade retained a legacy runtime task path.'
+                }
+            }
+        }
         $maintenanceService = Get-CimInstance Win32_Service `
             -Filter "Name='StewardMaintenance'" -ErrorAction SilentlyContinue
         if ($null -eq $maintenanceService -or
@@ -260,6 +300,5 @@ if ($Machine) {
     }
 }
 Write-Output 'STEWARD_ENDPOINT_MSI_TESTS_PASSED'
-
 
 

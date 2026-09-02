@@ -339,7 +339,7 @@ if ($wasCurrentInstalled) {
         try {
             Write-ArtifactAttestation $healthAttestation
             & $installedProvisioner `
-                --verify-only `
+                --verify-installed `
                 --install-root (Split-Path -Parent $installedProvisioner) `
                 --config $config `
                 --state-root $state `
@@ -398,7 +398,7 @@ if ($null -eq $service -or
 $installedProvisioner = Join-Path $env:ProgramFiles `
     'Steward\Steward.Endpoint.Provisioner.exe'
 & $installedProvisioner `
-    --verify-only `
+    --verify-installed `
     --install-root (Split-Path -Parent $installedProvisioner) `
     --config $config `
     --state-root $state `
@@ -418,4 +418,3 @@ Write-Output 'STEWARD_ENDPOINT_MSI_INSTALLED'} catch {
     Remove-Item -LiteralPath $downloadRoot -Recurse -Force `
         -ErrorAction SilentlyContinue
 }
-

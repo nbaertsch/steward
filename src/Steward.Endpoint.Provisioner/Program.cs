@@ -7,8 +7,8 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Steward.Contracts;
-using Steward.Transport;
 using Steward.Runtime.Windows;
+using Steward.Transport;
 
 namespace Steward.Endpoint.Provisioner;
 
@@ -60,10 +60,14 @@ internal static class Program
                 default:
                     receipt = options.VerifyOnly
                         ? provisioner.Verify(options)
-                        : provisioner.Provision(options);
+                        : options.VerifyInstalled
+                            ? provisioner.VerifyInstalled(options)
+                            : provisioner.Provision(options);
                     action = options.VerifyOnly
-                        ? "verified"
-                        : "provisioned";
+                        ? "runtime verified"
+                        : options.VerifyInstalled
+                            ? "installation verified"
+                            : "provisioned";
                     break;
             }
             Console.WriteLine(
@@ -689,7 +693,9 @@ internal sealed record ProvisionerOptions(
     string StateRoot,
     string ArtifactAttestationPath,
     bool VerifyOnly = false,
+    bool VerifyInstalled = false,
     string? MaintenanceStateRoot = null,
+    string? LegacyStateRoot = null,
     Guid? MsiTransactionId = null,
     MsiTransactionAction TransactionAction = MsiTransactionAction.Prepare)
 {
@@ -714,6 +720,7 @@ internal sealed record ProvisionerOptions(
     {
         var values = new Dictionary<string, string>(StringComparer.Ordinal);
         var verifyOnly = false;
+        var verifyInstalled = false;
         Guid? transactionId = null;
         var transactionAction = MsiTransactionAction.Prepare;
         for (var index = 0; index < args.Length;)
@@ -724,6 +731,15 @@ internal sealed record ProvisionerOptions(
                     throw new ArgumentException(
                         "Option '--verify-only' was specified more than once.");
                 verifyOnly = true;
+                index++;
+                continue;
+            }
+            if (args[index] == "--verify-installed")
+            {
+                if (verifyInstalled)
+                    throw new ArgumentException(
+                        "Option '--verify-installed' was specified more than once.");
+                verifyInstalled = true;
                 index++;
                 continue;
             }
@@ -752,21 +768,29 @@ internal sealed record ProvisionerOptions(
             if (index + 1 >= args.Length ||
                 args[index] is not (
                     "--install-root" or "--config" or "--state-root" or
-                    "--artifact-attestation" or "--maintenance-state-root") ||
+                    "--artifact-attestation" or "--maintenance-state-root" or
+                    "--legacy-state-root") ||
                 !values.TryAdd(args[index], args[index + 1]))
                 throw new ArgumentException(
                     "Usage: --install-root PATH --config PATH --state-root PATH");
             index += 2;
         }
+        if (verifyOnly && verifyInstalled)
+            throw new ArgumentException(
+                "Runtime and installation verification modes are mutually exclusive.");
         return new(
             FullDirectory(Required(values, "--install-root")),
             FullFile(Required(values, "--config")),
             Path.GetFullPath(Required(values, "--state-root")),
             FullFile(Required(values, "--artifact-attestation")),
             verifyOnly,
+            verifyInstalled,
             Path.GetFullPath(Required(
                 values,
                 "--maintenance-state-root")),
+            values.TryGetValue("--legacy-state-root", out var legacyStateRoot)
+                ? Path.GetFullPath(legacyStateRoot)
+                : null,
             transactionId,
             transactionAction);
     }
@@ -850,7 +874,8 @@ internal sealed record EndpointProvisionerTransaction(
     EndpointMachineIdentity TaskSnapshotIdentity,
     MaintenanceStateSnapshot MaintenanceSnapshot,
     string UserSid,
-    string ReceiptPath);
+    string ReceiptPath,
+    string? ImportedLegacyStateRoot = null);
 
 internal sealed record EndpointArtifactAttestation(
     int Version,
@@ -1582,14 +1607,12 @@ internal sealed class EndpointProvisioner(
                 return pending.ReceiptPath;
             if (pending.State == EndpointProvisionerTransactionState.Committed)
             {
-                if (EndpointReadyHealth
-                    .IsKnownGood(options, pending.TaskSnapshotIdentity))
-                {
-                    files.DeleteDirectory(pending.BackupRoot);
-                    DeleteMsiTransaction(options);
-                    return pending.ReceiptPath;
-                }
+                _ = VerifyInstalled(options);
+                if (pending.ImportedLegacyStateRoot is { } importedRoot)
+                    files.DeleteDirectory(importedRoot);
+                files.DeleteDirectory(pending.BackupRoot);
                 DeleteMsiTransaction(options);
+                return pending.ReceiptPath;
             }
             else
             {
@@ -1666,14 +1689,31 @@ internal sealed class EndpointProvisioner(
         }
         var existing = files.DirectoryExists(options.StateRoot);
         if (existing &&
-            TryLoadHealthyExisting(
+            TryLoadExisting(
                 options,
                 config,
                 artifact,
+                requireRuntimeHealth: false,
                 out var receipt))
             return receipt;
-        var previousIdentity = existing
-            ? LoadIdentity(Path.Combine(options.StateRoot, "identity.json"))
+        var importedLegacyStateRoot =
+            !existing &&
+            options.LegacyStateRoot is { } legacyStateRoot &&
+            files.DirectoryExists(legacyStateRoot)
+                ? legacyStateRoot
+                : null;
+        if (importedLegacyStateRoot is not null &&
+            string.Equals(
+                importedLegacyStateRoot,
+                options.StateRoot,
+                StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException(
+                "Legacy and current endpoint state roots must differ.");
+        var sourceStateRoot = existing
+            ? options.StateRoot
+            : importedLegacyStateRoot;
+        var previousIdentity = sourceStateRoot is not null
+            ? LoadIdentity(Path.Combine(sourceStateRoot, "identity.json"))
             : null;
         var workingRoot =
             options.StateRoot + $".new-{Guid.NewGuid():N}";
@@ -1685,7 +1725,7 @@ internal sealed class EndpointProvisioner(
         MaintenanceStateSnapshot? maintenanceSnapshot = null;
         try
         {
-            if (existing)
+            if (sourceStateRoot is not null)
             {
                 taskSnapshot = tasks.Capture(previousIdentity!);
                 taskSnapshotIdentity = previousIdentity;
@@ -1696,7 +1736,7 @@ internal sealed class EndpointProvisioner(
                     workingRoot,
                     null,
                     repairExistingChildren: false);
-                files.CopyDirectory(options.StateRoot, workingRoot);
+                files.CopyDirectory(sourceStateRoot, workingRoot);
             }
             else
             {
@@ -1844,7 +1884,8 @@ internal sealed class EndpointProvisioner(
                         maintenanceSnapshot ?? throw new InvalidOperationException(
                             "Maintenance state snapshot is unavailable."),
                         user.Sid,
-                        receiptPath);
+                        receiptPath,
+                        importedLegacyStateRoot);
                     SaveMsiTransaction(options, transaction);
                     maintenanceSnapshot = null;
                     return receiptPath;
@@ -1853,6 +1894,8 @@ internal sealed class EndpointProvisioner(
                 {
                     files.DeleteDirectory(backupRoot);
                     backupCreated = false;
+                    if (importedLegacyStateRoot is not null)
+                        files.DeleteDirectory(importedLegacyStateRoot);
                 }
                 catch (IOException)
                 {
@@ -1922,13 +1965,15 @@ internal sealed class EndpointProvisioner(
                 transaction,
                 EndpointProvisionerTransactionState.CommitIntent);
         if (transaction.State == EndpointProvisionerTransactionState.CommitIntent)
+        {
+            _ = VerifyInstalled(options);
             transaction = TransitionMsiTransaction(
                 options,
                 transaction,
                 EndpointProvisionerTransactionState.Committed);
-        if (!EndpointReadyHealth
-            .IsKnownGood(options, transaction.TaskSnapshotIdentity))
-            return;
+        }
+        if (transaction.ImportedLegacyStateRoot is { } legacyStateRoot)
+            files.DeleteDirectory(legacyStateRoot);
         files.DeleteDirectory(transaction.BackupRoot);
         DeleteMsiTransaction(options);
     }
@@ -2063,6 +2108,16 @@ internal sealed class EndpointProvisioner(
             transaction.ReceiptPath != Path.Combine(
                 options.StateRoot,
                 "bootstrap-receipt.json") ||
+            transaction.ImportedLegacyStateRoot is { } legacyStateRoot &&
+            (!Path.IsPathFullyQualified(legacyStateRoot) ||
+             string.Equals(
+                 legacyStateRoot,
+                 transaction.StateRoot,
+                 StringComparison.OrdinalIgnoreCase) ||
+             string.Equals(
+                 legacyStateRoot,
+                 transaction.BackupRoot,
+                 StringComparison.OrdinalIgnoreCase)) ||
             !Enum.IsDefined(transaction.State))
             throw new InvalidDataException(
                 "MSI transaction journal is invalid.");
@@ -2075,6 +2130,18 @@ internal sealed class EndpointProvisioner(
     }
 
     internal string Verify(ProvisionerOptions options)
+    {
+        var receipt = VerifyInstalled(options);
+        var identity = LoadIdentity(Path.Combine(
+            options.StateRoot,
+            "identity.json"));
+        if (!EndpointReadyHealth.IsKnownGood(options, identity))
+            throw new InvalidDataException(
+                "Endpoint runtime is not authenticated and healthy.");
+        return receipt;
+    }
+
+    internal string VerifyInstalled(ProvisionerOptions options)
     {
         var config = JsonSerializer.Deserialize<EndpointProvisioningConfig>(
                          files.ReadAllText(options.ConfigPath),
@@ -2089,15 +2156,13 @@ internal sealed class EndpointProvisioner(
         ValidateArtifact(artifact);
         ValidateConfig(config, artifact, options);
         ValidatePayload(options.InstallRoot, artifact.ProductVersion);
-        if (!files.DirectoryExists(options.StateRoot) ||
-            !TryLoadHealthyExisting(
-                options,
-                config,
-                artifact,
-                out var receipt))
+        if (!files.DirectoryExists(options.StateRoot))
             throw new InvalidDataException(
-                "Endpoint provisioning commit is not healthy.");
-        return receipt;
+                "Endpoint provisioning state is unavailable.");
+        return ValidateInstalledExisting(
+            options,
+            config,
+            artifact);
     }
 
     private static void DeleteRuntimeReadiness(string stateRoot)
@@ -2225,9 +2290,16 @@ internal sealed class EndpointProvisioner(
         if (config.ProvisionedUserAccount is not { Length: > 0 } account ||
             config.ProvisionedUserSid is not { Length: > 0 } sid)
             return tasks.ResolveUser();
-        account = new System.Security.Principal.SecurityIdentifier(sid)
-            .Translate(typeof(System.Security.Principal.NTAccount))
-            .Value;
+        return ResolveConfiguredUser(account, sid);
+    }
+
+    internal static ProvisionedUser ResolveConfiguredUser(
+        string account,
+        string sid)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(account);
+        ArgumentException.ThrowIfNullOrWhiteSpace(sid);
+        _ = new System.Security.Principal.SecurityIdentifier(sid);
         return new(account, sid);
     }
 
@@ -2996,50 +3068,25 @@ internal sealed class EndpointProvisioner(
         return path;
     }
 
-    private bool TryLoadHealthyExisting(
+    private bool TryLoadExisting(
         ProvisionerOptions options,
         EndpointProvisioningConfig config,
         EndpointArtifactAttestation artifact,
+        bool requireRuntimeHealth,
         out string receiptPath)
     {
-        receiptPath = Path.Combine(
-            options.StateRoot,
-            "bootstrap-receipt.json");
-        var identityPath = Path.Combine(options.StateRoot, "identity.json");
-        if (!files.FileExists(identityPath) ||
-            !files.FileExists(receiptPath))
-            return false;
-        var identity = LoadIdentity(identityPath);
-        if (!string.Equals(
-                identity.ProductVersion,
-                artifact.ProductVersion,
-                StringComparison.Ordinal) ||
-            !RequiredStateFiles(options.StateRoot).All(files.FileExists))
-            return false;
-        var user = ResolveUser(config);
-        if (!MaintenanceStateIsHealthy(
-                options,
-                artifact,
-                identity,
-                user))
-            return false;
-        if (!tasks.IsHealthy(
-            options.InstallRoot,
-            options.StateRoot,
-            identity,
-            config.ControlIdentity,
-            user.Account,
-            user.Sid))
-            return false;
+        receiptPath = string.Empty;
         try
         {
-            ValidateReceipt(
-                receiptPath,
-                options.StateRoot,
-                identity,
+            receiptPath = ValidateInstalledExisting(
+                options,
+                config,
                 artifact);
-            return EndpointReadyHealth
-                .IsKnownGood(options, identity);
+            var identity = LoadIdentity(Path.Combine(
+                options.StateRoot,
+                "identity.json"));
+            return !requireRuntimeHealth ||
+                EndpointReadyHealth.IsKnownGood(options, identity);
         }
         catch (JsonException)
         {
@@ -3057,6 +3104,54 @@ internal sealed class EndpointProvisioner(
         {
             return false;
         }
+    }
+
+    private string ValidateInstalledExisting(
+        ProvisionerOptions options,
+        EndpointProvisioningConfig config,
+        EndpointArtifactAttestation artifact)
+    {
+        var receiptPath = Path.Combine(
+            options.StateRoot,
+            "bootstrap-receipt.json");
+        var identityPath = Path.Combine(options.StateRoot, "identity.json");
+        if (!files.FileExists(identityPath) ||
+            !files.FileExists(receiptPath))
+            throw new InvalidDataException(
+                "Endpoint identity or receipt is unavailable.");
+        var identity = LoadIdentity(identityPath);
+        if (!string.Equals(
+                identity.ProductVersion,
+                artifact.ProductVersion,
+                StringComparison.Ordinal))
+            throw new InvalidDataException(
+                "Endpoint identity version does not match the artifact.");
+        if (!RequiredStateFiles(options.StateRoot).All(files.FileExists))
+            throw new InvalidDataException(
+                "Endpoint required state is incomplete.");
+        var user = ResolveUser(config);
+        if (!MaintenanceStateIsHealthy(
+                options,
+                artifact,
+                identity,
+                user))
+            throw new InvalidDataException(
+                "Endpoint maintenance state is not healthy.");
+        if (!tasks.IsHealthy(
+            options.InstallRoot,
+            options.StateRoot,
+            identity,
+            config.ControlIdentity,
+            user.Account,
+            user.Sid))
+            throw new InvalidDataException(
+                "Endpoint scheduled tasks are not healthy.");
+        ValidateReceipt(
+            receiptPath,
+            options.StateRoot,
+            identity,
+            artifact);
+        return receiptPath;
     }
 
     private void ValidateReceipt(
@@ -3427,8 +3522,8 @@ internal sealed class PowerShellTaskRegistrar : IEndpointTaskRegistrar
             $handoffXml=if($null-ne$handoffPrior){Export-ScheduledTask -TaskName $handoffName -TaskPath '\Steward\'}else{$null}
             Stop-ScheduledTask -TaskName $keeperName -TaskPath '\Steward\' -ErrorAction SilentlyContinue
             Stop-ScheduledTask -TaskName $serverName -TaskPath '\Steward\' -ErrorAction SilentlyContinue
-            $trigger=New-ScheduledTaskTrigger -AtLogOn -User '{{Escape(userAccount)}}'
-            $principal=New-ScheduledTaskPrincipal -UserId '{{Escape(userAccount)}}' -LogonType Interactive -RunLevel Limited
+            $trigger=New-ScheduledTaskTrigger -AtLogOn -User '{{Escape(userSid)}}'
+            $principal=New-ScheduledTaskPrincipal -UserId '{{Escape(userSid)}}' -LogonType Interactive -RunLevel Limited
             $settings=New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -Hidden -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
             $keeper=New-ScheduledTaskAction -Execute '{{Escape(actions.KeeperExecutable)}}' -Argument '{{Escape(actions.KeeperArguments)}}' -WorkingDirectory '{{Escape(installRoot)}}'
             $server=New-ScheduledTaskAction -Execute '{{Escape(actions.ServerExecutable)}}' -Argument '{{Escape(actions.ServerArguments)}}' -WorkingDirectory '{{Escape(installRoot)}}'
@@ -3521,10 +3616,14 @@ internal sealed class PowerShellTaskRegistrar : IEndpointTaskRegistrar
             $h=Get-ScheduledTask -TaskPath '\Steward\' -TaskName 'EndpointInstallerHandoff-{{identity.HostId:N}}' -ErrorAction SilentlyContinue
             $m=Get-CimInstance Win32_Service -Filter "Name='StewardMaintenance'" -ErrorAction SilentlyContinue
             $aUserSid=if($null-ne$a-and![string]::IsNullOrWhiteSpace($a.Principal.UserId)){
-              try{([Security.Principal.NTAccount]$a.Principal.UserId).Translate([Security.Principal.SecurityIdentifier]).Value}catch{$null}
+              if($a.Principal.UserId-like'S-1-*'){$a.Principal.UserId}else{
+                try{([Security.Principal.NTAccount]$a.Principal.UserId).Translate([Security.Principal.SecurityIdentifier]).Value}catch{$null}
+              }
             }else{$null}
             $bUserSid=if($null-ne$b-and![string]::IsNullOrWhiteSpace($b.Principal.UserId)){
-              try{([Security.Principal.NTAccount]$b.Principal.UserId).Translate([Security.Principal.SecurityIdentifier]).Value}catch{$null}
+              if($b.Principal.UserId-like'S-1-*'){$b.Principal.UserId}else{
+                try{([Security.Principal.NTAccount]$b.Principal.UserId).Translate([Security.Principal.SecurityIdentifier]).Value}catch{$null}
+              }
             }else{$null}
             $canonical=@($a,$b).Where({
               if($null-eq$_-or$_.Triggers.Count-ne2-or
@@ -3868,10 +3967,3 @@ internal sealed class PowerShellTaskRegistrar : IEndpointTaskRegistrar
         return output.Trim();
     }
 }
-
-
-
-
-
-
-

@@ -393,9 +393,9 @@ public sealed class ConnectionHostOrchestratorTests
                 value => value.AbsoluteUri.Contains(
                     "refreshed-provider",
                     StringComparison.Ordinal));
-        Assert.Empty(await store.ReadPendingTransitionsAsync(
-                100,
-                CancellationToken.None));
+            Assert.Empty(await store.ReadPendingTransitionsAsync(
+                    100,
+                    CancellationToken.None));
             await using var connection = new Microsoft.Data.Sqlite.SqliteConnection(
                 $"Data Source={Path.Combine(directory, "connections.db")}");
             await connection.OpenAsync();

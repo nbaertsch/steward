@@ -971,6 +971,22 @@ public sealed class OrchestrationTests
             Assert.Equal(2, reconciliation.Members.Count);
             Assert.Equal(2, provider.Created);
             Assert.Equal(2, enrollment.Enrolled);
+            Assert.All(
+                reconciliation.Members,
+                member => Assert.Equal(
+                    $"project/me/{member.ProviderResourceName}",
+                    member.ProviderResourceId));
+            Assert.All(
+                enrollment.Bindings,
+                binding =>
+                {
+                    Assert.Equal(
+                        binding.Resource.ProviderResourceId,
+                        binding.Member.ProviderResourceId);
+                    Assert.NotEqual(
+                        binding.Resource.Name,
+                        binding.Resource.ProviderResourceId);
+                });
             Assert.Equal(2, (await nodeStore.ListAsync()).Count);
 
             var member = reconciliation.Members[0];
@@ -2772,13 +2788,21 @@ public sealed class OrchestrationTests
             ProviderEffect effect, ProviderHostStatus status) =>
             Task.FromResult(new ProviderOperationResult(
                 ProviderOperationStatus.Succeeded, null,
-                new(effect.HostId.ToString(), effect.ResourceName, status,
+                new(
+                    $"project/me/{effect.ResourceName}",
+                    effect.ResourceName,
+                    status,
                     new Dictionary<string, string>())));
     }
 
     private sealed class FakeEnrollmentWorkflow : IProvisionedNodeEnrollmentWorkflow
     {
         public int Enrolled { get; private set; }
+        public List<(PoolMember Member, ProviderResource Resource)> Bindings
+        {
+            get;
+        } = [];
+
         public Task<NodeEndpointRegistration> BootstrapAndEnrollAsync(
             PoolRegistration pool,
             PoolMember member,
@@ -2786,6 +2810,7 @@ public sealed class OrchestrationTests
             CancellationToken cancellationToken)
         {
             Enrolled++;
+            Bindings.Add((member, resource));
             return Task.FromResult(new NodeEndpointRegistration(
                 member.HostId, member.IncarnationId, member.PoolId,
                 DirectTransport(46100 + Enrolled),

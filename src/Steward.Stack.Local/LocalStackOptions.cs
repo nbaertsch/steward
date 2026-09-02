@@ -47,9 +47,11 @@ public sealed class LocalStackOptions
                     "Local Stack TransportIdentity is required and bounded.");
             privateKey = RequireExistingAbsolute(
                 TransportPrivateKeyPemPath, nameof(TransportPrivateKeyPemPath));
-            if (Nodes.Count is 0 or > 256)
+            if (Nodes.Count > 256 ||
+                Nodes.Count == 0 &&
+                !RdpDvcControlCarrierEnabled)
                 throw new InvalidOperationException(
-                    "Local Stack transport requires 1..256 Node endpoints.");
+                    "Local Stack transport requires direct Node endpoints or the RDP DVC Control carrier.");
         }
         if (RdpDvcControlCarrierEnabled && !TransportEnabled)
             throw new InvalidOperationException(

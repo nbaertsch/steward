@@ -18,7 +18,7 @@ internal static class TestProvider
 internal sealed class FakeDevBoxClient : IDevBoxClient
 {
     private readonly Dictionary<string, DevBoxResource> _resources = [];
-    private readonly Dictionary<string, (string Kind, string Name, bool Complete, bool Succeed, string StatusUri)> _operations = [];
+    private readonly Dictionary<string, (string Kind, string Name, string ProviderResourceId, bool Complete, bool Succeed, string StatusUri)> _operations = [];
     private int _sequence;
 
     public ProviderCapability Capabilities { get; set; } =
@@ -33,10 +33,21 @@ internal sealed class FakeDevBoxClient : IDevBoxClient
     public void Complete(string operationId, bool succeed = true)
     {
         var operation = _operations[operationId];
-        _operations[operationId] = (operation.Kind, operation.Name, true, succeed, operation.StatusUri);
+        _operations[operationId] = (
+            operation.Kind,
+            operation.Name,
+            operation.ProviderResourceId,
+            true,
+            succeed,
+            operation.StatusUri);
         if (!succeed) return;
         if (operation.Kind == "delete") _resources.Remove(operation.Name);
-        else if (operation.Kind == "create") _resources[operation.Name] = new(operation.Name, operation.Name, "Succeeded", "Stopped");
+        else if (operation.Kind == "create")
+            _resources[operation.Name] = new(
+                operation.ProviderResourceId,
+                operation.Name,
+                "Succeeded",
+                "Stopped");
         else if (_resources.TryGetValue(operation.Name, out var resource))
             _resources[operation.Name] = resource with { PowerState = operation.Kind == "start" ? "Running" : "Stopped" };
     }
@@ -53,7 +64,8 @@ internal sealed class FakeDevBoxClient : IDevBoxClient
     public Task<DevBoxResource?> GetAsync(ProviderBinding binding, string name, CancellationToken cancellationToken) =>
         Task.FromResult(_resources.GetValueOrDefault(name));
 
-    public Task<DevBoxLongRunningOperation> CreateAsync(ProviderBinding binding, string name, CancellationToken cancellationToken) => Start("create", name);
+    public Task<DevBoxLongRunningOperation> CreateAsync(ProviderBinding binding, string name, CancellationToken cancellationToken) =>
+        Start("create", name, $"{binding.Project}/{binding.User}/{name}");
     public Task<DevBoxLongRunningOperation> StartAsync(ProviderBinding binding, string name, CancellationToken cancellationToken) => Start("start", name);
     public Task<DevBoxLongRunningOperation> StopAsync(ProviderBinding binding, string name, CancellationToken cancellationToken) => Start("stop", name);
     public Task<DevBoxLongRunningOperation> DeleteAsync(ProviderBinding binding, string name, CancellationToken cancellationToken) => Start("delete", name);
@@ -76,12 +88,21 @@ internal sealed class FakeDevBoxClient : IDevBoxClient
                 : null));
     }
 
-    private Task<DevBoxLongRunningOperation> Start(string kind, string name)
+    private Task<DevBoxLongRunningOperation> Start(
+        string kind,
+        string name,
+        string? providerResourceId = null)
     {
         Increment(kind);
         LastOperationId = $"{kind}-{++_sequence}";
         var statusUri = $"https://devcenter.invalid/operations/{LastOperationId}";
-        _operations[LastOperationId] = (kind, name, CompleteImmediately, true, statusUri);
+        _operations[LastOperationId] = (
+            kind,
+            name,
+            providerResourceId ?? name,
+            CompleteImmediately,
+            true,
+            statusUri);
         if (CompleteImmediately) Complete(LastOperationId);
         return Task.FromResult(new DevBoxLongRunningOperation(
             LastOperationId,

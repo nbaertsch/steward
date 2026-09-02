@@ -16,7 +16,8 @@ public sealed record HostView(
     NodeIncarnationId NodeIncarnationId,
     string ProviderResourceName,
     PoolMemberState State,
-    bool Connected);
+    bool Connected,
+    string? ProviderResourceId = null);
 public sealed record ReconcilePoolRequest(
     IReadOnlyList<PoolDemand> Demands,
     DateTimeOffset? ObservedAt = null);
@@ -145,7 +146,8 @@ public sealed class HostPoolApplicationService(
                     x.HostId, x.PoolId, x.NodeIncarnationId,
                     member?.ProviderResourceName ?? x.HostId.ToString(),
                     member?.State ?? PoolMemberState.Warm,
-                    x.Enabled);
+                    x.Enabled,
+                    member?.ProviderResourceId);
             }).ToArray();
     }
 
@@ -209,7 +211,12 @@ public sealed class HostPoolApplicationService(
                 now,
                 cancellationToken);
         }
-        return result;
+        return result with
+        {
+            State = await poolStore.LoadAsync(
+                poolId,
+                cancellationToken)
+        };
     }
 
     private async Task ResumePendingProviderOperationsAsync(
@@ -324,6 +331,24 @@ public sealed class HostPoolApplicationService(
                     "Created capacity cannot become ready because " +
                     "bootstrap enrollment is unavailable.",
                     ProblemDisposition.Terminal);
+            if (!string.Equals(
+                    result.Resource.Name,
+                    effect.ResourceName,
+                    StringComparison.Ordinal))
+                throw new InvalidDataException(
+                    "Created provider resource name does not match its request.");
+            await coordinator.BindProviderResourceAsync(
+                registration.Policy.PoolId,
+                effect.HostId,
+                result.Resource.Name,
+                result.Resource.ProviderResourceId,
+                now,
+                cancellationToken);
+            state = await poolStore.LoadAsync(
+                registration.Policy.PoolId,
+                cancellationToken);
+            member = state.Members.Single(
+                x => x.HostId == effect.HostId);
             var endpoint = await enrollment.BootstrapAndEnrollAsync(
                 registration,
                 member,

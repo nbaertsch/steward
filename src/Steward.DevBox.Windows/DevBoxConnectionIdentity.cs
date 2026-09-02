@@ -932,23 +932,58 @@ public sealed class DevBoxConnectionIdentityStore
                     cancellationToken).ConfigureAwait(false);
             }
             DevBoxIdentityStorageSecurity.RestrictFile(temporary);
-            if (File.Exists(path))
-            {
-                if (!DevBoxIdentityStorageSecurity.IsSafeRegularFile(path))
-                    throw new IOException(
-                        "The Dev Box connection identity destination is unsafe.");
-                File.Replace(temporary, path, null);
-            }
-            else
-            {
-                File.Move(temporary, path);
-            }
+            await CommitAtomicWriteAsync(
+                    temporary,
+                    path,
+                    "The Dev Box connection identity destination is unsafe.",
+                    cancellationToken)
+                .ConfigureAwait(false);
             DevBoxIdentityStorageSecurity.RestrictFile(path);
         }
         finally
         {
             if (File.Exists(temporary))
                 File.Delete(temporary);
+        }
+    }
+
+    private static async Task CommitAtomicWriteAsync(
+        string temporary,
+        string path,
+        string unsafeDestinationMessage,
+        CancellationToken cancellationToken)
+    {
+        for (var attempt = 0; ; attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                if (File.Exists(path))
+                {
+                    if (!DevBoxIdentityStorageSecurity.IsSafeRegularFile(path))
+                        throw new IOException(unsafeDestinationMessage);
+                    File.Replace(temporary, path, null);
+                }
+                else
+                {
+                    File.Move(temporary, path);
+                }
+                return;
+            }
+            catch (IOException) when (attempt < 5)
+            {
+                await Task.Delay(
+                        TimeSpan.FromMilliseconds(25 * (attempt + 1)),
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (UnauthorizedAccessException) when (attempt < 5)
+            {
+                await Task.Delay(
+                        TimeSpan.FromMilliseconds(25 * (attempt + 1)),
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
         }
     }
 }

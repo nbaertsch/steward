@@ -16,6 +16,19 @@ public sealed class ProvisionerTests : IDisposable
     private byte[]? controlPublicKey;
 
     [Fact]
+    public void Configured_Entra_user_does_not_require_prelogin_account_translation()
+    {
+        const string account = "REDMOND\\steward-user";
+        const string sid =
+            "S-1-12-1-3482208621-1225039397-1130211761-942570504";
+
+        var user = EndpointProvisioner.ResolveConfiguredUser(account, sid);
+
+        Assert.Equal(account, user.Account);
+        Assert.Equal(sid, user.Sid);
+    }
+
+    [Fact]
     public void Physical_atomic_write_flushes_file_and_reports_parent_directory_durability()
     {
         Directory.CreateDirectory(root);
@@ -342,6 +355,181 @@ public sealed class ProvisionerTests : IDisposable
         Assert.Throws<InvalidDataException>(() => provisioner.Provision(
             Options(install, config, state, "1.1.0")));
     }
+
+    [Fact]
+    public void Administrative_1023_state_is_removed_only_after_structural_commit()
+    {
+        Directory.CreateDirectory(root);
+        var install = CreateInstall();
+        var legacyState = Path.Combine(
+            root,
+            "legacy-install",
+            "Endpoint");
+        var state = Path.Combine(root, "Endpoint");
+        var registrar = new RecordingRegistrar();
+        var retained = CreateRetainedV1State(
+            install,
+            legacyState,
+            registrar);
+        var retainedNonce = File.ReadAllBytes(Path.Combine(
+            legacyState,
+            "nonce-sequence.json"));
+        RewriteManifestVersion(install, "1.1.0");
+        var options = Options(
+            install,
+            CreateConfig("1.1.0"),
+            state,
+            "1.1.0") with
+        {
+            LegacyStateRoot = legacyState,
+            MsiTransactionId = Guid.NewGuid()
+        };
+        var provisioner = new EndpointProvisioner(
+            new PhysicalProvisionerFileSystem(),
+            registrar,
+            new NoOpSecurity(),
+            new NeverReadyHealthVerifier());
+
+        _ = provisioner.Provision(options);
+
+        Assert.True(Directory.Exists(legacyState));
+        Assert.True(Directory.Exists(state));
+        Assert.True(File.Exists(options.TransactionJournalPath));
+
+        provisioner.CommitMsiTransaction(options);
+
+        Assert.False(Directory.Exists(legacyState));
+        Assert.False(File.Exists(options.TransactionJournalPath));
+        var current = JsonSerializer.Deserialize<EndpointMachineIdentity>(
+            File.ReadAllText(Path.Combine(state, "identity.json")),
+            new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
+        Assert.Equal(retained.HostId, current.HostId);
+        Assert.Equal(retained.IncarnationId, current.IncarnationId);
+        Assert.Equal(retained.SessionId, current.SessionId);
+        Assert.Equal(
+            retainedNonce,
+            File.ReadAllBytes(Path.Combine(state, "nonce-sequence.json")));
+        Assert.True(File.Exists(Path.Combine(
+            state,
+            "retained-v1-migration.json")));
+    }
+
+    [Fact]
+    public void Committed_1023_recovery_finishes_legacy_cleanup_after_crash()
+    {
+        Directory.CreateDirectory(root);
+        var install = CreateInstall();
+        var legacyState = Path.Combine(
+            root,
+            "legacy-install",
+            "Endpoint");
+        var state = Path.Combine(root, "Endpoint");
+        var registrar = new RecordingRegistrar();
+        _ = CreateRetainedV1State(
+            install,
+            legacyState,
+            registrar);
+        RewriteManifestVersion(install, "1.1.0");
+        var options = Options(
+            install,
+            CreateConfig("1.1.0"),
+            state,
+            "1.1.0") with
+        {
+            LegacyStateRoot = legacyState,
+            MsiTransactionId = Guid.NewGuid()
+        };
+        var provisioner = new EndpointProvisioner(
+            new PhysicalProvisionerFileSystem(),
+            registrar,
+            new NoOpSecurity(),
+            new NeverReadyHealthVerifier());
+        _ = provisioner.Provision(options);
+        var json = new JsonSerializerOptions(
+            JsonSerializerDefaults.Web)
+        {
+            WriteIndented = true
+        };
+        var transaction =
+            JsonSerializer.Deserialize<EndpointProvisionerTransaction>(
+                File.ReadAllText(options.TransactionJournalPath),
+                json)!;
+        File.WriteAllText(
+            options.TransactionJournalPath,
+            JsonSerializer.Serialize(
+                transaction with
+                {
+                    State = EndpointProvisionerTransactionState.Committed
+                },
+                json));
+
+        _ = new EndpointProvisioner(
+                new PhysicalProvisionerFileSystem(),
+                registrar,
+                new NoOpSecurity(),
+                new NeverReadyHealthVerifier())
+            .Provision(options);
+
+        Assert.False(Directory.Exists(legacyState));
+        Assert.False(Directory.Exists(transaction.BackupRoot));
+        Assert.False(File.Exists(options.TransactionJournalPath));
+        Assert.True(Directory.Exists(state));
+    }
+
+    [Fact]
+    public void Administrative_1023_state_remains_authoritative_after_rollback()
+    {
+        Directory.CreateDirectory(root);
+        var install = CreateInstall();
+        var legacyState = Path.Combine(
+            root,
+            "legacy-install",
+            "Endpoint");
+        var state = Path.Combine(root, "Endpoint");
+        var registrar = new RecordingRegistrar();
+        var retained = CreateRetainedV1State(
+            install,
+            legacyState,
+            registrar);
+        var retainedIdentity = File.ReadAllBytes(Path.Combine(
+            legacyState,
+            "identity.json"));
+        RewriteManifestVersion(install, "1.1.0");
+        var options = Options(
+            install,
+            CreateConfig("1.1.0"),
+            state,
+            "1.1.0") with
+        {
+            LegacyStateRoot = legacyState,
+            MsiTransactionId = Guid.NewGuid()
+        };
+        var provisioner = new EndpointProvisioner(
+            new PhysicalProvisionerFileSystem(),
+            registrar,
+            new NoOpSecurity());
+
+        _ = provisioner.Provision(options);
+        provisioner.RollbackMsiTransaction(
+            options,
+            "injected_failure");
+
+        Assert.False(Directory.Exists(state));
+        Assert.True(Directory.Exists(legacyState));
+        Assert.Equal(
+            retainedIdentity,
+            File.ReadAllBytes(Path.Combine(
+                legacyState,
+                "identity.json")));
+        var current = JsonSerializer.Deserialize<EndpointMachineIdentity>(
+            File.ReadAllText(Path.Combine(
+                legacyState,
+                "identity.json")),
+            new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
+        Assert.Equal(retained.HostId, current.HostId);
+        Assert.False(File.Exists(options.TransactionJournalPath));
+    }
+
     [Fact]
     public void ReceiptIsEncryptedSignedAndExcludesPrivateSecrets()
     {
@@ -797,7 +985,7 @@ public sealed class ProvisionerTests : IDisposable
     }
 
     [Fact]
-    public void Msi_transaction_keeps_backup_until_commit_after_services_start()
+    public void Msi_transaction_commits_structural_install_without_live_runtime()
     {
         Directory.CreateDirectory(root);
         var install = CreateInstall();
@@ -816,9 +1004,10 @@ public sealed class ProvisionerTests : IDisposable
         {
             MsiTransactionId = transactionId
         };
+        var registrar = new RecordingRegistrar();
         var provisioner = new EndpointProvisioner(
             new PhysicalProvisionerFileSystem(),
-            new RecordingRegistrar(),
+            registrar,
             new NoOpSecurity());
 
         _ = provisioner.Provision(options);
@@ -829,27 +1018,23 @@ public sealed class ProvisionerTests : IDisposable
 
         new EndpointProvisioner(
             new PhysicalProvisionerFileSystem(),
-            new RecordingRegistrar(),
+            registrar,
             new NoOpSecurity(),
             new NeverReadyHealthVerifier()).CommitMsiTransaction(options);
 
-        Assert.True(Directory.Exists(state + ".previous"));
-        Assert.True(File.Exists(options.TransactionJournalPath));
-        var committed = JsonSerializer.Deserialize<EndpointProvisionerTransaction>(
-            File.ReadAllText(options.TransactionJournalPath),
-            new JsonSerializerOptions(JsonSerializerDefaults.Web));
-        Assert.Equal(
-            EndpointProvisionerTransactionState.Committed,
-            committed?.State);
-
-        new EndpointProvisioner(
-            new PhysicalProvisionerFileSystem(),
-            new RecordingRegistrar(),
-            new NoOpSecurity(),
-            new AlwaysReadyHealthVerifier()).CommitMsiTransaction(options);
-
         Assert.False(Directory.Exists(state + ".previous"));
         Assert.False(File.Exists(options.TransactionJournalPath));
+        Assert.Throws<InvalidDataException>(() =>
+            new EndpointProvisioner(
+                new PhysicalProvisionerFileSystem(),
+                registrar,
+                new NoOpSecurity(),
+                new NeverReadyHealthVerifier()).Verify(options));
+        Assert.NotEmpty(new EndpointProvisioner(
+            new PhysicalProvisionerFileSystem(),
+            registrar,
+            new NoOpSecurity(),
+            new NeverReadyHealthVerifier()).VerifyInstalled(options));
         using var identity = JsonDocument.Parse(
             File.ReadAllText(Path.Combine(state, "identity.json")));
         Assert.Equal("1.1.0", identity.RootElement
@@ -902,7 +1087,7 @@ public sealed class ProvisionerTests : IDisposable
     }
 
     [Fact]
-    public void Same_version_no_op_requires_fresh_authenticated_ready_health_otherwise_repairs()
+    public void Same_version_structural_no_op_does_not_require_live_runtime()
     {
         Directory.CreateDirectory(root);
         var install = CreateInstall();
@@ -921,8 +1106,8 @@ public sealed class ProvisionerTests : IDisposable
         _ = provisioner.Provision(options);
         _ = provisioner.Provision(options);
 
-        Assert.Equal(2, registrar.Registrations);
-        Assert.Equal(2, health.Observations);
+        Assert.Equal(1, registrar.Registrations);
+        Assert.Equal(0, health.Observations);
     }
     [Fact]
     public void VerifyOnlyDoesNotReregisterHealthyEndpoint()
@@ -1121,6 +1306,41 @@ public sealed class ProvisionerTests : IDisposable
                         "control-signing.spki")),
                     "control")));
         return new(install, config, state, path);
+    }
+
+    private EndpointMachineIdentity CreateRetainedV1State(
+        string install,
+        string state,
+        IEndpointTaskRegistrar registrar)
+    {
+        var config = CreateConfig("1.0.23");
+        RewriteManifestVersion(install, "1.0.23");
+        var provisioner = new EndpointProvisioner(
+            new PhysicalProvisionerFileSystem(),
+            registrar,
+            new NoOpSecurity());
+        _ = provisioner.Provision(
+            Options(install, config, state, "1.0.23"));
+        var identity = JsonSerializer.Deserialize<EndpointMachineIdentity>(
+            File.ReadAllText(Path.Combine(state, "identity.json")),
+            new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
+        var legacy = new EndpointNonceState(
+            1,
+            identity.SessionId,
+            identity.HostId,
+            identity.IncarnationId,
+            Enumerable.Range(0, 32)
+                .Select(_ => Guid.NewGuid())
+                .ToArray(),
+            7);
+        File.WriteAllText(
+            Path.Combine(state, "nonce-sequence.json"),
+            JsonSerializer.Serialize(
+                legacy,
+                new JsonSerializerOptions(
+                    JsonSerializerDefaults.Web)));
+        RewriteAsRetainedV1Receipt(state, legacy);
+        return identity;
     }
 
     private static string FileHash(string path) =>

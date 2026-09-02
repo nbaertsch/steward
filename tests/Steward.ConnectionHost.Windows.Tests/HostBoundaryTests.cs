@@ -751,7 +751,7 @@ public sealed class HostBoundaryTests
                 store.Write(
                     "unmarked-v1-ticket",
                     route with { ProtocolVersion = 1 }));
-        store.Write(reference, route);
+            store.Write(reference, route);
             var identity = new RdpDvcEvidenceTicketIdentity(
                 reference,
                 "connection",

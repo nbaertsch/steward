@@ -15,6 +15,627 @@ using Steward.Transport;
 const string Consent =
     "I_UNDERSTAND_THIS_MUTATES_THE_RETAINED_DEV_BOX_CUSTOMIZATION";
 
+if (args is
+    [
+        "--list-task-definitions",
+        var endpointText,
+        var projectName
+    ])
+{
+    var endpoint = new Uri(endpointText, UriKind.Absolute);
+    var identity = new DevBoxIdentityService(new DevBoxIdentityStore());
+    var sdk = new DevBoxesClient(
+        endpoint,
+        new DevBoxSilentTokenCredential(identity));
+    var catalog = new DevBoxCustomizationClient(
+        endpoint,
+        new AzurePipelineDevBoxCustomizationTransport(sdk.Pipeline));
+    var definitions = await catalog.ListTaskDefinitionsAsync(
+        projectName,
+        CancellationToken.None);
+    Console.WriteLine(JsonSerializer.Serialize(
+        definitions,
+        new JsonSerializerOptions(
+            JsonSerializerDefaults.Web)
+        {
+            WriteIndented = true
+        }));
+    return 0;
+}
+
+if (args is
+    [
+        "--check-remote-connection",
+        var remoteEndpointText,
+        var remoteProjectName,
+        var remoteBoxName
+    ])
+{
+    var endpoint = new Uri(remoteEndpointText, UriKind.Absolute);
+    var identity = new DevBoxIdentityService(new DevBoxIdentityStore());
+    var sdk = new DevBoxesClient(
+        endpoint,
+        new DevBoxSilentTokenCredential(identity));
+    var remote = await sdk.GetRemoteConnectionAsync(
+        remoteProjectName,
+        "me",
+        remoteBoxName,
+        CancellationToken.None);
+    Console.WriteLine(
+        remote.Value.RdpConnectionUri is null
+            ? "REMOTE_CONNECTION_MISSING"
+            : "REMOTE_CONNECTION_READY");
+    return 0;
+}
+
+if (args is
+    [
+        "--list-groups",
+        var groupsEndpointText,
+        var groupsProjectName,
+        var groupsBoxName
+    ])
+{
+    var endpoint = new Uri(groupsEndpointText, UriKind.Absolute);
+    var identity = new DevBoxIdentityService(new DevBoxIdentityStore());
+    var sdk = new DevBoxesClient(
+        endpoint,
+        new DevBoxSilentTokenCredential(identity));
+    var customizations = new DevBoxCustomizationClient(
+        endpoint,
+        new AzurePipelineDevBoxCustomizationTransport(sdk.Pipeline));
+    Console.WriteLine(JsonSerializer.Serialize(
+        await customizations.ListAsync(
+            groupsProjectName,
+            "me",
+            groupsBoxName,
+            CancellationToken.None),
+        new JsonSerializerOptions(JsonSerializerDefaults.Web)
+        {
+            WriteIndented = true
+        }));
+    return 0;
+}
+
+if (args is
+    [
+        "--get-group",
+        var getEndpointText,
+        var getProjectName,
+        var getBoxName,
+        var getGroupName
+    ])
+{
+    var endpoint = new Uri(getEndpointText, UriKind.Absolute);
+    var identity = new DevBoxIdentityService(new DevBoxIdentityStore());
+    var sdk = new DevBoxesClient(
+        endpoint,
+        new DevBoxSilentTokenCredential(identity));
+    var customizations = new DevBoxCustomizationClient(
+        endpoint,
+        new AzurePipelineDevBoxCustomizationTransport(sdk.Pipeline));
+    var group = await customizations.GetAsync(
+        getProjectName,
+        "me",
+        getBoxName,
+        getGroupName,
+        CancellationToken.None);
+    Console.WriteLine(
+        $"GROUP {group.Name}: {group.Status}");
+    foreach (var task in group.Tasks)
+    {
+        var log = await customizations.GetTaskLogAsync(
+            task.LogUri,
+            CancellationToken.None);
+        Console.WriteLine(
+            $"TASK {task.DisplayName ?? task.Name}: {task.Status}");
+        Console.WriteLine(SafeBootstrapLogDiagnostic(log));
+    }
+    return 0;
+}
+
+if (args is
+    [
+        "--save-group-log",
+        var saveEndpointText,
+        var saveProjectName,
+        var saveBoxName,
+        var saveGroupName,
+        var saveOutputPath
+    ])
+{
+    var endpoint = new Uri(saveEndpointText, UriKind.Absolute);
+    var identity = new DevBoxIdentityService(new DevBoxIdentityStore());
+    var sdk = new DevBoxesClient(
+        endpoint,
+        new DevBoxSilentTokenCredential(identity));
+    var customizations = new DevBoxCustomizationClient(
+        endpoint,
+        new AzurePipelineDevBoxCustomizationTransport(sdk.Pipeline));
+    var group = await customizations.GetAsync(
+        saveProjectName,
+        "me",
+        saveBoxName,
+        saveGroupName,
+        CancellationToken.None);
+    var logs = new List<string>(group.Tasks.Count);
+    foreach (var task in group.Tasks)
+    {
+        var taskLog = await customizations.GetTaskLogAsync(
+            task.LogUri,
+            CancellationToken.None);
+        logs.Add(
+            $"TASK {task.DisplayName ?? task.Name}: {task.Status}" +
+            Environment.NewLine +
+            taskLog);
+    }
+    var log = string.Join(
+        Environment.NewLine + Environment.NewLine,
+        logs);
+    WritePrivateFile(
+        Path.GetFullPath(saveOutputPath),
+        Encoding.UTF8.GetBytes(log));
+    Console.WriteLine(
+        $"Saved {log.Length} characters from {group.Name}.");
+    return 0;
+}
+
+if (args is
+    [
+        "--materialize-msi-receipt",
+        var receiptLogPath,
+        var envelopePrivateKeyPath,
+        var materialOutputDirectory,
+        var materialBoxName,
+        var expectedProductVersion,
+        var expectedSourceRepository,
+        var expectedSourceCommit
+    ])
+{
+    if (!Version.TryParse(
+            expectedProductVersion,
+            out var expectedVersion) ||
+        expectedVersion.ToString(3) != expectedProductVersion ||
+        !Regex.IsMatch(
+            expectedSourceRepository,
+            "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+            RegexOptions.CultureInvariant) ||
+        !Regex.IsMatch(
+            expectedSourceCommit,
+            "^[0-9A-Fa-f]{40}$",
+            RegexOptions.CultureInvariant))
+        throw new ArgumentException(
+            "Expected endpoint release provenance is invalid.");
+    var receiptText = File.ReadAllText(Path.GetFullPath(receiptLogPath));
+    var rawReceipt = true;
+    JsonDocument document;
+    try
+    {
+        document = JsonDocument.Parse(receiptText);
+    }
+    catch (JsonException)
+    {
+        rawReceipt = false;
+        var line = receiptText.Split(
+                ['\r', '\n'],
+                StringSplitOptions.RemoveEmptyEntries)
+            .SingleOrDefault(value =>
+                value.Contains(
+                    "\"runtime\":true,\"receipt\":",
+                    StringComparison.Ordinal))
+            ?? throw new InvalidDataException(
+                "The health log contains no unique endpoint receipt.");
+        document = JsonDocument.Parse(line[line.IndexOf('{')..]);
+    }
+    using (document)
+    {
+    var receipt = document.RootElement.TryGetProperty(
+            "receipt",
+            out var wrappedReceipt)
+        ? wrappedReceipt
+        : document.RootElement;
+    var body = receipt.GetProperty("body");
+    var nodePublic = Convert.FromBase64String(
+        body.GetProperty("nodeSigningPublicKey").GetString()
+        ?? throw new InvalidDataException(
+            "The endpoint receipt has no node public key."));
+    var signature = Convert.FromBase64String(
+        receipt.GetProperty("signature").GetString()
+        ?? throw new InvalidDataException(
+            "The endpoint receipt has no signature."));
+    var canonical = JsonSerializer.SerializeToUtf8Bytes(
+        body,
+        new JsonSerializerOptions(JsonSerializerDefaults.Web));
+    try
+    {
+        using var nodeVerifier = ECDsa.Create();
+        nodeVerifier.ImportSubjectPublicKeyInfo(
+            nodePublic,
+            out var nodeRead);
+        if (rawReceipt &&
+            (nodeRead != nodePublic.Length ||
+            !nodeVerifier.VerifyData(
+                canonical,
+                signature,
+                HashAlgorithmName.SHA256,
+                DSASignatureFormat.Rfc3279DerSequence)))
+            throw new CryptographicException(
+                "The endpoint receipt signature is invalid.");
+        if (body.GetProperty("version").GetInt32() != 2 ||
+            body.GetProperty("productVersion").GetString() !=
+                expectedProductVersion ||
+            body.GetProperty("sourceRepository").GetString() !=
+                expectedSourceRepository ||
+            body.GetProperty("sourceCommit").GetString() !=
+                expectedSourceCommit)
+            throw new InvalidDataException(
+                "The endpoint receipt provenance is invalid.");
+        using var envelopeKey = RSA.Create();
+        var privateBytes = File.ReadAllBytes(
+            ValidatePrivateKeyPath(
+                envelopePrivateKeyPath,
+                "bootstrap envelope"));
+        try
+        {
+            envelopeKey.ImportPkcs8PrivateKey(
+                privateBytes,
+                out var privateRead);
+            if (privateRead != privateBytes.Length)
+                throw new CryptographicException(
+                    "The bootstrap envelope key contains trailing data.");
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(privateBytes);
+        }
+        var ciphertext = Convert.FromBase64String(
+            body.GetProperty("ciphertext").GetString()
+            ?? throw new InvalidDataException(
+                "The endpoint receipt has no ciphertext."));
+        var payload = RdpDvcBootstrapEnvelope.Decrypt(
+            envelopeKey,
+            ciphertext);
+        try
+        {
+            var operationId = body.GetProperty(
+                "bootstrapOperationId").GetGuid();
+            var sessionId = body.GetProperty("sessionId").GetGuid();
+            var hostId = body.GetProperty("hostId").GetGuid();
+            var incarnationId = body.GetProperty(
+                "incarnationId").GetGuid();
+            if (payload.OperationId != operationId ||
+                payload.SessionId != sessionId ||
+                payload.HostId != hostId ||
+                payload.NodeIncarnationId != incarnationId ||
+                !CryptographicOperations.FixedTimeEquals(
+                    payload.NodeSigningPublicKey,
+                    nodePublic))
+                throw new InvalidDataException(
+                    "The endpoint envelope identity is invalid.");
+            var output = Path.GetFullPath(materialOutputDirectory);
+            Directory.CreateDirectory(output);
+            WritePrivateFile(
+                Path.Combine(output, "dvc-auth.key"),
+                payload.AuthenticationKey);
+            WritePrivateFile(
+                Path.Combine(output, "node-public.pem"),
+                Encoding.ASCII.GetBytes(
+                    PemEncoding.WriteString(
+                        "PUBLIC KEY",
+                        nodePublic)));
+            var metadata = JsonSerializer.SerializeToUtf8Bytes(
+                new
+                {
+                    version = 1,
+                    devBox = materialBoxName,
+                    operationId,
+                    sessionId,
+                    hostId,
+                    nodeIncarnationId = incarnationId,
+                    nodeIdentity = body.GetProperty(
+                        "nodeIdentity").GetString()
+                },
+                new JsonSerializerOptions(JsonSerializerDefaults.Web)
+                {
+                    WriteIndented = true
+                });
+            WritePrivateFile(
+                Path.Combine(output, "endpoint.json"),
+                metadata);
+            CryptographicOperations.ZeroMemory(metadata);
+            Console.WriteLine(
+                $"Materialized verified endpoint {materialBoxName} " +
+                $"for host {hostId:D}.");
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(ciphertext);
+            CryptographicOperations.ZeroMemory(
+                payload.AuthenticationKey);
+            CryptographicOperations.ZeroMemory(
+                payload.NodeSigningPublicKey);
+        }
+    }
+    finally
+    {
+        CryptographicOperations.ZeroMemory(nodePublic);
+        CryptographicOperations.ZeroMemory(signature);
+        CryptographicOperations.ZeroMemory(canonical);
+    }
+    }
+    return 0;
+}
+
+if (args is
+    [
+        "--install-endpoint",
+        var installEndpointText,
+        var installProjectName,
+        var installBoxName,
+        var installReleaseUrlFile,
+        var installBootstrapPublicKeyFile,
+        var installControlPublicKeyFile,
+        var installControlIdentity,
+        var installNodeAccount,
+        var installNodeSid
+    ])
+{
+    var endpoint = new Uri(installEndpointText, UriKind.Absolute);
+    var releaseUrl = File.ReadAllText(
+        Path.GetFullPath(installReleaseUrlFile)).Trim();
+    if (!Uri.TryCreate(
+            releaseUrl,
+            UriKind.Absolute,
+            out var releaseUri) ||
+        releaseUri.Scheme != Uri.UriSchemeHttps ||
+        !string.Equals(
+            releaseUri.Host,
+            "release-assets.githubusercontent.com",
+            StringComparison.OrdinalIgnoreCase))
+        throw new InvalidDataException(
+            "Endpoint release URL must be an ephemeral GitHub release asset URL.");
+    var bootstrapPublic = Convert.ToBase64String(
+        File.ReadAllBytes(Path.GetFullPath(
+            installBootstrapPublicKeyFile)));
+    var controlPublic = Convert.ToBase64String(
+        File.ReadAllBytes(Path.GetFullPath(
+            installControlPublicKeyFile)));
+    if (Convert.FromBase64String(bootstrapPublic).Length
+            is not (294 or 422 or 550) ||
+        Convert.FromBase64String(controlPublic).Length is < 80 or > 512 ||
+        !Regex.IsMatch(
+            installControlIdentity,
+            "^[A-Za-z0-9._@:-]{3,256}$",
+            RegexOptions.CultureInvariant) ||
+        !Regex.IsMatch(
+            installNodeAccount,
+            "^[A-Za-z0-9._@\\\\/-]{3,256}$",
+            RegexOptions.CultureInvariant) ||
+        !Regex.IsMatch(
+            installNodeSid,
+            "^S-1-12-1-(\\d+-){2}\\d+-\\d+$",
+            RegexOptions.CultureInvariant))
+        throw new InvalidDataException(
+            "Endpoint catalog task identity or trust parameters are invalid.");
+    var identity = new DevBoxIdentityService(new DevBoxIdentityStore());
+    var sdk = new DevBoxesClient(
+        endpoint,
+        new DevBoxSilentTokenCredential(identity));
+    var customizations = new DevBoxCustomizationClient(
+        endpoint,
+        new AzurePipelineDevBoxCustomizationTransport(sdk.Pipeline));
+    var expectedParameters = new HashSet<string>(
+        [
+            "releaseAssetUrl",
+            "bootstrapEncryptionPublicKeyBase64",
+            "controlSigningPublicKeyBase64",
+            "controlIdentity",
+            "nodeUserAccount",
+            "nodeUserSid"
+        ],
+        StringComparer.Ordinal);
+    var definitions = await customizations.ListTaskDefinitionsAsync(
+        installProjectName,
+        CancellationToken.None);
+    var definition = definitions.SingleOrDefault(definition =>
+        string.Equals(
+            definition.Name,
+            "install-steward-endpoint",
+            StringComparison.Ordinal) &&
+        definition.Parameters.SetEquals(expectedParameters))
+        ?? throw new InvalidOperationException(
+            "The released install-steward-endpoint catalog task with the exact expected parameter contract is unavailable.");
+    var taskName = definition.Name.Contains(
+        '/',
+        StringComparison.Ordinal)
+        ? definition.Name
+        : $"{definition.CatalogName}/{definition.Name}";
+    var groupName =
+        "steward-endpoint-" + Guid.NewGuid().ToString("N");
+    var tasks = new[]
+    {
+        new DevBoxCustomizationTaskRequest(
+            taskName,
+            "Install signed Steward endpoint",
+            new Dictionary<string, string>
+            {
+                ["releaseAssetUrl"] = releaseUrl,
+                ["bootstrapEncryptionPublicKeyBase64"] = bootstrapPublic,
+                ["controlSigningPublicKeyBase64"] = controlPublic,
+                ["controlIdentity"] = installControlIdentity,
+                ["nodeUserAccount"] = installNodeAccount,
+                ["nodeUserSid"] = installNodeSid
+            },
+            DevBoxCustomizationExecutionAccount.System,
+            1_800)
+    };
+    var group = await customizations.ApplyAsync(
+        installProjectName,
+        "me",
+        installBoxName,
+        groupName,
+        tasks,
+        CancellationToken.None);
+    var deadline = DateTimeOffset.UtcNow.AddMinutes(12);
+    while (!Terminal(group.Status))
+    {
+        if (DateTimeOffset.UtcNow >= deadline)
+            throw new TimeoutException(
+                "Endpoint installation did not reach terminal status.");
+        await Task.Delay(TimeSpan.FromSeconds(10));
+        group = await customizations.GetAsync(
+            installProjectName,
+            "me",
+            installBoxName,
+            groupName,
+            CancellationToken.None);
+    }
+    if (!Succeeded(group.Status))
+    {
+        foreach (var task in group.Tasks.Where(task =>
+                     !Succeeded(task.Status)))
+        {
+            var taskLog = await customizations.GetTaskLogAsync(
+                task.LogUri,
+                CancellationToken.None);
+            Console.Error.WriteLine(
+                $"{task.DisplayName ?? task.Name}: {task.Status}; " +
+                SafeBootstrapLogDiagnostic(taskLog));
+        }
+        throw new InvalidOperationException(
+            $"Endpoint installation ended in {group.Status}.");
+    }
+    Console.WriteLine($"INSTALLED {installBoxName}: {group.Name}");
+    return 0;
+}
+
+if (args is
+    [
+        "--retrieve-msi-receipt",
+        var retrieveEndpointText,
+        var retrieveProjectName,
+        var retrieveBoxName,
+        var retrieveOutputPath
+    ])
+{
+    var endpoint = new Uri(retrieveEndpointText, UriKind.Absolute);
+    var identity = new DevBoxIdentityService(new DevBoxIdentityStore());
+    var sdk = new DevBoxesClient(
+        endpoint,
+        new DevBoxSilentTokenCredential(identity));
+    var customizations = new DevBoxCustomizationClient(
+        endpoint,
+        new AzurePipelineDevBoxCustomizationTransport(sdk.Pipeline));
+    var groupName =
+        "steward-receipt-" +
+        retrieveBoxName[^Math.Min(12, retrieveBoxName.Length)..] +
+        "-" + Guid.NewGuid().ToString("N")[..8];
+    var command =
+        "$ErrorActionPreference='Stop';" +
+        "$path='C:\\ProgramData\\Steward\\Endpoint\\bootstrap-receipt.json';" +
+        "if(!(Test-Path -LiteralPath $path)){" +
+        "$matches=@(Get-ChildItem -LiteralPath 'C:\\ProgramData\\Steward' " +
+        "-Recurse -Force -Filter 'bootstrap-receipt.json' -File " +
+        "-ErrorAction SilentlyContinue);" +
+        "if($matches.Count-ne1){" +
+        "Write-Output ('STEWARD_RECEIPT_CANDIDATES:'+" +
+        "$matches.Count+':'+($matches.FullName-join'|'));" +
+        "$inventory=@(Get-ChildItem -LiteralPath 'C:\\ProgramData\\Steward' " +
+        "-Recurse -Force -ErrorAction SilentlyContinue|" +
+        "Select-Object -First 100 -ExpandProperty FullName);" +
+        "Write-Output ('STEWARD_ENDPOINT_INVENTORY:'+($inventory-join'|'));" +
+        "$msiLog='C:\\ProgramData\\Steward\\install\\steward-endpoint-msi.log';" +
+        "if(Test-Path -LiteralPath $msiLog){" +
+        "$stateLines=@(Select-String -LiteralPath $msiLog " +
+        "-Pattern 'receipt|state-root|Return value 3|" +
+        "provisioning failed|InvalidDataException|UnauthorizedAccess|" +
+        "Exception:'|Select-Object -Last 80 -ExpandProperty Line);" +
+        "Write-Output ('STEWARD_MSI_STATE_LINES:'+($stateLines-join'|'))};" +
+        "throw 'Endpoint receipt missing or ambiguous'};" +
+        "$path=$matches[0].FullName};" +
+        "$bytes=[IO.File]::ReadAllBytes($path);" +
+        "Write-Output ('STEWARD_ENDPOINT_RECEIPT_RAW:'+" +
+        "[Convert]::ToBase64String($bytes));" +
+        "[Array]::Clear($bytes,0,$bytes.Length)";
+    var group = await customizations.ApplyAsync(
+        retrieveProjectName,
+        "me",
+        retrieveBoxName,
+        groupName,
+        [
+            new(
+                "~/powershell",
+                "Return raw signed Steward endpoint receipt",
+                new Dictionary<string, string>
+                {
+                    ["command"] = command
+                },
+                DevBoxCustomizationExecutionAccount.System,
+                300)
+        ],
+        CancellationToken.None);
+    var deadline = DateTimeOffset.UtcNow.AddMinutes(10);
+    while (!Terminal(group.Status))
+    {
+        if (DateTimeOffset.UtcNow >= deadline)
+            throw new TimeoutException(
+                "Endpoint receipt retrieval did not complete.");
+        await Task.Delay(TimeSpan.FromSeconds(5));
+        try
+        {
+            group = await customizations.GetAsync(
+                retrieveProjectName,
+                "me",
+                retrieveBoxName,
+                groupName,
+                CancellationToken.None);
+        }
+        catch (RequestFailedException exception)
+            when (exception.Status is 404 or 409)
+        {
+        }
+    }
+    if (!Succeeded(group.Status))
+    {
+        foreach (var task in group.Tasks)
+        {
+            var taskLog = await customizations.GetTaskLogAsync(
+                task.LogUri,
+                CancellationToken.None);
+            Console.Error.WriteLine(
+                SafeBootstrapLogDiagnostic(taskLog));
+        }
+        throw new InvalidOperationException(
+            "Endpoint receipt retrieval failed.");
+    }
+    var log = await customizations.GetTaskLogAsync(
+        group.Tasks.Single().LogUri,
+        CancellationToken.None);
+    const string marker = "STEWARD_ENDPOINT_RECEIPT_RAW:";
+    var markerIndex = log.LastIndexOf(marker, StringComparison.Ordinal);
+    if (markerIndex < 0)
+        throw new InvalidDataException(
+            "Raw endpoint receipt marker is missing.");
+    var encoded = log[(markerIndex + marker.Length)..];
+    var lineEnd = encoded.IndexOfAny(['\r', '\n']);
+    if (lineEnd >= 0)
+        encoded = encoded[..lineEnd];
+    var receiptBytes = Convert.FromBase64String(encoded.Trim());
+    try
+    {
+        WritePrivateFile(
+            Path.GetFullPath(retrieveOutputPath),
+            receiptBytes);
+    }
+    finally
+    {
+        CryptographicOperations.ZeroMemory(receiptBytes);
+    }
+    Console.WriteLine(
+        $"Retrieved raw receipt for {retrieveBoxName}.");
+    return 0;
+}
+
 if (args is ["--help"])
 {
     Console.WriteLine(
@@ -27,6 +648,11 @@ if (args is ["--help"])
           --checkpoint-key-file PATH --handle-key-file PATH
           --state-directory PATH --receipt PATH
           --consent I_UNDERSTAND_THIS_MUTATES_THE_RETAINED_DEV_BOX_CUSTOMIZATION
+
+        Endpoint catalog install:
+          --install-endpoint HTTPS_DEV_CENTER PROJECT DEVBOX RELEASE_URL_FILE
+          BOOTSTRAP_PUBLIC_KEY_FILE CONTROL_PUBLIC_KEY_FILE CONTROL_IDENTITY
+          NODE_USER_ACCOUNT NODE_USER_SID
 
         Optional dual attestation:
           --node-signing-private-key PATH --node-identity VALUE
