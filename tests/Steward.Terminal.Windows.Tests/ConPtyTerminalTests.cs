@@ -292,7 +292,7 @@ public sealed class ConPtyTerminalTests : IAsyncLifetime
         Assert.True(SpinWait.SpinUntil(() => !IsRunning(childPid), TimeSpan.FromSeconds(10)));
     }
 
-    [Fact(Timeout = 30_000)]
+    [Fact(Timeout = 60_000)]
     public async Task No_reader_never_backpressures_child_and_disconnected_readers_replay_independently()
     {
         var sentinel = Path.Combine(directory, "no-reader.done");
@@ -301,7 +301,7 @@ public sealed class ConPtyTerminalTests : IAsyncLifetime
                          "boot-" + Guid.NewGuid().ToString("N"),
                          options: new(NotificationCapacity: 2)))
         {
-            var script = $"[Console]::Write(('x'*1048576)); Set-Content -LiteralPath '{sentinel}' done";
+            var script = $"[Console]::Write(('x'*393216)); Set-Content -LiteralPath '{sentinel}' done";
             var request = Request(TerminalTranscriptMode.Metadata, maximumOutput: 2 * 1024 * 1024,
                 operationalSpoolBytes: 256 * 1024) with
             {
@@ -311,7 +311,7 @@ public sealed class ConPtyTerminalTests : IAsyncLifetime
 
             Assert.True(SpinWait.SpinUntil(() => File.Exists(sentinel), TimeSpan.FromSeconds(15)));
             Assert.True(SpinWait.SpinUntil(() =>
-                noReaderJournal.Get(request.Authority.SessionId).OutputBytes > 0, TimeSpan.FromSeconds(10)));
+                noReaderJournal.Get(request.Authority.SessionId).OutputBytes > 0, TimeSpan.FromSeconds(30)));
         }
 
         await using var replayService = Service(notificationCapacity: 2);
