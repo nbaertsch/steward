@@ -14,7 +14,7 @@
     <ProjectGuid>{2A47E49D-4AC0-4F7A-8E65-7D649A4608F6}</ProjectGuid>
     <Keyword>Win32Proj</Keyword>
     <RootNamespace>StewardRdpDvcShimWindows</RootNamespace>
-    <WindowsTargetPlatformVersion>10.0.19041.0</WindowsTargetPlatformVersion>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
