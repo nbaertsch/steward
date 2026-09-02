@@ -203,16 +203,22 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw 'Authentic Steward 1.0.23 release archive could not be downloaded.'
           }
-          $archive = Get-ChildItem $download -Filter '*.zip' -File -ErrorAction Stop |
-            Select-Object -Single
+          $archives = @(Get-ChildItem $download -Filter '*.zip' -File -ErrorAction Stop)
+          if ($archives.Count -ne 1) {
+            throw "Expected exactly one authentic Steward 1.0.23 archive; found $($archives.Count)."
+          }
+          $archive = $archives[0]
           if ((Get-FileHash $archive.FullName -Algorithm SHA256).Hash -ne
               $expectedHash) {
             throw 'Authentic Steward 1.0.23 release archive hash mismatch.'
           }
           Expand-Archive -LiteralPath $archive.FullName -DestinationPath $expanded
-          $manifest = Get-ChildItem $expanded `
-            -Filter 'steward-endpoint.release.psd1' -File -Recurse |
-            Select-Object -Single
+          $manifests = @(Get-ChildItem $expanded `
+            -Filter 'steward-endpoint.release.psd1' -File -Recurse)
+          if ($manifests.Count -ne 1) {
+            throw "Expected exactly one authentic Steward 1.0.23 manifest; found $($manifests.Count)."
+          }
+          $manifest = $manifests[0]
           $catalog = Split-Path -Parent $manifest.FullName
           $release = Import-PowerShellDataFile $manifest.FullName
           if ($release.ProductVersion -ne '1.0.23' -or
