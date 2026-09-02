@@ -231,7 +231,7 @@ if ($Machine) {
                         }
                     })
                     if ($failureIndexes.Count -eq 0) {
-                        $lines | Select-Object -Last 300 | Write-Error
+                        $lines | Select-Object -Last 300 | Write-Host
                     } else {
                         foreach ($failureIndex in $failureIndexes) {
                             $start = [Math]::Max(0, $failureIndex - 80)
@@ -239,7 +239,7 @@ if ($Machine) {
                                 $lines.Count - $start,
                                 180)
                             $lines[$start..($start + $count - 1)] |
-                                Write-Error
+                                Write-Host
                         }
                     }
                 }
