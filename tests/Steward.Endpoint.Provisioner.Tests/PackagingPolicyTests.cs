@@ -1,3 +1,7 @@
+using System.Runtime.InteropServices;
+using System.Xml.Linq;
+using Steward.Endpoint.Provisioner;
+
 namespace Steward.Endpoint.Provisioner.Tests;
 
 public sealed class PackagingPolicyTests
@@ -287,6 +291,68 @@ public sealed class PackagingPolicyTests
     }
 
     [Fact]
+    public void MsiCustomActionsPreserveInstallRootWhenFolderPropertyEndsWithBackslash()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+        var source = File.ReadAllText(
+            Path.Combine(
+                Repository,
+                "packaging",
+                "Steward.Endpoint.Msi",
+                "Package.wxs"));
+        var document = XDocument.Parse(source);
+        var ns = document.Root?.Name.Namespace ?? XNamespace.None;
+        using var scratch = new TemporaryDirectory();
+        var installRoot = Path.Combine(scratch.Path, "Program Files", "Steward");
+        Directory.CreateDirectory(installRoot);
+        var config = Path.Combine(scratch.Path, "config.json");
+        var attestation = Path.Combine(scratch.Path, "attestation.json");
+        File.WriteAllText(config, "{}");
+        File.WriteAllText(attestation, "{}");
+        var msiInstallFolder = installRoot.TrimEnd(Path.DirectorySeparatorChar) +
+            Path.DirectorySeparatorChar;
+        var expectedInstallRoot = Path.TrimEndingDirectorySeparator(
+            Path.GetFullPath(Path.Combine(msiInstallFolder, ".")));
+
+        var actions = document.Descendants(ns + "CustomAction")
+            .Where(action => action.Attribute("FileRef")?.Value ==
+                "EndpointProvisionerExe")
+            .ToArray();
+
+        Assert.Equal(3, actions.Length);
+        foreach (var action in actions)
+        {
+            var command = action.Attribute("ExeCommand")?.Value ??
+                throw new InvalidDataException("CustomAction has no ExeCommand.");
+            Assert.Contains("--i \"[INSTALLFOLDER].\"", command, StringComparison.Ordinal);
+            Assert.DoesNotContain("--i \"[INSTALLFOLDER]\"", command, StringComparison.Ordinal);
+            command = command
+                .Replace("[ProductCode]", "11111111-1111-1111-1111-111111111111", StringComparison.Ordinal)
+                .Replace("[INSTALLFOLDER]", msiInstallFolder, StringComparison.Ordinal)
+                .Replace("[STEWARD_CONFIG]", config, StringComparison.Ordinal)
+                .Replace("[STEWARD_ATTESTATION]", attestation, StringComparison.Ordinal);
+            var argv = CommandLineToArgv("provisioner.exe " + command)
+                .Skip(1)
+                .ToArray();
+
+            var options = ProvisionerOptions.Parse(argv);
+
+            Assert.Equal(expectedInstallRoot, Path.TrimEndingDirectorySeparator(options.InstallRoot));
+            Assert.Equal(config, options.ConfigPath);
+            Assert.Equal(attestation, options.ArtifactAttestationPath);
+            Assert.Equal(
+                action.Attribute("Id")?.Value switch
+                {
+                    "RollbackStewardEndpointProvisioning" => MsiTransactionAction.Rollback,
+                    "CommitStewardEndpointProvisioning" => MsiTransactionAction.Commit,
+                    _ => MsiTransactionAction.Prepare
+                },
+                options.TransactionAction);
+        }
+    }
+
+    [Fact]
     public void ProvisionedEndpointTasksRestartAfterUnexpectedExit()
     {
         var source = File.ReadAllText(
@@ -506,5 +572,52 @@ public sealed class PackagingPolicyTests
             "C07BFE96AA88492C94EBCA1614885E3081AE2CB0944FE670000C23FB838DF68A",
             source,
             StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string[] CommandLineToArgv(string commandLine)
+    {
+        var pointer = CommandLineToArgvW(commandLine, out var count);
+        if (pointer == IntPtr.Zero)
+            throw new InvalidOperationException(
+                $"CommandLineToArgvW failed: {Marshal.GetLastPInvokeError()}");
+        try
+        {
+            var values = new string[count];
+            for (var index = 0; index < count; index++)
+            {
+                var valuePointer = Marshal.ReadIntPtr(
+                    pointer,
+                    index * IntPtr.Size);
+                values[index] = Marshal.PtrToStringUni(valuePointer) ??
+                    string.Empty;
+            }
+            return values;
+        }
+        finally
+        {
+            LocalFree(pointer);
+        }
+    }
+
+    [DllImport("shell32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern IntPtr CommandLineToArgvW(
+        string commandLine,
+        out int argumentCount);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr LocalFree(IntPtr handle);
+
+    private sealed class TemporaryDirectory : IDisposable
+    {
+        public string Path { get; } = System.IO.Path.Combine(
+            System.IO.Path.GetTempPath(),
+            "steward-packaging-tests",
+            Guid.NewGuid().ToString("N"));
+
+        public void Dispose()
+        {
+            if (Directory.Exists(Path))
+                Directory.Delete(Path, recursive: true);
+        }
     }
 }
