@@ -743,7 +743,8 @@ internal sealed record ProvisionerOptions(
                 index++;
                 continue;
             }
-            if (args[index] is
+            var name = NormalizeMsiOptionName(args[index]);
+            if (name is
                 "--prepare-msi-transaction" or
                 "--commit-msi-transaction" or
                 "--rollback-msi-transaction")
@@ -754,7 +755,7 @@ internal sealed record ProvisionerOptions(
                     throw new ArgumentException(
                         "MSI transaction identity is invalid or duplicated.");
                 transactionId = parsed;
-                transactionAction = args[index] switch
+                transactionAction = name switch
                 {
                     "--commit-msi-transaction" =>
                         MsiTransactionAction.Commit,
@@ -766,11 +767,11 @@ internal sealed record ProvisionerOptions(
                 continue;
             }
             if (index + 1 >= args.Length ||
-                args[index] is not (
+                name is not (
                     "--install-root" or "--config" or "--state-root" or
                     "--artifact-attestation" or "--maintenance-state-root" or
                     "--legacy-state-root") ||
-                !values.TryAdd(args[index], args[index + 1]))
+                !values.TryAdd(name, args[index + 1]))
                 throw new ArgumentException(
                     "Usage: --install-root PATH --config PATH --state-root PATH");
             index += 2;
@@ -778,22 +779,48 @@ internal sealed record ProvisionerOptions(
         if (verifyOnly && verifyInstalled)
             throw new ArgumentException(
                 "Runtime and installation verification modes are mutually exclusive.");
+        var programData = Environment.GetFolderPath(
+            Environment.SpecialFolder.CommonApplicationData);
+        var installRoot = values.TryGetValue("--install-root", out var configuredInstallRoot)
+            ? configuredInstallRoot
+            : AppContext.BaseDirectory;
+        var stateRoot = values.TryGetValue("--state-root", out var configuredStateRoot)
+            ? configuredStateRoot
+            : Path.Combine(programData, "Steward", "Endpoint");
+        var maintenanceStateRoot = values.TryGetValue(
+            "--maintenance-state-root",
+            out var configuredMaintenanceStateRoot)
+            ? configuredMaintenanceStateRoot
+            : Path.Combine(programData, "Steward", "Maintenance");
         return new(
-            FullDirectory(Required(values, "--install-root")),
+            FullDirectory(installRoot),
             FullFile(Required(values, "--config")),
-            Path.GetFullPath(Required(values, "--state-root")),
+            Path.GetFullPath(stateRoot),
             FullFile(Required(values, "--artifact-attestation")),
             verifyOnly,
             verifyInstalled,
-            Path.GetFullPath(Required(
-                values,
-                "--maintenance-state-root")),
+            Path.GetFullPath(maintenanceStateRoot),
             values.TryGetValue("--legacy-state-root", out var legacyStateRoot)
                 ? Path.GetFullPath(legacyStateRoot)
-                : null,
+                : Path.Combine(programData, "Steward", "install", "Endpoint"),
             transactionId,
             transactionAction);
     }
+
+    private static string NormalizeMsiOptionName(string name) =>
+        name switch
+        {
+            "--p" => "--prepare-msi-transaction",
+            "--c" => "--commit-msi-transaction",
+            "--r" => "--rollback-msi-transaction",
+            "--i" => "--install-root",
+            "--g" => "--config",
+            "--s" => "--state-root",
+            "--a" => "--artifact-attestation",
+            "--m" => "--maintenance-state-root",
+            "--l" => "--legacy-state-root",
+            _ => name
+        };
 
     private static string Required(
         IReadOnlyDictionary<string, string> values,

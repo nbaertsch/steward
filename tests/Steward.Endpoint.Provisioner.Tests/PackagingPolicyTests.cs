@@ -252,17 +252,23 @@ public sealed class PackagingPolicyTests
         Assert.Contains("Impersonate=\"no\"", source, StringComparison.Ordinal);
         Assert.Contains("STEWARD_CONFIG", source, StringComparison.Ordinal);
         Assert.Contains("STEWARD_ATTESTATION", source, StringComparison.Ordinal);
-        Assert.Contains("--prepare-msi-transaction", source, StringComparison.Ordinal);
-        Assert.Contains("--rollback-msi-transaction", source, StringComparison.Ordinal);
-        Assert.Contains("--commit-msi-transaction", source, StringComparison.Ordinal);
-        Assert.Equal(
-            3,
-            source.Split(
-                "--legacy-state-root",
-                StringSplitOptions.None).Length - 1);
+        Assert.Contains("--p", source, StringComparison.Ordinal);
+        Assert.Contains("--r", source, StringComparison.Ordinal);
+        Assert.Contains("--c", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("--l", source, StringComparison.Ordinal);
+        foreach (var line in source.Split('\n').Where(line => line.Contains("ExeCommand=", StringComparison.Ordinal)))
+            Assert.True(
+                line.Length <= 255,
+                $"MSI CustomAction Target line is too long: {line.Length} characters.");
+        var provisioner = File.ReadAllText(
+            Path.Combine(
+                Repository,
+                "src",
+                "Steward.Endpoint.Provisioner",
+                "Program.cs"));
         Assert.Contains(
-            "Steward\\install\\Endpoint",
-            source,
+            "Steward\", \"install\", \"Endpoint",
+            provisioner,
             StringComparison.Ordinal);
         Assert.Contains("After=\"StartServices\"", source, StringComparison.Ordinal);
         Assert.Equal(

@@ -57,21 +57,21 @@
     <CustomAction
         Id="RollbackStewardEndpointProvisioning"
         FileRef="EndpointProvisionerExe"
-        ExeCommand="--rollback-msi-transaction &quot;[ProductCode]&quot; --install-root &quot;[INSTALLFOLDER]&quot; --config &quot;[STEWARD_CONFIG]&quot; --state-root &quot;[CommonAppDataFolder]Steward\Endpoint&quot; --legacy-state-root &quot;[CommonAppDataFolder]Steward\install\Endpoint&quot; --maintenance-state-root &quot;[CommonAppDataFolder]Steward\Maintenance&quot; --artifact-attestation &quot;[STEWARD_ATTESTATION]&quot;"
+        ExeCommand="--r &quot;[ProductCode]&quot; --g &quot;[STEWARD_CONFIG]&quot; --a &quot;[STEWARD_ATTESTATION]&quot;"
         Execute="rollback"
         Impersonate="no"
         Return="check" />
     <CustomAction
         Id="ProvisionStewardEndpoint"
         FileRef="EndpointProvisionerExe"
-        ExeCommand="--prepare-msi-transaction &quot;[ProductCode]&quot; --install-root &quot;[INSTALLFOLDER]&quot; --config &quot;[STEWARD_CONFIG]&quot; --state-root &quot;[CommonAppDataFolder]Steward\Endpoint&quot; --legacy-state-root &quot;[CommonAppDataFolder]Steward\install\Endpoint&quot; --maintenance-state-root &quot;[CommonAppDataFolder]Steward\Maintenance&quot; --artifact-attestation &quot;[STEWARD_ATTESTATION]&quot;"
+        ExeCommand="--p &quot;[ProductCode]&quot; --g &quot;[STEWARD_CONFIG]&quot; --a &quot;[STEWARD_ATTESTATION]&quot;"
         Execute="deferred"
         Impersonate="no"
         Return="check" />
     <CustomAction
         Id="CommitStewardEndpointProvisioning"
         FileRef="EndpointProvisionerExe"
-        ExeCommand="--commit-msi-transaction &quot;[ProductCode]&quot; --install-root &quot;[INSTALLFOLDER]&quot; --config &quot;[STEWARD_CONFIG]&quot; --state-root &quot;[CommonAppDataFolder]Steward\Endpoint&quot; --legacy-state-root &quot;[CommonAppDataFolder]Steward\install\Endpoint&quot; --maintenance-state-root &quot;[CommonAppDataFolder]Steward\Maintenance&quot; --artifact-attestation &quot;[STEWARD_ATTESTATION]&quot;"
+        ExeCommand="--c &quot;[ProductCode]&quot; --g &quot;[STEWARD_CONFIG]&quot; --a &quot;[STEWARD_ATTESTATION]&quot;"
         Execute="commit"
         Impersonate="no"
         Return="check" />
