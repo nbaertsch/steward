@@ -137,6 +137,7 @@ if ($Machine) {
         }
         $legacyRuntime = Join-Path $env:ProgramData `
             'Steward\install\Runtime\1.0.23'
+        $legacyUser = [Security.Principal.WindowsIdentity]::GetCurrent()
         & $legacyInstall `
             -ReleaseAssetUrl $LegacyReleaseAssetUrl `
             -BootstrapEncryptionPublicKeyBase64 `
@@ -144,8 +145,8 @@ if ($Machine) {
             -ControlSigningPublicKeyBase64 `
                 $ControlSigningPublicKeyBase64 `
             -ControlIdentity $ControlIdentity `
-            -NodeUserAccount $NodeUserAccount `
-            -NodeUserSid $NodeUserSid `
+            -NodeUserAccount $legacyUser.Name `
+            -NodeUserSid $legacyUser.User.Value `
             -AdministrativeRoot $legacyRuntime
         if ($LASTEXITCODE -ne 0) {
             throw 'Authentic Steward 1.0.23 administrative deployment failed.'

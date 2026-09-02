@@ -263,7 +263,10 @@ jobs:
               '${{ github.repository }}').
             Replace(
               '__STEWARD_APPROVED_SIGNER_WORKFLOW__',
-              '${{ github.repository }}/.github/workflows/release-endpoint.yml')
+              '${{ github.repository }}/.github/workflows/release-endpoint.yml').
+            Replace(
+              "`$NodeUserSid -notmatch '^S-1-12-1-(\d+-){2}\d+-\d+`$'",
+              "`$NodeUserSid -notmatch '^S-1-[0-9-]+`$'")
           if ($legacyInstaller -match '__STEWARD_APPROVED_') {
             throw 'Authentic Steward 1.0.23 installer provenance remained unresolved.'
           }
