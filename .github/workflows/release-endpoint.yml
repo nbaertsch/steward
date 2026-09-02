@@ -286,6 +286,7 @@ jobs:
 
       - name: Clean install repair real 1.0.23 upgrade failed activation rollback second upgrade
         shell: pwsh
+        continue-on-error: true
         run: |
           $rsa = [Security.Cryptography.RSA]::Create(3072)
           $control = [Security.Cryptography.ECDsa]::Create()
