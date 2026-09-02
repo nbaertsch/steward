@@ -3695,16 +3695,13 @@ internal sealed class PowerShellTaskRegistrar : IEndpointTaskRegistrar
             $b=Get-ScheduledTask -TaskPath '\Steward\' -TaskName 'RdpDvcEndpoint-{{identity.HostId:N}}' -ErrorAction SilentlyContinue
             $h=Get-ScheduledTask -TaskPath '\Steward\' -TaskName 'EndpointInstallerHandoff-{{identity.HostId:N}}' -ErrorAction SilentlyContinue
             $m=Get-CimInstance Win32_Service -Filter "Name='StewardMaintenance'" -ErrorAction SilentlyContinue
-            $aUserSid=if($null-ne$a-and![string]::IsNullOrWhiteSpace($a.Principal.UserId)){
-              if($a.Principal.UserId-like'S-1-*'){$a.Principal.UserId}else{
-                try{([Security.Principal.NTAccount]$a.Principal.UserId).Translate([Security.Principal.SecurityIdentifier]).Value}catch{$null}
-              }
-            }else{$null}
-            $bUserSid=if($null-ne$b-and![string]::IsNullOrWhiteSpace($b.Principal.UserId)){
-              if($b.Principal.UserId-like'S-1-*'){$b.Principal.UserId}else{
-                try{([Security.Principal.NTAccount]$b.Principal.UserId).Translate([Security.Principal.SecurityIdentifier]).Value}catch{$null}
-              }
-            }else{$null}
+            function Resolve-TaskUserSid([string]$value) {
+              if([string]::IsNullOrWhiteSpace($value)){return $null}
+              if($value-like'S-1-*'){return $value}
+              try{return ([Security.Principal.NTAccount]$value).Translate([Security.Principal.SecurityIdentifier]).Value}catch{return $null}
+            }
+            $aUserSid=if($null-ne$a){Resolve-TaskUserSid $a.Principal.UserId}else{$null}
+            $bUserSid=if($null-ne$b){Resolve-TaskUserSid $b.Principal.UserId}else{$null}
             $canonical=@($a,$b).Where({
               if($null-eq$_-or$_.Triggers.Count-ne2-or
                 $null-eq$_.Settings-or
@@ -3795,11 +3792,11 @@ internal sealed class PowerShellTaskRegistrar : IEndpointTaskRegistrar
               $b.Principal.Id-eq'Author'-and
               $aLogon.Count-eq1-and$bLogon.Count-eq1-and
               $aReconnect.Count-eq1-and$bReconnect.Count-eq1-and
-              $aLogon[0].UserId-eq'{{Escape(userAccount)}}'-and
-              $bLogon[0].UserId-eq'{{Escape(userAccount)}}'-and
+              (Resolve-TaskUserSid $aLogon[0].UserId)-eq'{{Escape(userSid)}}'-and
+              (Resolve-TaskUserSid $bLogon[0].UserId)-eq'{{Escape(userSid)}}'-and
               $aLogon[0].Enabled-and$bLogon[0].Enabled-and
-              $aReconnect[0].UserId-eq'{{Escape(userAccount)}}'-and
-              $bReconnect[0].UserId-eq'{{Escape(userAccount)}}'-and
+              (Resolve-TaskUserSid $aReconnect[0].UserId)-eq'{{Escape(userSid)}}'-and
+              (Resolve-TaskUserSid $bReconnect[0].UserId)-eq'{{Escape(userSid)}}'-and
               $aReconnect[0].StateChange-eq3-and
               $bReconnect[0].StateChange-eq3-and
               $aReconnect[0].Enabled-and$bReconnect[0].Enabled-and
