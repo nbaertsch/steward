@@ -65,6 +65,7 @@ public sealed class PackagingPolicyTests
         Assert.Contains("RelatedProducts", script, StringComparison.Ordinal);
         Assert.Contains("STEWARD_ENDPOINT_MSI_HEALTHY_NOOP", script, StringComparison.Ordinal);
         Assert.Contains("A different Steward MSI with the same version is installed", script, StringComparison.Ordinal);
+        Assert.Contains("last-provisioner-failure.log", script, StringComparison.Ordinal);
         Assert.True(
             script.IndexOf("attestation verify", StringComparison.Ordinal) <
             script.IndexOf("msiexec.exe", StringComparison.Ordinal));
@@ -126,7 +127,7 @@ public sealed class PackagingPolicyTests
                  })
             Assert.Contains(excluded, script, StringComparison.Ordinal);
         Assert.Contains("GITHUB_ACTIONS", script, StringComparison.Ordinal);
-        Assert.Contains("$Version -ne '1.0.34'", script, StringComparison.Ordinal);
+        Assert.Contains("$Version -ne '1.0.35'", script, StringComparison.Ordinal);
         Assert.Contains("SourceRepository", script, StringComparison.Ordinal);
         Assert.Contains("SourceCommit", script, StringComparison.Ordinal);
         Assert.Contains("SignerWorkflow", script, StringComparison.Ordinal);
@@ -188,7 +189,7 @@ public sealed class PackagingPolicyTests
         Assert.Contains("--source-digest '${{ github.sha }}'", workflow, StringComparison.Ordinal);
         Assert.Contains("refs/heads/main", workflow, StringComparison.Ordinal);
         Assert.Contains(
-            "must be exactly Steward endpoint 1.0.34",
+            "must be exactly Steward endpoint 1.0.35",
             workflow,
             StringComparison.Ordinal);
         Assert.Contains(
