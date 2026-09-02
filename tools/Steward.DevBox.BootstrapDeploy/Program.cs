@@ -2625,8 +2625,11 @@ static string SafeBootstrapLogDiagnostic(string log)
                 StringComparison.Ordinal) ||
             line.Contains(
                 "STEWARD_RDP_DVC_SYSTEM_HOST_EXIT:",
+                StringComparison.Ordinal) ||
+            line.Contains(
+                "Steward endpoint provisioner failure:",
                 StringComparison.Ordinal))
-        .TakeLast(2)
+        .TakeLast(4)
         .Concat(lines.Where(line =>
             !line.Contains(
                 "Running command",

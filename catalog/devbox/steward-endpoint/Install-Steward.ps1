@@ -409,6 +409,7 @@ if ($LASTEXITCODE -ne 0) {
     throw 'Steward endpoint MSI committed without a healthy provisioner state.'
 }
 Write-Output 'STEWARD_ENDPOINT_MSI_INSTALLED'} catch {
+    $safeFailureText = $null
     try {
         $failureLogs = @(Get-ChildItem -LiteralPath $downloadRoot `
             -Recurse -Force -File -Filter 'provisioner-failure.log' `
@@ -416,16 +417,27 @@ Write-Output 'STEWARD_ENDPOINT_MSI_INSTALLED'} catch {
         if ($failureLogs.Count -gt 0) {
             $persistentFailure = Join-Path $stewardInstallRoot `
                 'last-provisioner-failure.log'
-            Get-Content -LiteralPath $failureLogs[0].FullName -Raw `
-                -ErrorAction Stop | Set-Content `
+            $failureText = Get-Content -LiteralPath $failureLogs[0].FullName `
+                -Raw -ErrorAction Stop
+            $failureText | Set-Content `
                 -LiteralPath $persistentFailure -Encoding utf8
+            $safeFailureText = $failureText -replace `
+                '[A-Za-z0-9+/=_-]{48,}', '<redacted-token>'
+            if ($safeFailureText.Length -gt 4000) {
+                $safeFailureText = $safeFailureText.Substring(0, 4000)
+            }
         }
     } catch {
+    }
+    if (-not [string]::IsNullOrWhiteSpace($safeFailureText)) {
+        Write-Error ("Steward endpoint provisioner failure: " +
+            $safeFailureText) -ErrorAction Continue
     }
     Write-Error (
         "Steward endpoint bootstrap failed at line " +
         "$($_.InvocationInfo.ScriptLineNumber):" +
-        "$($_.Exception.GetType().Name):$($_.Exception.Message)")
+        "$($_.Exception.GetType().Name):$($_.Exception.Message)") `
+        -ErrorAction Continue
     throw
 } finally {
     Remove-Item -LiteralPath $downloadRoot -Recurse -Force `

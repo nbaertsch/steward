@@ -66,6 +66,16 @@ public sealed class PackagingPolicyTests
         Assert.Contains("STEWARD_ENDPOINT_MSI_HEALTHY_NOOP", script, StringComparison.Ordinal);
         Assert.Contains("A different Steward MSI with the same version is installed", script, StringComparison.Ordinal);
         Assert.Contains("last-provisioner-failure.log", script, StringComparison.Ordinal);
+        Assert.Contains("Steward endpoint provisioner failure", script, StringComparison.Ordinal);
+        Assert.Contains("<redacted-token>", script, StringComparison.Ordinal);
+        Assert.True(
+            script.Split("-ErrorAction Continue", StringSplitOptions.None).Length - 1 >= 2);
+        Assert.Contains("last-provisioner-invocation.json", File.ReadAllText(
+            Path.Combine(
+                Repository,
+                "src",
+                "Steward.Endpoint.Provisioner",
+                "Program.cs")), StringComparison.Ordinal);
         Assert.True(
             script.IndexOf("attestation verify", StringComparison.Ordinal) <
             script.IndexOf("msiexec.exe", StringComparison.Ordinal));
@@ -127,7 +137,7 @@ public sealed class PackagingPolicyTests
                  })
             Assert.Contains(excluded, script, StringComparison.Ordinal);
         Assert.Contains("GITHUB_ACTIONS", script, StringComparison.Ordinal);
-        Assert.Contains("$Version -ne '1.0.35'", script, StringComparison.Ordinal);
+        Assert.Contains("$Version -ne '1.0.36'", script, StringComparison.Ordinal);
         Assert.Contains("SourceRepository", script, StringComparison.Ordinal);
         Assert.Contains("SourceCommit", script, StringComparison.Ordinal);
         Assert.Contains("SignerWorkflow", script, StringComparison.Ordinal);
@@ -189,7 +199,7 @@ public sealed class PackagingPolicyTests
         Assert.Contains("--source-digest '${{ github.sha }}'", workflow, StringComparison.Ordinal);
         Assert.Contains("refs/heads/main", workflow, StringComparison.Ordinal);
         Assert.Contains(
-            "must be exactly Steward endpoint 1.0.35",
+            "must be exactly Steward endpoint 1.0.36",
             workflow,
             StringComparison.Ordinal);
         Assert.Contains(

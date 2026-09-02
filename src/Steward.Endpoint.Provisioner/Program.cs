@@ -16,6 +16,7 @@ internal static class Program
 {
     public static int Main(string[] args)
     {
+        WriteGlobalDiagnostic("start", args, null);
         try
         {
             if (args.Contains(
@@ -80,7 +81,45 @@ internal static class Program
                 $"Steward endpoint provisioning failed: " +
                 $"{exception.GetType().Name}: {exception.Message}");
             WriteFailureDiagnostic(args, exception);
+            WriteGlobalDiagnostic("failure", args, exception);
             return 1;
+        }
+    }
+
+    private static void WriteGlobalDiagnostic(
+        string phase,
+        string[] args,
+        Exception? exception)
+    {
+        try
+        {
+            var root = Path.Combine(
+                Environment.GetFolderPath(
+                    Environment.SpecialFolder.CommonApplicationData),
+                "Steward",
+                "install");
+            Directory.CreateDirectory(root);
+            var text = JsonSerializer.Serialize(
+                new
+                {
+                    phase,
+                    atUtc = DateTimeOffset.UtcNow,
+                    processPath = Environment.ProcessPath,
+                    baseDirectory = AppContext.BaseDirectory,
+                    workingDirectory = Environment.CurrentDirectory,
+                    args,
+                    exception = exception?.ToString()
+                },
+                new JsonSerializerOptions(JsonSerializerDefaults.Web)
+                {
+                    WriteIndented = true
+                });
+            File.WriteAllText(
+                Path.Combine(root, "last-provisioner-invocation.json"),
+                text);
+        }
+        catch
+        {
         }
     }
 
