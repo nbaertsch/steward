@@ -3056,8 +3056,8 @@ internal sealed class EndpointProvisioner(
             manifest.Files.Count is 0 or > 512)
             throw new InvalidDataException(
                 "Endpoint payload manifest is invalid.");
-        var root = Path.GetFullPath(installRoot) +
-            Path.DirectorySeparatorChar;
+        var root = EnsureTrailingDirectorySeparator(
+            Path.GetFullPath(installRoot));
         var expected = new HashSet<string>(
             StringComparer.OrdinalIgnoreCase);
         foreach (var file in manifest.Files)
@@ -3111,6 +3111,12 @@ internal sealed class EndpointProvisioner(
                 $"Extra=[{string.Join(",", extra)}].");
         }
     }
+
+    private static string EnsureTrailingDirectorySeparator(string path) =>
+        path.EndsWith(Path.DirectorySeparatorChar) ||
+        path.EndsWith(Path.AltDirectorySeparatorChar)
+            ? path
+            : path + Path.DirectorySeparatorChar;
 
     private static void ValidateControlPublicKey(byte[] value)
     {
