@@ -100,18 +100,16 @@ jobs:
       - name: Hosted deterministic dependency tests
         shell: pwsh
         run: |
-          dotnet test Steward.slnx `
-            --configuration Release `
-            --no-build `
-            --no-restore `
-            --verbosity minimal `
-            -m:1 `
-            --filter "FullyQualifiedName!~ConPtyTerminalTests&FullyQualifiedName!~WindowsProcessExecutorTests&FullyQualifiedName!~HandleKeeperServiceTests"
+          dotnet test tests\Steward.DevBox.Tests\Steward.DevBox.Tests.csproj --configuration Release --no-build --no-restore --verbosity minimal -m:1
+          dotnet test tests\Steward.Evals.Tests\Steward.Evals.Tests.csproj --configuration Release --no-build --no-restore --verbosity minimal -m:1
+          dotnet test tests\Steward.ConnectionHost.Windows.Tests\Steward.ConnectionHost.Windows.Tests.csproj --configuration Release --no-build --no-restore --verbosity minimal -m:1
+          dotnet test tests\Steward.Orchestration.Tests\Steward.Orchestration.Tests.csproj --configuration Release --no-build --no-restore --verbosity minimal -m:1 --filter "FullyQualifiedName~ControlProviderBootstrapCompositionTests"
 
       - name: Hosted Windows timing probe
         shell: pwsh
         continue-on-error: true
         run: |
+          dotnet test tests\Steward.Orchestration.Tests\Steward.Orchestration.Tests.csproj --configuration Release --no-build --no-restore --verbosity minimal -m:1
           dotnet test tests\Steward.Terminal.Windows.Tests\Steward.Terminal.Windows.Tests.csproj --configuration Release --no-build --no-restore --verbosity minimal -m:1
           dotnet test tests\Steward.Windows.Tests\Steward.Windows.Tests.csproj --configuration Release --no-build --no-restore --verbosity minimal -m:1
 
