@@ -307,8 +307,20 @@ public sealed class WindowsProcessExecutorTests : IDisposable
         IExecutionHandle handle;
         using (var first = new WindowsProcessExecutor(journal, keeper, nodeIncarnationId, "boot"))
             handle = await first.StartAsync(Request(
-            Path.Combine(Environment.SystemDirectory, "ping.exe"),
-            ["127.0.0.1", "-n", "120"]), default);
+            Path.Combine(
+                Environment.SystemDirectory,
+                "WindowsPowerShell",
+                "v1.0",
+                "powershell.exe"),
+            [
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                "Start-Sleep -Seconds 120"
+            ]), default);
         Assert.False(keeper.SurvivesClientRestart);
         using var replacement = new WindowsProcessExecutor(journal, keeper, nodeIncarnationId, "boot");
         var recovered = await replacement.RecoverAsync(handle.AttemptId, handle.Generation, "boot", default);
