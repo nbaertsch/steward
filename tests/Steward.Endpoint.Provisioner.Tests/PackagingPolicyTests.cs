@@ -391,7 +391,9 @@ public sealed class PackagingPolicyTests
 
         foreach (var gate in new[]
                  {
-                     "dotnet test Steward.slnx",
+                     "Hosted deterministic dependency tests",
+                     "Hosted Windows timing probe",
+                     "ControlProviderBootstrapCompositionTests",
                      "Test-StewardEndpointMsi.ps1",
                      "dependency vulnerability",
                      "secret scan",

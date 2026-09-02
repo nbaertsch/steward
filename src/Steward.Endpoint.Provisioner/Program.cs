@@ -3078,14 +3078,21 @@ internal sealed class EndpointProvisioner(
                     "Endpoint payload manifest contains duplicate entries.");
             var path = Path.GetFullPath(
                 Path.Combine(installRoot, normalized));
-            if (!path.StartsWith(root, StringComparison.OrdinalIgnoreCase) ||
-                !File.Exists(path) ||
-                new FileInfo(path).Length != file.Length ||
-                !CryptographicOperations.FixedTimeEquals(
+            if (!path.StartsWith(root, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException(
+                    $"Endpoint payload path escapes install root: {file.RelativePath}.");
+            if (!File.Exists(path))
+                throw new InvalidDataException(
+                    $"Endpoint payload file is missing: {file.RelativePath}.");
+            var info = new FileInfo(path);
+            if (info.Length != file.Length)
+                throw new InvalidDataException(
+                    $"Endpoint payload length mismatch: {file.RelativePath}; expected {file.Length}, actual {info.Length}.");
+            if (!CryptographicOperations.FixedTimeEquals(
                     Convert.FromHexString(file.Sha256),
                     SHA256.HashData(File.ReadAllBytes(path))))
                 throw new InvalidDataException(
-                    "Endpoint payload validation failed.");
+                    $"Endpoint payload hash mismatch: {file.RelativePath}.");
         }
         var actual = files.GetFiles(installRoot)
             .Select(path => Path.GetRelativePath(installRoot, path))
@@ -3095,8 +3102,14 @@ internal sealed class EndpointProvisioner(
                 StringComparison.OrdinalIgnoreCase))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
         if (!actual.SetEquals(expected))
+        {
+            var missing = expected.Except(actual).Take(10);
+            var extra = actual.Except(expected).Take(10);
             throw new InvalidDataException(
-                "Endpoint payload does not exactly match its manifest.");
+                "Endpoint payload does not exactly match its manifest. " +
+                $"Missing=[{string.Join(",", missing)}]; " +
+                $"Extra=[{string.Join(",", extra)}].");
+        }
     }
 
     private static void ValidateControlPublicKey(byte[] value)
