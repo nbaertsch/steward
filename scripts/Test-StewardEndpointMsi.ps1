@@ -174,9 +174,14 @@ if ($Machine) {
             [Security.Principal.WindowsBuiltInRole]::Administrator)) {
         throw 'Signed machine install tests require elevation.'
     }
-    $machineRoot = Join-Path $catalog (
-        '.machine-test-' + [guid]::NewGuid().ToString('N'))
+    $machineRoot = Join-Path $env:ProgramData (
+        'Steward\EndpointTest\' + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $machineRoot -Force | Out-Null
+    & icacls.exe $machineRoot /inheritance:r /grant:r `
+        '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Machine install test staging ACL failed.'
+    }
     try {
         $bootstrap = Join-Path $machineRoot 'bootstrap-envelope.spki'
         $control = Join-Path $machineRoot 'control-signing.spki'
