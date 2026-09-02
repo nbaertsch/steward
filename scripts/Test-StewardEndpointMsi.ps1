@@ -224,8 +224,24 @@ if ($Machine) {
                 -Wait -PassThru -NoNewWindow
             if ($process.ExitCode -notin 0, 1641, 3010) {
                 if (Test-Path -LiteralPath $log) {
-                    Get-Content -LiteralPath $log -Tail 200 |
-                        Write-Error
+                    $lines = @(Get-Content -LiteralPath $log)
+                    $failureIndexes = @(for ($index = 0; $index -lt $lines.Count; $index++) {
+                        if ($lines[$index] -match 'Return value 3|Error [0-9]{4}|Steward endpoint provisioning failed') {
+                            $index
+                        }
+                    })
+                    if ($failureIndexes.Count -eq 0) {
+                        $lines | Select-Object -Last 300 | Write-Error
+                    } else {
+                        foreach ($failureIndex in $failureIndexes) {
+                            $start = [Math]::Max(0, $failureIndex - 80)
+                            $count = [Math]::Min(
+                                $lines.Count - $start,
+                                180)
+                            $lines[$start..($start + $count - 1)] |
+                                Write-Error
+                        }
+                    }
                 }
                 throw "Per-machine install attempt $attempt failed with exit code $($process.ExitCode)."
             }
