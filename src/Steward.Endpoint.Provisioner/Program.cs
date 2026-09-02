@@ -79,7 +79,39 @@ internal static class Program
             Console.Error.WriteLine(
                 $"Steward endpoint provisioning failed: " +
                 $"{exception.GetType().Name}: {exception.Message}");
+            WriteFailureDiagnostic(args, exception);
             return 1;
+        }
+    }
+
+    private static void WriteFailureDiagnostic(
+        string[] args,
+        Exception exception)
+    {
+        try
+        {
+            for (var index = 0; index + 1 < args.Length; index++)
+            {
+                var name = args[index] switch
+                {
+                    "--g" => "--config",
+                    _ => args[index]
+                };
+                if (name != "--config")
+                    continue;
+                var directory = Path.GetDirectoryName(
+                    Path.GetFullPath(args[index + 1]));
+                if (string.IsNullOrWhiteSpace(directory) ||
+                    !Directory.Exists(directory))
+                    return;
+                File.WriteAllText(
+                    Path.Combine(directory, "provisioner-failure.log"),
+                    exception.ToString());
+                return;
+            }
+        }
+        catch
+        {
         }
     }
 }

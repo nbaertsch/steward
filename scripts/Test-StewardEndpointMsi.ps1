@@ -228,6 +228,11 @@ if ($Machine) {
             $process = Start-Process msiexec.exe -ArgumentList $arguments `
                 -Wait -PassThru -NoNewWindow
             if ($process.ExitCode -notin 0, 1641, 3010) {
+                $failure = Join-Path $machineRoot 'provisioner-failure.log'
+                if (Test-Path -LiteralPath $failure) {
+                    Write-Host '--- Steward.Endpoint.Provisioner failure ---'
+                    Get-Content -LiteralPath $failure | Write-Host
+                }
                 if (Test-Path -LiteralPath $log) {
                     $lines = @(Get-Content -LiteralPath $log)
                     $failureIndexes = @(for ($index = 0; $index -lt $lines.Count; $index++) {
