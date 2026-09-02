@@ -2045,7 +2045,9 @@ internal sealed class EndpointProvisioner(
             throw new ArgumentException(
                 "MSI rollback failure code is invalid.",
                 nameof(failureCode));
-        var transaction = LoadMsiTransaction(options);
+        var transaction = TryLoadMsiTransaction(options);
+        if (transaction is null)
+            return;
         if (transaction.State == EndpointProvisionerTransactionState.Committed)
             throw new InvalidOperationException(
                 "A committed MSI transaction cannot be rolled back.");
