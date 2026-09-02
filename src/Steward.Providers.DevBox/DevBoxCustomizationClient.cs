@@ -211,6 +211,25 @@ public sealed class DevBoxCustomizationClient
             requireTaskResults: true);
     }
 
+    public async Task DeleteAsync(
+        string project,
+        string user,
+        string devBox,
+        string group,
+        CancellationToken cancellationToken)
+    {
+        ValidateIdentifier(project, nameof(project));
+        ValidateUser(user);
+        ValidateIdentifier(devBox, nameof(devBox));
+        ValidateIdentifier(group, nameof(group));
+        var response = await _transport.SendAsync(
+            RequestMethod.Delete,
+            GroupUri(project, user, devBox, group),
+            null,
+            cancellationToken).ConfigureAwait(false);
+        EnsureSuccess(response);
+    }
+
     public async Task<IReadOnlyList<DevBoxCustomizationGroupSummary>> ListAsync(
         string project,
         string user,
