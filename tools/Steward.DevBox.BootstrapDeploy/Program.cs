@@ -641,6 +641,72 @@ if (args is
     Console.WriteLine($"INSTALLED_INTRINSIC {intrinsicBoxName}: {group.Name}");
     return 0;
 }
+if (args is
+    [
+        "--install-winget-package",
+        var wingetEndpointText,
+        var wingetProjectName,
+        var wingetBoxName,
+        var wingetPackage,
+        var wingetVersion
+    ])
+{
+    var endpoint = new Uri(wingetEndpointText, UriKind.Absolute);
+    var identity = new DevBoxIdentityService(new DevBoxIdentityStore());
+    var sdk = new DevBoxesClient(
+        endpoint,
+        new DevBoxSilentTokenCredential(identity));
+    var customizations = new DevBoxCustomizationClient(
+        endpoint,
+        new AzurePipelineDevBoxCustomizationTransport(sdk.Pipeline));
+    var groupName = "steward-winget-" + Guid.NewGuid().ToString("N")[..8];
+    var parameters = new Dictionary<string, string>
+    {
+        ["package"] = wingetPackage
+    };
+    if (wingetVersion != "-")
+        parameters["version"] = wingetVersion;
+    var group = await customizations.ApplyAsync(
+        wingetProjectName,
+        "me",
+        wingetBoxName,
+        groupName,
+        [
+            new(
+                "~/winget",
+                "Install approved package with Dev Box intrinsic Winget",
+                parameters,
+                DevBoxCustomizationExecutionAccount.System,
+                3_600)
+        ],
+        CancellationToken.None);
+    var deadline = DateTimeOffset.UtcNow.AddMinutes(30);
+    while (!Terminal(group.Status))
+    {
+        if (DateTimeOffset.UtcNow >= deadline)
+            throw new TimeoutException("Winget package installation did not complete.");
+        await Task.Delay(TimeSpan.FromSeconds(15));
+        group = await customizations.GetAsync(
+            wingetProjectName,
+            "me",
+            wingetBoxName,
+            groupName,
+            CancellationToken.None);
+    }
+    if (group.Tasks.Count != 0)
+    {
+        foreach (var task in group.Tasks)
+        {
+            var log = await customizations.GetTaskLogAsync(
+                task.LogUri,
+                CancellationToken.None);
+            Console.WriteLine(log);
+        }
+    }
+    Console.WriteLine($"WINGET_INSTALL {wingetBoxName}: {group.Status}");
+    return Succeeded(group.Status) ? 0 : 1;
+}
+
 if (args.Length == 5 &&
     (args[0] == "--run-diagnostic-powershell" ||
      args[0] == "--run-user-diagnostic-powershell"))

@@ -3217,13 +3217,23 @@ internal sealed class EndpointProvisioner(
                 user))
             throw new InvalidDataException(
                 "Endpoint maintenance state is not healthy.");
-        if (!tasks.IsHealthy(
-            options.InstallRoot,
-            options.StateRoot,
-            identity,
-            config.ControlIdentity,
-            user.Account,
-            user.Sid))
+        var tasksHealthy = false;
+        for (var attempt = 0; attempt < 10; attempt++)
+        {
+            if (tasks.IsHealthy(
+                options.InstallRoot,
+                options.StateRoot,
+                identity,
+                config.ControlIdentity,
+                user.Account,
+                user.Sid))
+            {
+                tasksHealthy = true;
+                break;
+            }
+            Thread.Sleep(TimeSpan.FromSeconds(1));
+        }
+        if (!tasksHealthy)
             throw new InvalidDataException(
                 "Endpoint scheduled tasks are not healthy.");
         ValidateReceipt(
