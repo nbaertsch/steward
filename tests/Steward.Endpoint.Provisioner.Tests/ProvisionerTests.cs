@@ -29,6 +29,75 @@ public sealed class ProvisionerTests : IDisposable
     }
 
     [Fact]
+    public void Rollback_option_parse_does_not_require_staged_config_files()
+    {
+        Directory.CreateDirectory(root);
+        var install = Path.Combine(root, "install");
+        Directory.CreateDirectory(install);
+        var transactionId = Guid.NewGuid();
+
+        var options = ProvisionerOptions.Parse(
+            [
+                "--r",
+                transactionId.ToString("B"),
+                "--i",
+                install,
+                "--g",
+                Path.Combine(root, "missing-config.json"),
+                "--a",
+                Path.Combine(root, "missing-attestation.json")
+            ]);
+
+        Assert.Equal(MsiTransactionAction.Rollback, options.TransactionAction);
+        Assert.Equal(transactionId, options.MsiTransactionId);
+        Assert.Equal(Path.GetFullPath(install), options.InstallRoot);
+    }
+
+    [Fact]
+    public void Prepare_option_parse_requires_staged_config_file()
+    {
+        Directory.CreateDirectory(root);
+        var install = Path.Combine(root, "install");
+        Directory.CreateDirectory(install);
+        var attestation = Path.Combine(root, "attestation.json");
+        File.WriteAllText(attestation, "{}");
+
+        Assert.Throws<ArgumentException>(() => ProvisionerOptions.Parse(
+            [
+                "--p",
+                Guid.NewGuid().ToString("B"),
+                "--i",
+                install,
+                "--g",
+                Path.Combine(root, "missing-config.json"),
+                "--a",
+                attestation
+            ]));
+    }
+
+    [Fact]
+    public void Prepare_option_parse_requires_staged_attestation_file()
+    {
+        Directory.CreateDirectory(root);
+        var install = Path.Combine(root, "install");
+        Directory.CreateDirectory(install);
+        var config = Path.Combine(root, "config.json");
+        File.WriteAllText(config, "{}");
+
+        Assert.Throws<ArgumentException>(() => ProvisionerOptions.Parse(
+            [
+                "--p",
+                Guid.NewGuid().ToString("B"),
+                "--i",
+                install,
+                "--g",
+                config,
+                "--a",
+                Path.Combine(root, "missing-attestation.json")
+            ]));
+    }
+
+    [Fact]
     public void Physical_atomic_write_flushes_file_and_reports_parent_directory_durability()
     {
         Directory.CreateDirectory(root);

@@ -117,11 +117,27 @@ internal static class Program
             File.WriteAllText(
                 Path.Combine(root, "last-provisioner-invocation.json"),
                 text);
+            File.WriteAllText(
+                Path.Combine(root, $"last-provisioner-{ActionKey(args)}.json"),
+                text);
         }
         catch
         {
         }
     }
+
+    private static string ActionKey(IReadOnlyList<string> args) =>
+        args.Count == 0
+            ? "unknown"
+            : args[0] switch
+            {
+                "--p" or "--prepare-msi-transaction" => "prepare",
+                "--c" or "--commit-msi-transaction" => "commit",
+                "--r" or "--rollback-msi-transaction" => "rollback",
+                "--verify-installed" => "verify-installed",
+                "--verify-only" => "verify-runtime",
+                _ => "unknown"
+            };
 
     private static void WriteFailureDiagnostic(
         string[] args,
@@ -863,11 +879,16 @@ internal sealed record ProvisionerOptions(
             out var configuredMaintenanceStateRoot)
             ? configuredMaintenanceStateRoot
             : Path.Combine(programData, "Steward", "Maintenance");
+        var configPath = Required(values, "--config");
+        var artifactAttestationPath = Required(values, "--artifact-attestation");
+        var rollback = transactionAction == MsiTransactionAction.Rollback;
         return new(
             FullDirectory(installRoot),
-            FullFile(Required(values, "--config")),
+            rollback ? Path.GetFullPath(configPath) : FullFile(configPath),
             Path.GetFullPath(stateRoot),
-            FullFile(Required(values, "--artifact-attestation")),
+            rollback
+                ? Path.GetFullPath(artifactAttestationPath)
+                : FullFile(artifactAttestationPath),
             verifyOnly,
             verifyInstalled,
             Path.GetFullPath(maintenanceStateRoot),

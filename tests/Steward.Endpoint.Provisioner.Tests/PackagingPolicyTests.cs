@@ -70,12 +70,14 @@ public sealed class PackagingPolicyTests
         Assert.Contains("<redacted-token>", script, StringComparison.Ordinal);
         Assert.True(
             script.Split("-ErrorAction Continue", StringSplitOptions.None).Length - 1 >= 2);
-        Assert.Contains("last-provisioner-invocation.json", File.ReadAllText(
+        var provisioner = File.ReadAllText(
             Path.Combine(
                 Repository,
                 "src",
                 "Steward.Endpoint.Provisioner",
-                "Program.cs")), StringComparison.Ordinal);
+                "Program.cs"));
+        Assert.Contains("last-provisioner-invocation.json", provisioner, StringComparison.Ordinal);
+        Assert.Contains("$\"last-provisioner-{ActionKey(args)}.json\"", provisioner, StringComparison.Ordinal);
         Assert.True(
             script.IndexOf("attestation verify", StringComparison.Ordinal) <
             script.IndexOf("msiexec.exe", StringComparison.Ordinal));
@@ -137,7 +139,7 @@ public sealed class PackagingPolicyTests
                  })
             Assert.Contains(excluded, script, StringComparison.Ordinal);
         Assert.Contains("GITHUB_ACTIONS", script, StringComparison.Ordinal);
-        Assert.Contains("$Version -ne '1.0.36'", script, StringComparison.Ordinal);
+        Assert.Contains("$Version -ne '1.0.37'", script, StringComparison.Ordinal);
         Assert.Contains("SourceRepository", script, StringComparison.Ordinal);
         Assert.Contains("SourceCommit", script, StringComparison.Ordinal);
         Assert.Contains("SignerWorkflow", script, StringComparison.Ordinal);
@@ -199,7 +201,7 @@ public sealed class PackagingPolicyTests
         Assert.Contains("--source-digest '${{ github.sha }}'", workflow, StringComparison.Ordinal);
         Assert.Contains("refs/heads/main", workflow, StringComparison.Ordinal);
         Assert.Contains(
-            "must be exactly Steward endpoint 1.0.36",
+            "must be exactly Steward endpoint 1.0.37",
             workflow,
             StringComparison.Ordinal);
         Assert.Contains(
