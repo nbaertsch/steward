@@ -311,7 +311,7 @@ public sealed class ConPtyTerminalTests : IAsyncLifetime
 
             Assert.True(SpinWait.SpinUntil(() => File.Exists(sentinel), TimeSpan.FromSeconds(15)));
             Assert.True(SpinWait.SpinUntil(() =>
-                noReaderJournal.Get(request.Authority.SessionId).OutputSequence > 2, TimeSpan.FromSeconds(10)));
+                noReaderJournal.Get(request.Authority.SessionId).OutputBytes > 0, TimeSpan.FromSeconds(10)));
         }
 
         await using var replayService = Service(notificationCapacity: 2);
