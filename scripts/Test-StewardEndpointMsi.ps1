@@ -214,15 +214,20 @@ if ($Machine) {
                 (Get-FileHash $control -Algorithm SHA256).Hash
             controlIdentity = $ControlIdentity
         } | ConvertTo-Json | Set-Content -LiteralPath $attestation -Encoding utf8
-        $arguments = @(
-            '/i', $msi, '/qn', '/norestart',
-            "STEWARD_CONFIG=$config",
-            "STEWARD_ATTESTATION=$attestation")
         foreach ($attempt in 1, 2) {
+            $log = Join-Path $machineRoot "install-$attempt.log"
+            $arguments = @(
+                '/i', $msi, '/qn', '/norestart', '/L*v', $log,
+                "STEWARD_CONFIG=$config",
+                "STEWARD_ATTESTATION=$attestation")
             $process = Start-Process msiexec.exe -ArgumentList $arguments `
                 -Wait -PassThru -NoNewWindow
             if ($process.ExitCode -notin 0, 1641, 3010) {
-                throw "Per-machine install attempt $attempt failed."
+                if (Test-Path -LiteralPath $log) {
+                    Get-Content -LiteralPath $log -Tail 200 |
+                        Write-Error
+                }
+                throw "Per-machine install attempt $attempt failed with exit code $($process.ExitCode)."
             }
         }
         $state = Join-Path $env:ProgramData 'Steward\Endpoint'
