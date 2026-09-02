@@ -69,7 +69,23 @@ jobs:
           dotnet test tests\Steward.RdpDvc.Server.Windows.Tests\Steward.RdpDvc.Server.Windows.Tests.csproj --configuration Release --no-restore --verbosity minimal
       - name: Isolated Release build with warnings as errors
         shell: pwsh
-        run: dotnet build Steward.slnx --configuration Release --no-restore /warnaserror
+        run: |
+          $nativeMsBuild = Join-Path `
+            $env:ProgramFiles `
+            'Microsoft Visual Studio\2022\Enterprise\MSBuild\Current\Bin\MSBuild.exe'
+          if (-not (Test-Path -LiteralPath $nativeMsBuild)) {
+            $nativeMsBuild = Join-Path `
+              $env:ProgramFiles `
+              'Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\MSBuild.exe'
+          }
+          if (-not (Test-Path -LiteralPath $nativeMsBuild)) {
+            throw 'A supported Visual Studio MSBuild installation is required for Steward.RdpDvc.Shim.Windows.'
+          }
+          dotnet build Steward.slnx `
+            --configuration Release `
+            --no-restore `
+            /warnaserror `
+            /p:StewardNativeMSBuild="$nativeMsBuild"
 
       - name: Complete production dependency tests
         shell: pwsh
