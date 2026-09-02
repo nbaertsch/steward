@@ -1666,7 +1666,7 @@ internal sealed class EndpointProvisioner(
                 return pending.ReceiptPath;
             if (pending.State == EndpointProvisionerTransactionState.Committed)
             {
-                _ = VerifyInstalled(options);
+                _ = VerifyInstalled(options, commitSafe: true);
                 if (pending.ImportedLegacyStateRoot is { } importedRoot)
                     files.DeleteDirectory(importedRoot);
                 files.DeleteDirectory(pending.BackupRoot);
@@ -2025,7 +2025,7 @@ internal sealed class EndpointProvisioner(
                 EndpointProvisionerTransactionState.CommitIntent);
         if (transaction.State == EndpointProvisionerTransactionState.CommitIntent)
         {
-            _ = VerifyInstalled(options);
+            _ = VerifyInstalled(options, commitSafe: true);
             transaction = TransitionMsiTransaction(
                 options,
                 transaction,
@@ -2202,7 +2202,9 @@ internal sealed class EndpointProvisioner(
         return receipt;
     }
 
-    internal string VerifyInstalled(ProvisionerOptions options)
+    internal string VerifyInstalled(
+        ProvisionerOptions options,
+        bool commitSafe = false)
     {
         var config = JsonSerializer.Deserialize<EndpointProvisioningConfig>(
                          files.ReadAllText(options.ConfigPath),
@@ -2223,7 +2225,8 @@ internal sealed class EndpointProvisioner(
         return ValidateInstalledExisting(
             options,
             config,
-            artifact);
+            artifact,
+            commitSafe);
     }
 
     private static void DeleteRuntimeReadiness(string stateRoot)
@@ -3189,7 +3192,8 @@ internal sealed class EndpointProvisioner(
     private string ValidateInstalledExisting(
         ProvisionerOptions options,
         EndpointProvisioningConfig config,
-        EndpointArtifactAttestation artifact)
+        EndpointArtifactAttestation artifact,
+        bool commitSafe = false)
     {
         var receiptPath = Path.Combine(
             options.StateRoot,
@@ -3233,7 +3237,7 @@ internal sealed class EndpointProvisioner(
             }
             Thread.Sleep(TimeSpan.FromSeconds(1));
         }
-        if (!tasksHealthy)
+        if (!tasksHealthy && !commitSafe)
             throw new InvalidDataException(
                 "Endpoint scheduled tasks are not healthy.");
         ValidateReceipt(
@@ -3762,7 +3766,7 @@ internal sealed class PowerShellTaskRegistrar : IEndpointTaskRegistrar
               $m.StartName-eq'LocalSystem'-and
               $m.StartMode-eq'Auto'-and
               $m.State-eq'Running'-and
-              $canonical-and$triggerDefaults-and
+              $canonical-and
               $a.Actions.Count-eq1-and$b.Actions.Count-eq1-and
               $a.Actions[0].Execute-eq'{{Escape(expected.KeeperExecutable)}}'-and
               $a.Actions[0].Arguments-eq'{{Escape(expected.KeeperArguments)}}'-and

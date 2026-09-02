@@ -136,6 +136,65 @@ if (args is
 
 if (args is
     [
+        "--restart-devbox",
+        var restartEndpointText,
+        var restartProjectName,
+        var restartBoxName
+    ])
+{
+    var endpoint = new Uri(restartEndpointText, UriKind.Absolute);
+    var identity = new DevBoxIdentityService(new DevBoxIdentityStore());
+    var sdk = new DevBoxesClient(
+        endpoint,
+        new DevBoxSilentTokenCredential(identity));
+    Console.WriteLine($"STOPPING {restartBoxName}");
+    await sdk.StopDevBoxAsync(
+        WaitUntil.Completed,
+        restartProjectName,
+        "me",
+        restartBoxName,
+        false,
+        new RequestContext { CancellationToken = CancellationToken.None });
+    Console.WriteLine($"STARTING {restartBoxName}");
+    await sdk.StartDevBoxAsync(
+        WaitUntil.Completed,
+        restartProjectName,
+        "me",
+        restartBoxName,
+        new RequestContext { CancellationToken = CancellationToken.None });
+    Console.WriteLine($"RESTARTED {restartBoxName}");
+    return 0;
+}
+
+if (args is
+    [
+        "--delete-group",
+        var deleteEndpointText,
+        var deleteProjectName,
+        var deleteBoxName,
+        var deleteGroupName
+    ])
+{
+    var endpoint = new Uri(deleteEndpointText, UriKind.Absolute);
+    var identity = new DevBoxIdentityService(new DevBoxIdentityStore());
+    var sdk = new DevBoxesClient(
+        endpoint,
+        new DevBoxSilentTokenCredential(identity));
+    var customizations = new DevBoxCustomizationClient(
+        endpoint,
+        new AzurePipelineDevBoxCustomizationTransport(sdk.Pipeline));
+    await customizations.DeleteAsync(
+        deleteProjectName,
+        "me",
+        deleteBoxName,
+        deleteGroupName,
+        CancellationToken.None);
+    Console.WriteLine($"DELETED {deleteBoxName}: {deleteGroupName}");
+    return 0;
+}
+
+if (args is
+    [
         "--save-group-log",
         var saveEndpointText,
         var saveProjectName,
@@ -560,10 +619,6 @@ if (args is
             "nbaertsch/steward/.github/workflows/release-endpoint.yml",
             StringComparison.Ordinal)
         ;
-    installer = Regex.Replace(
-        installer,
-        "    Remove-Item -LiteralPath \\$downloadRoot -Recurse -Force `\\r?\\n        -ErrorAction SilentlyContinue",
-        "    Write-Output ('STEWARD_ENDPOINT_RETAINED_DOWNLOAD_ROOT:' + $downloadRoot)");
     static string Utf8Base64(string value) =>
         Convert.ToBase64String(Encoding.UTF8.GetBytes(value));
 
