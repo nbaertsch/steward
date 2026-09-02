@@ -68,6 +68,22 @@ public sealed class PackagingPolicyTests
         Assert.Contains("last-provisioner-failure.log", script, StringComparison.Ordinal);
         Assert.Contains("Steward endpoint provisioner failure", script, StringComparison.Ordinal);
         Assert.Contains("<redacted-token>", script, StringComparison.Ordinal);
+        Assert.Contains(
+            "Start-Process -FilePath $msiexec",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "-Wait -PassThru -NoNewWindow",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "$installProcess.ExitCode",
+            script,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "& $msiexec @installArguments",
+            script,
+            StringComparison.Ordinal);
         Assert.True(
             script.Split("-ErrorAction Continue", StringSplitOptions.None).Length - 1 >= 2);
         var provisioner = File.ReadAllText(
@@ -139,7 +155,7 @@ public sealed class PackagingPolicyTests
                  })
             Assert.Contains(excluded, script, StringComparison.Ordinal);
         Assert.Contains("GITHUB_ACTIONS", script, StringComparison.Ordinal);
-        Assert.Contains("$Version -ne '1.0.37'", script, StringComparison.Ordinal);
+        Assert.Contains("$Version -ne '1.0.38'", script, StringComparison.Ordinal);
         Assert.Contains("SourceRepository", script, StringComparison.Ordinal);
         Assert.Contains("SourceCommit", script, StringComparison.Ordinal);
         Assert.Contains("SignerWorkflow", script, StringComparison.Ordinal);
@@ -201,7 +217,7 @@ public sealed class PackagingPolicyTests
         Assert.Contains("--source-digest '${{ github.sha }}'", workflow, StringComparison.Ordinal);
         Assert.Contains("refs/heads/main", workflow, StringComparison.Ordinal);
         Assert.Contains(
-            "must be exactly Steward endpoint 1.0.37",
+            "must be exactly Steward endpoint 1.0.38",
             workflow,
             StringComparison.Ordinal);
         Assert.Contains(
@@ -404,6 +420,22 @@ public sealed class PackagingPolicyTests
             source,
             StringComparison.Ordinal);
         Assert.Contains(
+            "ReadToEndAsync()",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "TimeSpan.FromMinutes(2)",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "process.Kill(entireProcessTree: true)",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "Endpoint task registration PowerShell timed out.",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains(
             "Endpoint PowerShell command exceeds safe encoded length",
             source,
             StringComparison.Ordinal);
@@ -568,6 +600,15 @@ public sealed class PackagingPolicyTests
                 "Steward.DevBox.BootstrapDeploy",
                 "Program.cs"));
 
+        Assert.Contains("GzipUtf8Base64(installer)", source, StringComparison.Ordinal);
+        Assert.Contains(
+            "IO.Compression.GZipStream",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "CompressionMode]::Decompress",
+            source,
+            StringComparison.Ordinal);
         Assert.Contains(
             "ListTaskDefinitionsAsync",
             source,

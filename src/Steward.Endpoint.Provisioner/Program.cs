@@ -4072,9 +4072,17 @@ internal sealed class PowerShellTaskRegistrar : IEndpointTaskRegistrar
         using var process = Process.Start(start)
             ?? throw new InvalidOperationException(
                 "Unable to start Windows PowerShell.");
-        var output = process.StandardOutput.ReadToEnd();
-        var error = process.StandardError.ReadToEnd();
-        process.WaitForExit();
+        var outputTask = process.StandardOutput.ReadToEndAsync();
+        var errorTask = process.StandardError.ReadToEndAsync();
+        if (!process.WaitForExit((int)TimeSpan.FromMinutes(2).TotalMilliseconds))
+        {
+            process.Kill(entireProcessTree: true);
+            process.WaitForExit();
+            throw new TimeoutException(
+                "Endpoint task registration PowerShell timed out.");
+        }
+        var output = outputTask.GetAwaiter().GetResult();
+        var error = errorTask.GetAwaiter().GetResult();
         if (process.ExitCode != 0)
             throw new InvalidOperationException(
                 "Endpoint task registration failed: " +

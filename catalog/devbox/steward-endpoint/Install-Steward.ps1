@@ -376,8 +376,10 @@ $installArguments = @(
     '/L*v', $log,
     "STEWARD_CONFIG=$config",
     "STEWARD_ATTESTATION=$provisionAttestation")
-& $msiexec @installArguments
-$installExitCode = $LASTEXITCODE
+$installProcess = Start-Process -FilePath $msiexec `
+    -ArgumentList $installArguments `
+    -Wait -PassThru -NoNewWindow
+$installExitCode = $installProcess.ExitCode
 if ($installExitCode -notin 0, 1641, 3010) {
     throw (
         "Steward endpoint MSI failed with exit code $installExitCode; " +

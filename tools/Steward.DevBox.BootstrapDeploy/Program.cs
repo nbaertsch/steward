@@ -1,3 +1,4 @@
+using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Security.AccessControl;
 using System.Security.Principal;
@@ -619,7 +620,18 @@ if (args is
     static string Utf8Base64(string value) =>
         Convert.ToBase64String(Encoding.UTF8.GetBytes(value));
 
-    var installerBase64 = Utf8Base64(installer);
+    static string GzipUtf8Base64(string value)
+    {
+        using var output = new MemoryStream();
+        using (var gzip = new GZipStream(
+                   output,
+                   CompressionLevel.SmallestSize,
+                   leaveOpen: true))
+            gzip.Write(Encoding.UTF8.GetBytes(value));
+        return Convert.ToBase64String(output.ToArray());
+    }
+
+    var installerBase64 = GzipUtf8Base64(installer);
     var releaseBase64 = Utf8Base64(intrinsicReleaseUrl);
     var bootstrapBase64 = Utf8Base64(intrinsicBootstrapPublic);
     var controlBase64 = Utf8Base64(intrinsicControlPublic);
@@ -629,7 +641,11 @@ if (args is
     var command =
         "$ErrorActionPreference='Stop';" +
         "$u=[Text.Encoding]::UTF8;" +
-        $"$script=$u.GetString([Convert]::FromBase64String('{installerBase64}'));" +
+        $"$compressed=[Convert]::FromBase64String('{installerBase64}');" +
+        "$input=[IO.MemoryStream]::new($compressed,$false);" +
+        "$gzip=[IO.Compression.GZipStream]::new($input,[IO.Compression.CompressionMode]::Decompress);" +
+        "$reader=[IO.StreamReader]::new($gzip,$u,$true);" +
+        "try{$script=$reader.ReadToEnd()}finally{$reader.Dispose();$gzip.Dispose();$input.Dispose()};" +
         $"$release=$u.GetString([Convert]::FromBase64String('{releaseBase64}'));" +
         $"$bootstrap=$u.GetString([Convert]::FromBase64String('{bootstrapBase64}'));" +
         $"$control=$u.GetString([Convert]::FromBase64String('{controlBase64}'));" +
@@ -3217,4 +3233,3 @@ internal sealed record StatusQueryIntent(
         File.Move(pending, path);
     }
 }
-
