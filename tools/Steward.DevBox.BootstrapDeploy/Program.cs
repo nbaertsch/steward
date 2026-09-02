@@ -560,6 +560,10 @@ if (args is
             "nbaertsch/steward/.github/workflows/release-endpoint.yml",
             StringComparison.Ordinal)
         ;
+    installer = Regex.Replace(
+        installer,
+        "    Remove-Item -LiteralPath \\$downloadRoot -Recurse -Force `\\r?\\n        -ErrorAction SilentlyContinue",
+        "    Write-Output ('STEWARD_ENDPOINT_RETAINED_DOWNLOAD_ROOT:' + $downloadRoot)");
     static string Utf8Base64(string value) =>
         Convert.ToBase64String(Encoding.UTF8.GetBytes(value));
 
@@ -637,15 +641,14 @@ if (args is
     Console.WriteLine($"INSTALLED_INTRINSIC {intrinsicBoxName}: {group.Name}");
     return 0;
 }
-if (args is
-    [
-        "--run-diagnostic-powershell",
-        var runEndpointText,
-        var runProjectName,
-        var runBoxName,
-        var runCommandBase64
-    ])
+if (args.Length == 5 &&
+    (args[0] == "--run-diagnostic-powershell" ||
+     args[0] == "--run-user-diagnostic-powershell"))
 {
+    var runEndpointText = args[1];
+    var runProjectName = args[2];
+    var runBoxName = args[3];
+    var runCommandBase64 = args[4];
     var endpoint = new Uri(runEndpointText, UriKind.Absolute);
     var identity = new DevBoxIdentityService(new DevBoxIdentityStore());
     var sdk = new DevBoxesClient(
@@ -658,6 +661,9 @@ if (args is
     var command = Encoding.UTF8.GetString(Convert.FromBase64String(runCommandBase64));
     if (command.Length > 16_000)
         throw new ArgumentException("Diagnostic command exceeds its bound.");
+    var runAs = args[0] == "--run-user-diagnostic-powershell"
+        ? DevBoxCustomizationExecutionAccount.User
+        : DevBoxCustomizationExecutionAccount.System;
     var group = await customizations.ApplyAsync(
         runProjectName,
         "me",
@@ -668,7 +674,7 @@ if (args is
                 "~/powershell",
                 "Run bounded Steward diagnostic command",
                 new Dictionary<string, string> { ["command"] = command },
-                DevBoxCustomizationExecutionAccount.System,
+                runAs,
                 300)
         ],
         CancellationToken.None);
@@ -685,10 +691,19 @@ if (args is
             groupName,
             CancellationToken.None);
     }
-    var log = await customizations.GetTaskLogAsync(
-        group.Tasks.Single().LogUri,
-        CancellationToken.None);
-    Console.WriteLine(log);
+    if (group.Tasks.Count == 0)
+    {
+        Console.Error.WriteLine(
+            $"Diagnostic group {group.Name} ended in {group.Status} without task rows.");
+        return Succeeded(group.Status) ? 0 : 1;
+    }
+    foreach (var task in group.Tasks)
+    {
+        var log = await customizations.GetTaskLogAsync(
+            task.LogUri,
+            CancellationToken.None);
+        Console.WriteLine(log);
+    }
     return Succeeded(group.Status) ? 0 : 1;
 }
 
