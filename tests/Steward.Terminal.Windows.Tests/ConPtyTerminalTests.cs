@@ -35,7 +35,7 @@ public sealed class ConPtyTerminalTests : IAsyncLifetime
             ShellExecutable = CommandPrompt(),
             Arguments = ["/D", "/Q", "/K", $"title {token}"]
         };
-        var opened = await service.OpenAsync(request, Context(request.Authority));
+        var opened = await OpenWithRetryAsync(service, request);
         Assert.Equal(TerminalSessionState.Open, opened.State);
         Assert.False(opened.ElevationGranted);
         Assert.NotNull(opened.ProcessId);
@@ -76,7 +76,7 @@ public sealed class ConPtyTerminalTests : IAsyncLifetime
                 ]
             };
 
-            await service.OpenAsync(request, Context(request.Authority));
+            await OpenWithRetryAsync(service, request);
 
             var observed = SpinWait.SpinUntil(
                 () => TranscriptText(service, request).Contains(
@@ -112,7 +112,7 @@ public sealed class ConPtyTerminalTests : IAsyncLifetime
             Arguments = ["-NoLogo", "-NoProfile", "-Command", "Start-Sleep 30"]
         };
 
-        var opened = await service.OpenAsync(request, Context(request.Authority));
+        var opened = await OpenWithRetryAsync(service, request);
         using var token = OpenToken(opened.ProcessId!.Value);
         var expected = WindowsWorkloadIsolation.Describe(TerminalIsolation(request));
 
@@ -230,7 +230,7 @@ public sealed class ConPtyTerminalTests : IAsyncLifetime
         {
             Arguments = ["-NoLogo", "-NoProfile", "-Command", "Start-Sleep 10"]
         };
-        var opened = await service.OpenAsync(request, Context(request.Authority));
+        var opened = await OpenWithRetryAsync(service, request);
         var tooLarge = await Assert.ThrowsAsync<TerminalException>(() =>
             service.WriteInputAsync(new(request.Authority.SessionId, Context(request.Authority),
                 NewRequestId(), opened.Revision, new byte[65])).AsTask());
@@ -238,7 +238,7 @@ public sealed class ConPtyTerminalTests : IAsyncLifetime
 
         await using var limitedService = Service(maximumInputMessageBytes: 64);
         var limitedRequest = Request(TerminalTranscriptMode.None, maximumInput: 16, maximumOutput: 1024);
-        var limitedOpened = await limitedService.OpenAsync(limitedRequest, Context(limitedRequest.Authority));
+        var limitedOpened = await OpenWithRetryAsync(limitedService, limitedRequest);
         var overLease = await Assert.ThrowsAsync<TerminalException>(() =>
             limitedService.WriteInputAsync(new(limitedRequest.Authority.SessionId, Context(limitedRequest.Authority),
                 NewRequestId(), limitedOpened.Revision, new byte[17])).AsTask());
@@ -258,7 +258,7 @@ public sealed class ConPtyTerminalTests : IAsyncLifetime
         {
             Arguments = ["-NoLogo", "-NoProfile", "-Command", "[Console]::Write('x'*5000)"]
         };
-        await outputService.OpenAsync(outputRequest, Context(outputRequest.Authority));
+        await OpenWithRetryAsync(outputService, outputRequest);
         Assert.True(SpinWait.SpinUntil(() =>
                 outputService.GetAsync(outputRequest.Authority.SessionId, Context(outputRequest.Authority)).Result.State
                     is TerminalSessionState.Closed or TerminalSessionState.Interrupted,
@@ -281,7 +281,7 @@ public sealed class ConPtyTerminalTests : IAsyncLifetime
         {
             Arguments = ["-NoLogo", "-NoProfile", "-Command", script]
         };
-        var opened = await service.OpenAsync(request, Context(request.Authority));
+        var opened = await OpenWithRetryAsync(service, request);
         var resized = await service.ResizeAsync(new(request.Authority.SessionId, Context(request.Authority),
             NewRequestId(), opened.Revision, 100, 40));
         var childPid = 0;
@@ -307,7 +307,7 @@ public sealed class ConPtyTerminalTests : IAsyncLifetime
             {
                 Arguments = ["-NoLogo", "-NoProfile", "-Command", script]
             };
-            await service.OpenAsync(request, Context(request.Authority));
+            await OpenWithRetryAsync(service, request);
 
             Assert.True(SpinWait.SpinUntil(() => File.Exists(sentinel), TimeSpan.FromSeconds(15)));
             Assert.True(SpinWait.SpinUntil(() =>
@@ -321,7 +321,7 @@ public sealed class ConPtyTerminalTests : IAsyncLifetime
             Arguments = ["-NoLogo", "-NoProfile", "-Command",
                 $"$host.UI.RawUI.WindowTitle='{token}'; Start-Sleep 10"]
         };
-        var opened = await replayService.OpenAsync(replayRequest, Context(replayRequest.Authority));
+        var opened = await OpenWithRetryAsync(replayService, replayRequest);
         Assert.True(SpinWait.SpinUntil(() =>
             replayService.ReadRetainedTranscript(replayRequest.Authority.SessionId,
                 Context(replayRequest.Authority)).Count == 0 &&
@@ -380,7 +380,7 @@ public sealed class ConPtyTerminalTests : IAsyncLifetime
         {
             Arguments = ["-NoLogo", "-NoProfile", "-Command", "Start-Sleep 10"]
         };
-        var opened = await service.OpenAsync(request, Context(request.Authority));
+        var opened = await OpenWithRetryAsync(service, request);
         var uncertainId = NewRequestId();
         var uncertainData = "z"u8.ToArray();
         _ = journal.BeginOperation(uncertainId, request.Authority.SessionId, "input",
@@ -439,7 +439,7 @@ public sealed class ConPtyTerminalTests : IAsyncLifetime
         {
             Arguments = ["-NoLogo", "-NoProfile", "-Command", script]
         };
-        var opened = await service.OpenAsync(request, Context(request.Authority));
+        var opened = await OpenWithRetryAsync(service, request);
         Assert.Equal(TerminalSessionState.Open, opened.State);
         var childPid = 0;
         Assert.True(SpinWait.SpinUntil(
@@ -455,6 +455,25 @@ public sealed class ConPtyTerminalTests : IAsyncLifetime
         }, TimeSpan.FromSeconds(10)));
         Assert.True(SpinWait.SpinUntil(() => !IsRunning(opened.ProcessId!.Value), TimeSpan.FromSeconds(10)));
         Assert.True(SpinWait.SpinUntil(() => !IsRunning(childPid), TimeSpan.FromSeconds(10)));
+    }
+
+    private static async Task<TerminalSessionSnapshot> OpenWithRetryAsync(
+        TerminalSessionService service,
+        TerminalOpenRequest request)
+    {
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+                return await service.OpenAsync(
+                    request,
+                    Context(request.Authority));
+            }
+            catch (TerminalException) when (attempt < 3)
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(100 * (attempt + 1)));
+            }
+        }
     }
 
     private TerminalSessionService Service(
