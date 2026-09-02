@@ -270,7 +270,14 @@ jobs:
           Set-Content $legacyInstallerPath -Value $legacyInstaller -Encoding utf8
           "STEWARD_LEGACY_CATALOG=$catalog" | Out-File `
             -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "STEWARD_LEGACY_RELEASE_URL=https://github.com/$repository/releases/download/$tag/Steward.Endpoint.Catalog.1.0.23.zip" |
+          $legacyReleaseUrl = .\scripts\Get-StewardEndpointEphemeralReleaseUrl.ps1 `
+            -Repository $repository `
+            -Version '1.0.23'
+          if ($LASTEXITCODE -ne 0 -or
+              [string]::IsNullOrWhiteSpace($legacyReleaseUrl)) {
+            throw 'Authentic Steward 1.0.23 ephemeral release URL could not be resolved.'
+          }
+          "STEWARD_LEGACY_RELEASE_URL=$legacyReleaseUrl" |
             Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Clean install repair real 1.0.23 upgrade failed activation rollback second upgrade
