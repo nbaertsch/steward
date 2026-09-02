@@ -283,7 +283,7 @@ jobs:
               throw 'Release validation key generation is unavailable.'
             }
             $control.GenerateKey(
-              [Security.Cryptography.ECCurve]::NamedCurves.nistP256)
+              [Security.Cryptography.ECCurve]::CreateFromFriendlyName('nistP256'))
             $bootstrap = [Convert]::ToBase64String(
               $rsa.ExportSubjectPublicKeyInfo())
             $controlPublic = [Convert]::ToBase64String(
@@ -420,7 +420,7 @@ jobs:
           }
           $rsa = [Security.Cryptography.RSA]::Create(3072)
           $control = [Security.Cryptography.ECDsa]::Create(
-            [Security.Cryptography.ECCurve]::NamedCurves.nistP256)
+            [Security.Cryptography.ECCurve]::CreateFromFriendlyName('nistP256'))
           try {
             & (Join-Path $bootstrap 'Install-Steward.ps1') `
               -ReleaseAssetUrl ([uri]$releaseUrl) `
