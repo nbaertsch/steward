@@ -304,7 +304,7 @@ jobs:
               -ControlSigningPublicKeyBase64 $controlPublic `
               -ControlIdentity 'steward.control.release-gate' `
               -NodeUserAccount $identity.Name `
-              -NodeUserSid $identity.User.Value `
+              -NodeUserSid 'S-1-12-1-1-2-3-4' `
               -Machine
           } finally {
             if ($null -ne $rsa) { $rsa.Dispose() }
