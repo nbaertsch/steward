@@ -1110,6 +1110,63 @@ public sealed class ProvisionerTests : IDisposable
             .GetProperty("productVersion").GetString());
     }
 
+    [Fact]
+    public void Dirty_1032_entra_upgrade_rolls_back_after_staging_files_are_removed()
+    {
+        Directory.CreateDirectory(root);
+        const string account = "AzureAD\\noahbaertsch@microsoft.com";
+        const string sid =
+            "S-1-12-1-3482208621-1225039397-1130211761-942570504";
+        var install = CreateInstall();
+        var state = Path.Combine(root, "state");
+        var registrar = new TransactionalRegistrar();
+        var provisioner = new EndpointProvisioner(
+            new PhysicalProvisionerFileSystem(),
+            registrar,
+            new NoOpSecurity());
+        RewriteManifestVersion(install, "1.0.32");
+        _ = provisioner.Provision(Options(
+            install,
+            CreateConfig("1.0.32", account, sid),
+            state,
+            "1.0.32"));
+        var priorIdentity = File.ReadAllText(Path.Combine(state, "identity.json"));
+        RewriteManifestVersion(install, "1.0.37");
+        var upgradeConfig = CreateConfig("1.0.37", account, sid);
+        var options = Options(install, upgradeConfig, state, "1.0.37") with
+        {
+            MsiTransactionId = Guid.NewGuid()
+        };
+
+        _ = provisioner.Provision(options);
+        File.Delete(options.ConfigPath);
+        File.Delete(options.ArtifactAttestationPath);
+        var rollback = ProvisionerOptions.Parse(
+            [
+                "--r",
+                options.MsiTransactionId.Value.ToString("B"),
+                "--i",
+                install,
+                "--s",
+                state,
+                "--m",
+                options.EffectiveMaintenanceStateRoot,
+                "--g",
+                options.ConfigPath,
+                "--a",
+                options.ArtifactAttestationPath
+            ]);
+
+        provisioner.RollbackMsiTransaction(rollback, "msi_rollback");
+
+        Assert.False(File.Exists(options.TransactionJournalPath));
+        Assert.Equal(priorIdentity, File.ReadAllText(Path.Combine(state, "identity.json")));
+        using var identity = JsonDocument.Parse(
+            File.ReadAllText(Path.Combine(state, "identity.json")));
+        Assert.Equal("1.0.32", identity.RootElement
+            .GetProperty("productVersion").GetString());
+    }
+
     [Theory]
     [InlineData("InstallServices")]
     [InlineData("StartServices")]
@@ -1308,7 +1365,10 @@ public sealed class ProvisionerTests : IDisposable
         return install;
     }
 
-    private string CreateConfig(string version = "1.0.0")
+    private string CreateConfig(
+        string version = "1.0.0",
+        string? provisionedUserAccount = null,
+        string? provisionedUserSid = null)
     {
         if (bootstrapPublicKey is null)
         {
@@ -1338,7 +1398,9 @@ public sealed class ProvisionerTests : IDisposable
                     version,
                     "bootstrap-envelope.spki",
                     "control-signing.spki",
-                    "control")));
+                    "control",
+                    provisionedUserAccount,
+                    provisionedUserSid)));
         return config;
     }
 
