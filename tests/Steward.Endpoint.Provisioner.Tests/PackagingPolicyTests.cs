@@ -396,23 +396,27 @@ public sealed class PackagingPolicyTests
             source,
             StringComparison.Ordinal);
         Assert.Contains(
-            "Path.GetDirectoryName(stateRoot)",
+            "-EncodedCommand",
             source,
             StringComparison.Ordinal);
         Assert.Contains(
+            "Encoding.Unicode.GetBytes(script)",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "Endpoint PowerShell command exceeds safe encoded length",
+            source,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
             "register-endpoint-",
             source,
             StringComparison.Ordinal);
-        Assert.Contains(
-            "\"icacls.exe\"",
+        Assert.DoesNotContain(
+            ".ps1",
             source,
             StringComparison.Ordinal);
-        Assert.Contains(
-            "\"*S-1-5-18:(OI)(CI)F\"",
-            source,
-            StringComparison.Ordinal);
-        Assert.Contains(
-            "\"*S-1-5-32-544:(OI)(CI)F\"",
+        Assert.DoesNotContain(
+            "RunPowerShellFile",
             source,
             StringComparison.Ordinal);
         Assert.DoesNotContain(

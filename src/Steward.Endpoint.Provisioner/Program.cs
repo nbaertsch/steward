@@ -3660,22 +3660,6 @@ internal sealed class PowerShellTaskRegistrar : IEndpointTaskRegistrar
             !File.Exists(provisioner))
             throw new FileNotFoundException(
                 "Self-contained endpoint executables are unavailable.");
-        var scriptRoot = Path.Combine(
-            Path.GetDirectoryName(stateRoot) ??
-                throw new InvalidDataException(
-                    "Endpoint state root has no parent."),
-            "install");
-        Directory.CreateDirectory(scriptRoot);
-        EndpointProvisioner.Run(
-            "icacls.exe",
-            scriptRoot,
-            "/inheritance:r",
-            "/grant:r",
-            "*S-1-5-18:(OI)(CI)F",
-            "*S-1-5-32-544:(OI)(CI)F");
-        var scriptPath = Path.Combine(
-            scriptRoot,
-            $"register-endpoint-{Guid.NewGuid():N}.ps1");
         var script = $$"""
             $ErrorActionPreference='Stop'
             $keeperName='HandleKeeper-{{identity.HostId:N}}'
@@ -3728,27 +3712,16 @@ internal sealed class PowerShellTaskRegistrar : IEndpointTaskRegistrar
               throw
             }
             """;
-        File.WriteAllText(
-            scriptPath,
-            script,
-            new UTF8Encoding(false));
-        try
+        RunPowerShell(script);
+        if (HasActiveRemoteSession(userSid))
         {
-            RunPowerShellFile(scriptPath);
-            if (HasActiveRemoteSession(userSid))
-            {
-                RunPowerShell(
-                    $$"""
-                    $ErrorActionPreference='Stop'
-                    Start-ScheduledTask -TaskName 'HandleKeeper-{{identity.HostId:N}}' -TaskPath '\Steward\'
-                    Start-Sleep -Milliseconds 500
-                    Start-ScheduledTask -TaskName 'RdpDvcEndpoint-{{identity.HostId:N}}' -TaskPath '\Steward\'
-                    """);
-            }
-        }
-        finally
-        {
-            File.Delete(scriptPath);
+            RunPowerShell(
+                $$"""
+                $ErrorActionPreference='Stop'
+                Start-ScheduledTask -TaskName 'HandleKeeper-{{identity.HostId:N}}' -TaskPath '\Steward\'
+                Start-Sleep -Milliseconds 500
+                Start-ScheduledTask -TaskName 'RdpDvcEndpoint-{{identity.HostId:N}}' -TaskPath '\Steward\'
+                """);
         }
     }
 
@@ -4033,30 +4006,18 @@ internal sealed class PowerShellTaskRegistrar : IEndpointTaskRegistrar
     private static string Escape(string value) =>
         value.Replace("'", "''", StringComparison.Ordinal);
 
-    private static string RunPowerShell(string script)
-    {
-        var path = Path.Combine(
-            Path.GetTempPath(),
-            $"steward-provision-{Guid.NewGuid():N}.ps1");
-        File.WriteAllText(path, script, new UTF8Encoding(false));
-        try
-        {
-            return RunPowerShellFile(path);
-        }
-        finally
-        {
-            File.Delete(path);
-        }
-    }
-
     internal sealed record EndpointActions(
         string KeeperExecutable,
         string KeeperArguments,
         string ServerExecutable,
         string ServerArguments);
 
-    private static string RunPowerShellFile(string path)
+    private static string RunPowerShell(string script)
     {
+        var encoded = Convert.ToBase64String(Encoding.Unicode.GetBytes(script));
+        if (encoded.Length > 28_000)
+            throw new InvalidOperationException(
+                "Endpoint PowerShell command exceeds safe encoded length.");
         var start = new ProcessStartInfo
         {
             FileName = Path.Combine(
@@ -4075,8 +4036,8 @@ internal sealed class PowerShellTaskRegistrar : IEndpointTaskRegistrar
                      "-NonInteractive",
                      "-ExecutionPolicy",
                      "Bypass",
-                     "-File",
-                     path
+                     "-EncodedCommand",
+                     encoded
                  })
             start.ArgumentList.Add(argument);
         using var process = Process.Start(start)
