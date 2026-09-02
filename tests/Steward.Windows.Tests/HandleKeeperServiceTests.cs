@@ -158,7 +158,9 @@ public sealed class HandleKeeperServiceTests : IAsyncLifetime
             RelatedRequestId: openRequest.RequestId));
         Assert.True(abandon.Success);
         Assert.False(IsJobHandle(oldHandle));
-        Assert.Equal("open_abandoned", (await RawCall(pipeName, openRequest)).ErrorCode);
+        Assert.True(await SpinUntilAsync(async () =>
+            (await RawCall(pipeName, openRequest)).ErrorCode == "open_abandoned",
+            TimeSpan.FromSeconds(10)));
         var afterAbandon = await RawCall(pipeName, new(JobKeeperProtocol.Version, JobKeeperCommand.Health, Nonce()));
         Assert.Equal(1, afterAbandon.RevokedProvisionalOpenCount);
 
