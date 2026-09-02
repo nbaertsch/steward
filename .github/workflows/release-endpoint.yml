@@ -70,16 +70,26 @@ jobs:
       - name: Isolated Release build with warnings as errors
         shell: pwsh
         run: |
-          $nativeMsBuild = Join-Path `
-            $env:ProgramFiles `
-            'Microsoft Visual Studio\2022\Enterprise\MSBuild\Current\Bin\MSBuild.exe'
-          if (-not (Test-Path -LiteralPath $nativeMsBuild)) {
-            $nativeMsBuild = Join-Path `
-              $env:ProgramFiles `
-              'Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\MSBuild.exe'
+          $vswhere = Join-Path `
+            ${env:ProgramFiles(x86)} `
+            'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (-not (Test-Path -LiteralPath $vswhere)) {
+            throw 'Visual Studio discovery tool vswhere.exe is unavailable on the hosted runner.'
           }
-          if (-not (Test-Path -LiteralPath $nativeMsBuild)) {
+          $installationPath = & $vswhere `
+            -latest `
+            -products * `
+            -requires Microsoft.Component.MSBuild `
+            -property installationPath
+          if ($LASTEXITCODE -ne 0 -or
+              [string]::IsNullOrWhiteSpace($installationPath)) {
             throw 'A supported Visual Studio MSBuild installation is required for Steward.RdpDvc.Shim.Windows.'
+          }
+          $nativeMsBuild = Join-Path `
+            $installationPath.Trim() `
+            'MSBuild\Current\Bin\MSBuild.exe'
+          if (-not (Test-Path -LiteralPath $nativeMsBuild)) {
+            throw 'Discovered Visual Studio installation does not contain MSBuild.exe.'
           }
           dotnet build Steward.slnx `
             --configuration Release `
