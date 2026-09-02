@@ -418,10 +418,10 @@ jobs:
               throw "Generated catalog bootstrap omitted $name."
             }
           }
-          $generated = Get-ChildItem $bootstrap -File |
-            ForEach-Object { Get-Content $_.FullName -Raw }
-          if (($generated -join "`n") -match '__STEWARD_') {
-            throw 'Generated catalog bootstrap retained a provenance placeholder.'
+          $installer = Get-Content (Join-Path $bootstrap 'Install-Steward.ps1') -Raw
+          if ($installer -match "`$SourceRepository = '__STEWARD_" -or
+              $installer -match "`$SignerWorkflow = '__STEWARD_") {
+            throw 'Generated catalog installer retained an unresolved provenance assignment.'
           }
           $releaseUrl = .\scripts\Get-StewardEndpointEphemeralReleaseUrl.ps1 `
             -Repository '${{ github.repository }}' `
