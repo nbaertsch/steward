@@ -408,11 +408,7 @@ public sealed class PackagingPolicyTests
             source,
             StringComparison.Ordinal);
         Assert.DoesNotContain(
-            "register-endpoint-",
-            source,
-            StringComparison.Ordinal);
-        Assert.DoesNotContain(
-            ".ps1",
+            "File.WriteAllText(path, script",
             source,
             StringComparison.Ordinal);
         Assert.DoesNotContain(

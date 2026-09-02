@@ -870,6 +870,52 @@ public sealed class ProvisionerTests : IDisposable
     }
 
     [Fact]
+    public void Provision_removes_legacy_register_script_transients_before_payload_validation()
+    {
+        Directory.CreateDirectory(root);
+        var install = CreateInstall();
+        var legacy = Path.Combine(
+            install,
+            ".register-endpoint-0123456789abcdef0123456789ABCDEF.ps1");
+        File.WriteAllText(legacy, "legacy transient");
+        var provisioner = new EndpointProvisioner(
+            new PhysicalProvisionerFileSystem(),
+            new RecordingRegistrar(),
+            new NoOpSecurity());
+
+        _ = provisioner.Provision(Options(
+            install,
+            CreateConfig(),
+            Path.Combine(root, "state"),
+            "1.0.0"));
+
+        Assert.False(File.Exists(legacy));
+    }
+
+    [Theory]
+    [InlineData("unexpected.ps1")]
+    [InlineData(".register-endpoint-malicious.ps1")]
+    [InlineData(".register-endpoint-.ps1")]
+    [InlineData(".register-endpoint-0123456789abcdef.ps1")]
+    public void Unexpected_install_root_file_still_fails_payload_validation(
+        string fileName)
+    {
+        Directory.CreateDirectory(root);
+        var install = CreateInstall();
+        File.WriteAllText(Path.Combine(install, fileName), "unexpected");
+        var provisioner = new EndpointProvisioner(
+            new PhysicalProvisionerFileSystem(),
+            new RecordingRegistrar(),
+            new NoOpSecurity());
+
+        Assert.Throws<InvalidDataException>(() => provisioner.Provision(Options(
+            install,
+            CreateConfig(),
+            Path.Combine(root, "state"),
+            "1.0.0")));
+    }
+
+    [Fact]
     public void MissingNativeSqliteFailsClosed()
     {
         Directory.CreateDirectory(root);

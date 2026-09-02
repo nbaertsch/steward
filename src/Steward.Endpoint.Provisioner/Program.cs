@@ -5,6 +5,7 @@ using System.Security.Cryptography;
 using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Text.Json.Serialization;
 using Steward.Contracts;
 using Steward.Runtime.Windows;
@@ -1709,6 +1710,7 @@ internal sealed class EndpointProvisioner(
                        ?? throw new InvalidDataException(
                            "Artifact attestation is empty.");
         ValidateArtifact(artifact);
+        DeleteLegacyInstallRootTransients(options.InstallRoot);
         ValidateConfig(config, artifact, options);
         ValidatePayload(options.InstallRoot, artifact.ProductVersion);
         if (options.TransactionAction != MsiTransactionAction.Prepare)
@@ -3101,6 +3103,33 @@ internal sealed class EndpointProvisioner(
     private static bool ValidSha256(string value) =>
         value.Length == 64 &&
         value.All(char.IsAsciiHexDigit);
+
+    private static void DeleteLegacyInstallRootTransients(string installRoot)
+    {
+        foreach (var path in Directory.GetFiles(
+                     installRoot,
+                     ".register-endpoint-*.ps1",
+                     SearchOption.TopDirectoryOnly))
+        {
+            if (!Regex.IsMatch(
+                    Path.GetFileName(path),
+                    "^\\.register-endpoint-[0-9a-fA-F]{32}\\.ps1$",
+                    RegexOptions.CultureInvariant))
+                continue;
+            var full = Path.GetFullPath(path);
+            if (!full.StartsWith(
+                    EnsureTrailingDirectorySeparator(Path.GetFullPath(installRoot)),
+                    StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException(
+                    "Legacy endpoint registration script escaped install root.");
+            var attributes = File.GetAttributes(full);
+            if (attributes.HasFlag(FileAttributes.Directory) ||
+                attributes.HasFlag(FileAttributes.ReparsePoint))
+                throw new InvalidDataException(
+                    "Legacy endpoint registration script is not a regular file.");
+            File.Delete(full);
+        }
+    }
 
     private void ValidatePayload(
         string installRoot,
