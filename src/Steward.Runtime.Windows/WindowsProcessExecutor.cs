@@ -297,6 +297,10 @@ internal sealed class WindowsProcessExecutor : IProcessExecutor, IDisposable
             NativeMethods.ThrowLastError(nameof(NativeMethods.GetExitCodeProcess));
         if (exitCode == NativeMethods.StillActive)
             return ValueTask.FromResult(new ExecutionObservation(ExecutionState.Running));
+        var entry = journal.Get(execution.AttemptId, execution.Generation)
+            ?? throw new KeyNotFoundException("Execution not journaled.");
+        if (execution is WindowsExecutionHandle windows)
+            EnforceOutputLimit(windows, entry.OutputLimit);
         journal.SetPhase(execution.AttemptId, execution.Generation, LaunchPhase.Exited, exitCode == 0 ? "succeeded" : "failed");
         CompleteActive(execution);
         return ValueTask.FromResult(new ExecutionObservation(ExecutionState.Exited, unchecked((int)exitCode)));
@@ -494,16 +498,11 @@ internal sealed class WindowsProcessExecutor : IProcessExecutor, IDisposable
         {
             while (!cancellationToken.IsCancellationRequested)
             {
-                var stdout = spoolFiles.GetLength(handle.StdoutPath);
-                var stderr = spoolFiles.GetLength(handle.StderrPath);
-                if (stdout + stderr > maximum)
+                if (EnforceOutputLimit(handle, maximum))
                 {
                     var current = RequireActive(handle);
                     NativeMethods.TerminateJobObject(current.Job, 0xE0000002);
                     NativeMethods.WaitForSingleObject(current.Process, 5000);
-                    spoolFiles.Trim(handle.StdoutPath, Math.Min(stdout, maximum));
-                    spoolFiles.Trim(handle.StderrPath, Math.Max(0, maximum - Math.Min(stdout, maximum)));
-                    journal.MarkTruncated(handle.AttemptId, handle.Generation);
                     return;
                 }
                 if (!NativeMethods.GetExitCodeProcess(RequireActive(handle).Process, out var exit) || exit != NativeMethods.StillActive) return;
@@ -517,6 +516,18 @@ internal sealed class WindowsProcessExecutor : IProcessExecutor, IDisposable
                 NativeMethods.TerminateJobObject(current.Job, 0xE0000003);
             journal.MarkMonitorFailure(handle.AttemptId, handle.Generation, $"{exception.GetType().Name}: {exception.Message}");
         }
+    }
+
+    private bool EnforceOutputLimit(WindowsExecutionHandle handle, long maximum)
+    {
+        var stdout = spoolFiles.GetLength(handle.StdoutPath);
+        var stderr = spoolFiles.GetLength(handle.StderrPath);
+        if (stdout + stderr <= maximum)
+            return false;
+        spoolFiles.Trim(handle.StdoutPath, Math.Min(stdout, maximum));
+        spoolFiles.Trim(handle.StderrPath, Math.Max(0, maximum - Math.Min(stdout, maximum)));
+        journal.MarkTruncated(handle.AttemptId, handle.Generation);
+        return true;
     }
 
     private static SafeFileHandle OpenInheritableSpool(string path)
