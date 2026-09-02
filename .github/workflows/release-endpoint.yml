@@ -277,9 +277,13 @@ jobs:
         shell: pwsh
         run: |
           $rsa = [Security.Cryptography.RSA]::Create(3072)
-          $control = [Security.Cryptography.ECDsa]::Create(
-            [Security.Cryptography.ECCurve]::NamedCurves.nistP256)
+          $control = [Security.Cryptography.ECDsa]::Create()
           try {
+            if ($null -eq $rsa -or $null -eq $control) {
+              throw 'Release validation key generation is unavailable.'
+            }
+            $control.GenerateKey(
+              [Security.Cryptography.ECCurve]::NamedCurves.nistP256)
             $bootstrap = [Convert]::ToBase64String(
               $rsa.ExportSubjectPublicKeyInfo())
             $controlPublic = [Convert]::ToBase64String(
@@ -296,8 +300,8 @@ jobs:
               -NodeUserSid $identity.User.Value `
               -Machine
           } finally {
-            $rsa.Dispose()
-            $control.Dispose()
+            if ($null -ne $rsa) { $rsa.Dispose() }
+            if ($null -ne $control) { $control.Dispose() }
           }
 
       - name: Generate SBOM
