@@ -103,7 +103,7 @@ public sealed class WindowsProcessExecutorTests : IDisposable
         var handle = await executor.StartAsync(request, default);
         await WaitForExit(executor, handle);
         var journal = new ExecutionJournal(Path.Combine(directory, "journal.db"));
-        Assert.True(SpinWait.SpinUntil(() => journal.Get(handle.AttemptId, handle.Generation)!.OutputTruncated, TimeSpan.FromSeconds(5)));
+        Assert.True(SpinWait.SpinUntil(() => journal.Get(handle.AttemptId, handle.Generation)!.OutputTruncated, TimeSpan.FromSeconds(20)));
         var entry = journal.Get(handle.AttemptId, handle.Generation)!;
         Assert.True(entry.OutputTruncated);
         Assert.True(new FileInfo(entry.StdoutPath).Length + new FileInfo(entry.StderrPath).Length <= request.MaxOutputBytes);

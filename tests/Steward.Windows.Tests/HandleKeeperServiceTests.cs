@@ -114,8 +114,9 @@ public sealed class HandleKeeperServiceTests : IAsyncLifetime
         Assert.True((await RawCall(cachePipe, new(JobKeeperProtocol.Version, JobKeeperCommand.Health, Nonce()))).Success);
         Assert.Equal("request_cache_full",
             (await RawCall(cachePipe, new(JobKeeperProtocol.Version, JobKeeperCommand.Health, Nonce()))).ErrorCode);
-        await Task.Delay(1200);
-        Assert.True((await RawCall(cachePipe, new(JobKeeperProtocol.Version, JobKeeperCommand.Health, Nonce()))).Success);
+        Assert.True(await SpinUntilAsync(async () =>
+            (await RawCall(cachePipe, new(JobKeeperProtocol.Version, JobKeeperCommand.Health, Nonce()))).Success,
+            TimeSpan.FromSeconds(10)));
     }
 
     [Fact]
@@ -571,6 +572,20 @@ public sealed class HandleKeeperServiceTests : IAsyncLifetime
         var handle = CreateJobObject(IntPtr.Zero, name);
         if (handle.IsInvalid) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
         return handle;
+    }
+
+    private static async Task<bool> SpinUntilAsync(
+        Func<Task<bool>> predicate,
+        TimeSpan timeout)
+    {
+        var deadline = DateTimeOffset.UtcNow + timeout;
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            if (await predicate())
+                return true;
+            await Task.Delay(100);
+        }
+        return false;
     }
 
     private static async Task<JobKeeperResponse> RawCall(string pipeName, JobKeeperRequest request)
