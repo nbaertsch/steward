@@ -3602,8 +3602,8 @@ internal sealed class PowerShellTaskRegistrar : IEndpointTaskRegistrar
             $handoffXml=if($null-ne$handoffPrior){Export-ScheduledTask -TaskName $handoffName -TaskPath '\Steward\'}else{$null}
             Stop-ScheduledTask -TaskName $keeperName -TaskPath '\Steward\' -ErrorAction SilentlyContinue
             Stop-ScheduledTask -TaskName $serverName -TaskPath '\Steward\' -ErrorAction SilentlyContinue
-            $trigger=New-ScheduledTaskTrigger -AtLogOn -User '{{Escape(userSid)}}'
-            $principal=New-ScheduledTaskPrincipal -UserId '{{Escape(userSid)}}' -LogonType Interactive -RunLevel Limited
+            $trigger=New-ScheduledTaskTrigger -AtLogOn -User '{{Escape(userAccount)}}'
+            $principal=New-ScheduledTaskPrincipal -UserId '{{Escape(userAccount)}}' -LogonType Interactive -RunLevel Limited
             $settings=New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -Hidden -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
             $keeper=New-ScheduledTaskAction -Execute '{{Escape(actions.KeeperExecutable)}}' -Argument '{{Escape(actions.KeeperArguments)}}' -WorkingDirectory '{{Escape(installRoot)}}'
             $server=New-ScheduledTaskAction -Execute '{{Escape(actions.ServerExecutable)}}' -Argument '{{Escape(actions.ServerArguments)}}' -WorkingDirectory '{{Escape(installRoot)}}'

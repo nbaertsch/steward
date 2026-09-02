@@ -1058,6 +1058,56 @@ public sealed class EvaluationIntegrationTests
     }
 
     [Fact]
+    public void Completed_replica_skips_only_that_replica()
+    {
+        var input = Input([EvaluationCase.Create("a", new { })]) with { ReplicaCount = 3 };
+        var completed = EvaluationCaseResult.Create("a",
+            new(2, "1.2", RepositoryCommit, DatasetHash, "inference-profile://test", 1, 3),
+            EvaluationCaseStatus.Passed, 1);
+        var plan = HarborPlanner().Plan(new(WorkloadId.New(), PlanRevisionId.New(), input,
+            [new(completed, "portable://results/a/r1.json")]));
+        var evalKeys = plan.Tasks.Where(x => x.LogicalKey.StartsWith("eval/", StringComparison.Ordinal))
+            .Select(x => x.LogicalKey).Order(StringComparer.Ordinal).ToArray();
+
+        Assert.Equal(["eval/a/r0", "eval/a/r2"], evalKeys);
+        var final = plan.Tasks.Single(x => x.LogicalKey == "aggregate/final");
+        var receiptBatch = plan.Tasks.Single(x => x.LogicalKey.StartsWith("aggregate/receipts/", StringComparison.Ordinal));
+        Assert.Contains("\"expectedCaseCount\":3", final.Input.CanonicalJson);
+        Assert.Contains("\"replicaIndex\":1", receiptBatch.Input.CanonicalJson);
+    }
+
+    [Fact]
+    public void Reducer_accepts_distinct_replicas_but_rejects_fourth_accepted_replica()
+    {
+        var context0 = new EvaluationResultContext(0, "1.2", RepositoryCommit, DatasetHash,
+            "inference-profile://test", 0, 3);
+        var context1 = context0 with { ReplicaIndex = 1 };
+        var context2 = context0 with { ReplicaIndex = 2 };
+        var r0 = EvaluationCaseResult.Create("a", context0, EvaluationCaseStatus.Passed, 1);
+        var r1 = EvaluationCaseResult.Create("a", context1, EvaluationCaseStatus.Passed, 1);
+        var r2 = EvaluationCaseResult.Create("a", context2, EvaluationCaseStatus.Passed, 1);
+
+        var manifest = EvaluationResultReducer.Reduce([r0, r1, r2], ["a#r0", "a#r1", "a#r2"]);
+
+        Assert.Equal(3, manifest.Cases.Length);
+        Assert.Equal([0, 1, 2], manifest.Cases.Select(x => x.ReplicaIndex).Order().ToArray());
+        Assert.Throws<ArgumentException>(() => EvaluationResultReducer.Reduce(
+            [r0, r1, r2], ["a#r0", "a#r1", "a#r2", "a#r3"]));
+    }
+
+    [Fact]
+    public void Planner_rejects_completed_result_outside_workload_replica_set()
+    {
+        var input = Input([EvaluationCase.Create("a", new { })]) with { ReplicaCount = 3 };
+        var fourth = EvaluationCaseResult.Create("a",
+            new(0, "1.2", RepositoryCommit, DatasetHash, "inference-profile://test", 3, 4),
+            EvaluationCaseStatus.Passed, 1);
+
+        Assert.Throws<ArgumentException>(() => HarborPlanner().Plan(
+            new(WorkloadId.New(), PlanRevisionId.New(), input, [new(fourth, "portable://results/a/r3.json")])));
+    }
+
+    [Fact]
     public void Replica_count_validation_rejects_zero_negative_and_exceeding_limit()
     {
         Assert.ThrowsAny<ArgumentException>(() =>

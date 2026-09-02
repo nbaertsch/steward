@@ -21,6 +21,8 @@ internal sealed record EvaluationRunnerTaskDefinition(
     string HarnessVersion,
     string AdapterProfileVersion,
     string CaseId,
+    int ReplicaIndex,
+    int ReplicaCount,
     TaskPayload CaseDefinition,
     string InventoryHash,
     EvaluationRunnerDatasetDefinition Dataset,
@@ -155,6 +157,8 @@ internal sealed class EvaluationRunnerTaskType :
         Required(definition.ParserContract, nameof(definition.ParserContract), errors);
         Required(definition.RetryPolicy, nameof(definition.RetryPolicy), errors);
         Required(definition.InferenceRateScope, nameof(definition.InferenceRateScope), errors);
+        if (definition.ReplicaCount < 1 || definition.ReplicaIndex < 0 || definition.ReplicaIndex >= definition.ReplicaCount)
+            errors.Add("Replica identity is outside the workload replica range.");
         if (!EvaluationSource.IsValidCommit(definition.RepositoryCommit) ||
             !EvaluationSource.IsValidCommit(definition.HarnessCommit))
             errors.Add("Repository and harness commits must be full Git hashes.");
@@ -564,10 +568,12 @@ internal sealed class EvaluationRunnerTaskType :
                     return;
                 }
                 var context = new EvaluationResultContext(execution.Generation, definition.HarnessVersion,
-                    definition.RepositoryCommit, definition.Dataset.Hash, definition.ModelProfileReference);
+                    definition.RepositoryCommit, definition.Dataset.Hash, definition.ModelProfileReference,
+                    definition.ReplicaIndex, definition.ReplicaCount);
                 var result = parser.ParseResult(line, context);
                 if (result is null) return;
-                if (result.CaseId != definition.CaseId) throw new InvalidDataException();
+                if (result.CaseId != definition.CaseId || result.ReplicaIndex != definition.ReplicaIndex ||
+                    result.ReplicaCount != definition.ReplicaCount) throw new InvalidDataException();
                 if (Result is not null && Result.ReceiptHash != result.ReceiptHash)
                 {
                     Fail(EvaluationRunnerErrorCode.ConflictingResult, EvaluationFailureSignal.Harness);

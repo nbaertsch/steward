@@ -60,7 +60,14 @@ public sealed record EvaluationManifestEntry(
     IReadOnlyDictionary<string, decimal> Metrics,
     IReadOnlyList<string> ArtifactReferences,
     EvaluationFailureClassification FailureClassification,
-    string ReceiptHash);
+    string ReceiptHash,
+    int ReplicaIndex = 0,
+    int ReplicaCount = 1)
+{
+    public string ReplicaKey => ReplicaCount == 1
+        ? CaseId
+        : $"{CaseId}#r{ReplicaIndex}";
+}
 
 public sealed record EvaluationExportManifest(
     string HarnessVersion,
@@ -91,30 +98,64 @@ public static class EvaluationResultReducer
         if (values.Any(x => x.HarnessVersion != first.HarnessVersion || x.Commit != first.Commit ||
                             x.DatasetHash != first.DatasetHash || x.ModelProfile != first.ModelProfile))
             throw new ArgumentException("Results with different immutable evaluation inputs cannot be reduced.", nameof(results));
-        var actual = values.Select(x => x.CaseId).ToHashSet(StringComparer.Ordinal);
+        var actual = values.Select(x => x.ReplicaKey).ToHashSet(StringComparer.Ordinal);
         if (!actual.SetEquals(expected))
-            throw new ArgumentException("Result cases do not exactly match the expected selected case set.", nameof(results));
-        if (values.GroupBy(x => (x.CaseId, x.AttemptGeneration))
+            throw new ArgumentException("Result case replicas do not exactly match the expected selected replica set.", nameof(results));
+        if (values.GroupBy(x => (x.ReplicaKey, x.AttemptGeneration))
             .Any(group => group.Select(x => x.ReceiptHash).Distinct(StringComparer.Ordinal).Count() > 1))
-            throw new ArgumentException("Conflicting receipts exist for the same case generation.", nameof(results));
+            throw new ArgumentException("Conflicting receipts exist for the same case replica generation.", nameof(results));
 
-        var selected = values.GroupBy(x => x.CaseId, StringComparer.Ordinal)
+        var selected = values.GroupBy(x => x.ReplicaKey, StringComparer.Ordinal)
             .Select(group => group.GroupBy(x => x.AttemptGeneration)
                 .Select(generation => generation.First())
                 .OrderByDescending(x => x.AttemptGeneration).First())
             .OrderBy(x => x.CaseId, StringComparer.Ordinal)
+            .ThenBy(x => x.ReplicaIndex)
             .Select(x => new EvaluationManifestEntry(x.CaseId, x.AttemptGeneration, x.Status, x.Score,
                 x.Metrics.ToImmutableSortedDictionary(y => y.Key, y => y.Value, StringComparer.Ordinal),
-                x.ArtifactReferences.Order(StringComparer.Ordinal).ToImmutableArray(), x.FailureClassification, x.ReceiptHash))
+                x.ArtifactReferences.Order(StringComparer.Ordinal).ToImmutableArray(), x.FailureClassification,
+                x.ReceiptHash, x.ReplicaIndex, x.ReplicaCount))
             .ToImmutableArray();
-        var hash = EvaluationHash.Sha256(EvaluationJson.Serialize(new
-        {
-            first.HarnessVersion,
-            first.Commit,
-            first.DatasetHash,
-            first.ModelProfile,
-            cases = selected
-        }));
+        var canonical = selected.All(x => x.ReplicaCount == 1)
+            ? EvaluationJson.Serialize(new
+            {
+                first.HarnessVersion,
+                first.Commit,
+                first.DatasetHash,
+                first.ModelProfile,
+                cases = selected.Select(x => new
+                {
+                    x.CaseId,
+                    x.AttemptGeneration,
+                    x.Status,
+                    x.Score,
+                    x.Metrics,
+                    x.ArtifactReferences,
+                    x.FailureClassification,
+                    x.ReceiptHash
+                })
+            })
+            : EvaluationJson.Serialize(new
+            {
+                first.HarnessVersion,
+                first.Commit,
+                first.DatasetHash,
+                first.ModelProfile,
+                cases = selected.Select(x => new
+                {
+                    x.CaseId,
+                    x.ReplicaIndex,
+                    x.ReplicaCount,
+                    x.AttemptGeneration,
+                    x.Status,
+                    x.Score,
+                    x.Metrics,
+                    x.ArtifactReferences,
+                    x.FailureClassification,
+                    x.ReceiptHash
+                })
+            });
+        var hash = EvaluationHash.Sha256(canonical);
         return new(first.HarnessVersion, first.Commit, first.DatasetHash, first.ModelProfile, selected, hash);
     }
 }

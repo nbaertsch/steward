@@ -15,7 +15,8 @@ internal sealed record HarnessCommandProfile(
 {
     private static readonly ImmutableHashSet<string> Tokens =
         ["{caseId}", "{dataset}", "{datasetHash}", "{modelProfile}", "{repositoryCommit}",
-         "{harnessCommit}", "{resultLocation}", "{outputLocation}", "{generation}"];
+         "{harnessCommit}", "{resultLocation}", "{outputLocation}", "{generation}",
+         "{replicaIndex}", "{replicaCount}"];
 
     public HarnessCommandProfile Validate(string expectedHarness)
     {
@@ -88,14 +89,17 @@ internal abstract class EvaluationHarnessAdapterBase : IEvaluationHarnessAdapter
     public EvaluationCommand CreateCommand(EvaluationWorkloadInput input, EvaluationCase evaluationCase, int generation)
     {
         if (generation < 0) throw new ArgumentOutOfRangeException(nameof(generation));
-        return CreateCommandCore(input, evaluationCase, generation.ToString(CultureInfo.InvariantCulture));
+        return CreateCommandCore(input, evaluationCase, generation.ToString(CultureInfo.InvariantCulture), 0, input.ReplicaCount);
     }
 
     public EvaluationCommand CreateCommandTemplate(EvaluationWorkloadInput input, EvaluationCase evaluationCase) =>
-        CreateCommandCore(input, evaluationCase, AttemptGenerationToken);
+        CreateCommandCore(input, evaluationCase, AttemptGenerationToken, 0, input.ReplicaCount);
+
+    public EvaluationCommand CreateCommandTemplate(EvaluationWorkloadInput input, EvaluationCase evaluationCase, int replicaIndex) =>
+        CreateCommandCore(input, evaluationCase, AttemptGenerationToken, replicaIndex, input.ReplicaCount);
 
     private EvaluationCommand CreateCommandCore(
-        EvaluationWorkloadInput input, EvaluationCase evaluationCase, string generation)
+        EvaluationWorkloadInput input, EvaluationCase evaluationCase, string generation, int replicaIndex, int replicaCount)
     {
         Validate(input);
         var replacements = new Dictionary<string, string?>(StringComparer.Ordinal)
@@ -108,7 +112,9 @@ internal abstract class EvaluationHarnessAdapterBase : IEvaluationHarnessAdapter
             ["{harnessCommit}"] = input.Harness.ResolvedCommit,
             ["{resultLocation}"] = input.Locations.ResultLocation,
             ["{outputLocation}"] = input.Locations.OutputLocation,
-            ["{generation}"] = generation
+            ["{generation}"] = generation,
+            ["{replicaIndex}"] = replicaIndex.ToString(CultureInfo.InvariantCulture),
+            ["{replicaCount}"] = replicaCount.ToString(CultureInfo.InvariantCulture)
         };
         var arguments = profile.ArgumentTemplate.Select(argument =>
             EvaluationTemplate.Expand(argument, replacements)).ToArray();
@@ -136,7 +142,9 @@ public sealed record EvaluationResultContext(
     string HarnessVersion,
     string Commit,
     string DatasetHash,
-    string ModelProfile);
+    string ModelProfile,
+    int ReplicaIndex = 0,
+    int ReplicaCount = 1);
 
 public enum EvaluationCaseStatus { Passed, Failed, Skipped, Error }
 public enum EvaluationFailureClassification { None, Harness, Infrastructure, InferenceThrottle, Task }
@@ -153,7 +161,9 @@ public sealed record EvaluationCaseResult(
     IReadOnlyDictionary<string, decimal> Metrics,
     IReadOnlyList<string> ArtifactReferences,
     EvaluationFailureClassification FailureClassification,
-    string ReceiptHash)
+    string ReceiptHash,
+    int ReplicaIndex = 0,
+    int ReplicaCount = 1)
 {
     public static EvaluationCaseResult Create(
         string caseId, EvaluationResultContext context, EvaluationCaseStatus status, decimal? score,
@@ -163,6 +173,8 @@ public sealed record EvaluationCaseResult(
         EvaluationSource.Required(caseId, "Case ID");
         if (caseId.Length > 512) throw new ArgumentException("Case ID exceeds its size bound.");
         if (context.AttemptGeneration < 0) throw new ArgumentOutOfRangeException(nameof(context));
+        if (context.ReplicaCount is < 1 or > 10 || context.ReplicaIndex < 0 || context.ReplicaIndex >= context.ReplicaCount)
+            throw new ArgumentOutOfRangeException(nameof(context), "Replica identity is outside the workload replica range.");
         EvaluationSource.Required(context.HarnessVersion, "Harness version");
         EvaluationSource.Required(context.Commit, "Repository commit");
         EvaluationSource.Required(context.DatasetHash, "Dataset hash");
@@ -185,27 +197,49 @@ public sealed record EvaluationCaseResult(
         if (sortedArtifacts.Any(x => x.Length > EvaluationLimits.MaximumArtifactReferenceLength))
             throw new ArgumentException("Artifact reference exceeds its size bound.");
         foreach (var artifact in sortedArtifacts) EvaluationLocations.ValidateLocation(artifact, "Artifact reference");
-        var receipt = EvaluationHash.Sha256(EvaluationJson.Serialize(new
-        {
-            caseId,
-            context.AttemptGeneration,
-            context.HarnessVersion,
-            context.Commit,
-            context.DatasetHash,
-            context.ModelProfile,
-            status = status.ToString(),
-            score,
-            metrics = sortedMetrics,
-            artifactReferences = sortedArtifacts,
-            failureClassification = failureClassification.ToString()
-        }));
-        return new(caseId, context.AttemptGeneration, context.HarnessVersion, context.Commit, context.DatasetHash,
-            context.ModelProfile, status, score, sortedMetrics, sortedArtifacts, failureClassification, receipt);
+        var receipt = EvaluationHash.Sha256(context.ReplicaCount == 1
+            ? EvaluationJson.Serialize(new
+            {
+                caseId,
+                context.AttemptGeneration,
+                context.HarnessVersion,
+                context.Commit,
+                context.DatasetHash,
+                context.ModelProfile,
+                status = status.ToString(),
+                score,
+                metrics = sortedMetrics,
+                artifactReferences = sortedArtifacts,
+                failureClassification = failureClassification.ToString()
+            })
+            : EvaluationJson.Serialize(new
+            {
+                caseId,
+                context.ReplicaIndex,
+                context.ReplicaCount,
+                context.AttemptGeneration,
+                context.HarnessVersion,
+                context.Commit,
+                context.DatasetHash,
+                context.ModelProfile,
+                status = status.ToString(),
+                score,
+                metrics = sortedMetrics,
+                artifactReferences = sortedArtifacts,
+                failureClassification = failureClassification.ToString()
+            }));
+        return new(caseId, context.AttemptGeneration, context.HarnessVersion, context.Commit,
+            context.DatasetHash, context.ModelProfile, status, score, sortedMetrics, sortedArtifacts,
+            failureClassification, receipt, context.ReplicaIndex, context.ReplicaCount);
     }
+
+    public string ReplicaKey => ReplicaCount == 1
+        ? CaseId
+        : $"{CaseId}#r{ReplicaIndex}";
 
     public bool HasValidReceipt() =>
         string.Equals(ReceiptHash, Create(CaseId,
-            new(AttemptGeneration, HarnessVersion, Commit, DatasetHash, ModelProfile), Status, Score,
+            new(AttemptGeneration, HarnessVersion, Commit, DatasetHash, ModelProfile, ReplicaIndex, ReplicaCount), Status, Score,
             Metrics, ArtifactReferences, FailureClassification).ReceiptHash, StringComparison.Ordinal);
 }
 
@@ -278,6 +312,16 @@ public class JsonLinesEvaluationResultParser : IEvaluationResultParser
                 metrics.Add(metric.Name, metricValue);
             }
         }
+        if (root.TryGetProperty("replicaIndex", out var replicaIndexValue) &&
+            (replicaIndexValue.ValueKind != JsonValueKind.Number ||
+             !replicaIndexValue.TryGetInt32(out var returnedReplicaIndex) ||
+             returnedReplicaIndex != context.ReplicaIndex))
+            throw new FormatException("Result replica index does not match the executing Task.");
+        if (root.TryGetProperty("replicaCount", out var replicaCountValue) &&
+            (replicaCountValue.ValueKind != JsonValueKind.Number ||
+             !replicaCountValue.TryGetInt32(out var returnedReplicaCount) ||
+             returnedReplicaCount != context.ReplicaCount))
+            throw new FormatException("Result replica count does not match the executing Task.");
         var artifacts = new List<string>();
         if (root.TryGetProperty("artifacts", out var artifactArray))
         {

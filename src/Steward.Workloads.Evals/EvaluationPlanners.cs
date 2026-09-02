@@ -112,39 +112,48 @@ internal abstract class EvaluationPlannerBase
         adapter.Validate(input);
         setupProfile.Validate(input);
         var expectedContext = new EvaluationResultContext(0, adapter.HarnessVersion, request.Input.Repository.ResolvedCommit,
-            request.Input.Dataset.ContentHash, request.Input.ModelProfileReference);
+            request.Input.Dataset.ContentHash, request.Input.ModelProfileReference, 0, input.ReplicaCount);
         var completedResults = request.CompletedResults?.ToArray() ?? [];
         foreach (var completedResult in completedResults)
-            completedResult.Validate(expectedContext with { AttemptGeneration = completedResult.Result.AttemptGeneration });
-        if (completedResults.Select(x => x.Result.CaseId).Distinct(StringComparer.Ordinal).Count() != completedResults.Length)
-            throw new ArgumentException("Completed results must contain at most one selected receipt per case.", nameof(request));
-        var completed = completedResults.Select(x => x.Result.CaseId).ToHashSet(StringComparer.Ordinal);
+            completedResult.Validate(expectedContext with
+            {
+                AttemptGeneration = completedResult.Result.AttemptGeneration,
+                ReplicaIndex = completedResult.Result.ReplicaIndex
+            });
+        if (completedResults.Select(x => x.Result.ReplicaKey).Distinct(StringComparer.Ordinal).Count() != completedResults.Length)
+            throw new ArgumentException("Completed results must contain at most one selected receipt per case replica.", nameof(request));
+        var completed = completedResults.Select(x => x.Result.ReplicaKey).ToHashSet(StringComparer.Ordinal);
         var inventoryIds = input.Inventory.Cases.Select(x => x.CaseId).ToHashSet(StringComparer.Ordinal);
-        if (completed.Any(x => !inventoryIds.Contains(x)))
+        if (completedResults.Any(x => !inventoryIds.Contains(x.Result.CaseId)))
             throw new ArgumentException("Completed case IDs must exist in the immutable inventory.", nameof(request));
 
         var selectedCases = input.Inventory.Cases.Where(x => MatchesFilters(x.CaseId, input.TaskFilters)).ToArray();
         if (selectedCases.Length == 0) throw new ArgumentException("Task filters selected no evaluation cases.", nameof(request));
         var selectedIds = selectedCases.Select(x => x.CaseId).ToHashSet(StringComparer.Ordinal);
-        if (completed.Any(x => !selectedIds.Contains(x)))
+        if (completedResults.Any(x => !selectedIds.Contains(x.Result.CaseId)))
             throw new ArgumentException("Completed results must belong to the selected case set.", nameof(request));
         var fingerprint = EvaluationHash.Sha256($"{request.WorkloadId}\n{InputFingerprint(input)}");
         var nodes = new List<TaskPlanNode>();
         var setupIds = AddSetupTasks(nodes, input, fingerprint);
-        var pendingCases = selectedCases.Where(x => !completed.Contains(x.CaseId)).ToArray();
         var caseIds = new List<TaskId>();
         var selectedOrdinals = selectedCases.Select((item, index) => (item.CaseId, index))
             .ToDictionary(x => x.CaseId, x => x.index, StringComparer.Ordinal);
         var replicaCount = input.ReplicaCount;
-        foreach (var evaluationCase in pendingCases)
+        var expectedReplicaKeys = new List<string>();
+        foreach (var evaluationCase in selectedCases)
         {
-            var command = adapter.CreateCommandTemplate(input, evaluationCase);
             var baseShard = selectedOrdinals[evaluationCase.CaseId] / input.ShardPolicy.PreferredCasesPerHost;
             for (var replica = 0; replica < replicaCount; replica++)
             {
                 var logicalKey = replicaCount == 1
                     ? $"eval/{EscapeKey(evaluationCase.CaseId)}"
                     : $"eval/{EscapeKey(evaluationCase.CaseId)}/r{replica}";
+                var replicaKey = replicaCount == 1
+                    ? evaluationCase.CaseId
+                    : $"{evaluationCase.CaseId}#r{replica}";
+                expectedReplicaKeys.Add(replicaKey);
+                if (completed.Contains(replicaKey))
+                    continue;
                 var taskId = Id(fingerprint, logicalKey);
                 caseIds.Add(taskId);
                 // Distribute replicas of the same case to different shards for node diversity
@@ -160,6 +169,10 @@ internal abstract class EvaluationPlannerBase
                 var replicaOutputLocation = replicaCount == 1
                     ? input.Locations.OutputLocation
                     : $"{input.Locations.OutputLocation}/r{replica}";
+                var command = adapter.CreateCommandTemplate(
+                    input with { Locations = new(replicaResultLocation, replicaOutputLocation) },
+                    evaluationCase,
+                    replica);
                 var runnerInput = CreateInput("steward.eval.runner/1.0", new
                 {
                     harness = adapter.HarnessName,
@@ -205,7 +218,7 @@ internal abstract class EvaluationPlannerBase
             }
         }
 
-        AddAggregateTasks(nodes, input, fingerprint, caseIds, completedResults, selectedCases.Select(x => x.CaseId).ToArray());
+        AddAggregateTasks(nodes, input, fingerprint, caseIds, completedResults, expectedReplicaKeys);
         return new(request.WorkloadId, request.PlanRevisionId, WorkloadPlan.CurrentSchemaVersion,
             $"{adapter.HarnessName}-evaluation", PlannerVersionValue, nodes, AggregateFailurePolicy.PartialSuccess,
             input.ShardPolicy.MaximumConcurrency);
@@ -369,6 +382,8 @@ internal abstract class EvaluationPlannerBase
                 completedResults = completed.Select(x => new
                 {
                     x.Result.CaseId,
+                    x.Result.ReplicaIndex,
+                    x.Result.ReplicaCount,
                     x.Result.AttemptGeneration,
                     x.Result.ReceiptHash,
                     x.PortableResultReference

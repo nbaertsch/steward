@@ -9,9 +9,16 @@ namespace Steward.Workloads.Evals;
 
 public sealed record CompletedResultReference(
     string CaseId,
+    int ReplicaIndex,
+    int ReplicaCount,
     int AttemptGeneration,
     string ReceiptHash,
-    string PortableResultReference);
+    string PortableResultReference)
+{
+    public string ReplicaKey => ReplicaCount == 1
+        ? CaseId
+        : $"{CaseId}#r{ReplicaIndex}";
+}
 
 public sealed record EvaluationReducerTaskDefinition(
     bool Final,
@@ -85,8 +92,11 @@ internal sealed class EvaluationReducerTaskType(IEvaluationResultStore store)
         if (definition.InputTaskIds.Count > 256) errors.Add("Reducer input task count exceeds 256.");
         if (definition.CompletedResults.Count > 32) errors.Add("Completed result receipt count exceeds 32.");
         if (definition.InputTaskIds.Any(x => !TaskId.TryParse(x, out _))) errors.Add("Reducer input Task ID is invalid.");
-        if (definition.CompletedResults.GroupBy(x => x.CaseId, StringComparer.Ordinal).Any(x => x.Count() > 1))
-            errors.Add("Completed result receipt case IDs must be unique.");
+        foreach (var receipt in definition.CompletedResults)
+            if (receipt.ReplicaCount < 1 || receipt.ReplicaIndex < 0 || receipt.ReplicaIndex >= receipt.ReplicaCount)
+                errors.Add("Completed result receipt replica identity is invalid.");
+        if (definition.CompletedResults.GroupBy(x => x.ReplicaKey, StringComparer.Ordinal).Any(x => x.Count() > 1))
+            errors.Add("Completed result receipt case replica IDs must be unique.");
         if (definition.ExpectedCaseCount < 0) errors.Add("Expected case count cannot be negative.");
         if (definition.ManifestKey is null || definition.ManifestKey.Length != 64 ||
             !definition.ManifestKey.All(Uri.IsHexDigit)) errors.Add("ManifestKey must be a SHA-256 hash.");
@@ -130,7 +140,9 @@ internal sealed class EvaluationReducerTaskType(IEvaluationResultStore store)
             foreach (var receipt in definition.CompletedResults)
             {
                 var result = await store.ReadPortableResultAsync(receipt.PortableResultReference, cancellationToken);
-                if (result.CaseId != receipt.CaseId || result.AttemptGeneration != receipt.AttemptGeneration ||
+                if (result.CaseId != receipt.CaseId || result.ReplicaIndex != receipt.ReplicaIndex ||
+                    result.ReplicaCount != receipt.ReplicaCount ||
+                    result.AttemptGeneration != receipt.AttemptGeneration ||
                     result.ReceiptHash != receipt.ReceiptHash)
                     throw new ReducerFailureException(EvaluationReducerErrorCode.ReceiptMismatch);
                 results.Add(result);
@@ -141,7 +153,7 @@ internal sealed class EvaluationReducerTaskType(IEvaluationResultStore store)
                                  x.DatasetHash != definition.DatasetHash ||
                                  x.ModelProfile != definition.ModelProfile))
                 throw new ReducerFailureException(EvaluationReducerErrorCode.ImmutableContextMismatch);
-            var actualIds = results.Select(x => x.CaseId).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
+            var actualIds = results.Select(x => x.ReplicaKey).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
             if (definition.Final &&
                 (actualIds.Length != definition.ExpectedCaseCount ||
                  EvaluationHash.Sha256(EvaluationJson.Serialize(actualIds)) != definition.ExpectedCaseSetHash))
@@ -256,13 +268,14 @@ internal sealed class EvaluationReducerTaskType(IEvaluationResultStore store)
             receipt.Manifest.Cases.Select(x => new EvaluationCaseResult(
                 x.CaseId, x.AttemptGeneration, receipt.Manifest.HarnessVersion, receipt.Manifest.Commit,
                 receipt.Manifest.DatasetHash, receipt.Manifest.ModelProfile, x.Status, x.Score,
-                x.Metrics, x.ArtifactReferences, x.FailureClassification, x.ReceiptHash)),
-            receipt.Manifest.Cases.Select(x => x.CaseId));
+                x.Metrics, x.ArtifactReferences, x.FailureClassification, x.ReceiptHash,
+                x.ReplicaIndex, x.ReplicaCount)),
+            receipt.Manifest.Cases.Select(x => x.ReplicaKey));
         if (regenerated.ManifestHash != receipt.ManifestHash)
             throw new ReducerFailureException(EvaluationReducerErrorCode.ReceiptMismatch);
         if (definition.Final)
         {
-            var ids = receipt.Manifest.Cases.Select(x => x.CaseId).Order(StringComparer.Ordinal).ToArray();
+            var ids = receipt.Manifest.Cases.Select(x => x.ReplicaKey).Order(StringComparer.Ordinal).ToArray();
             if (ids.Length != definition.ExpectedCaseCount ||
                 EvaluationHash.Sha256(EvaluationJson.Serialize(ids)) != definition.ExpectedCaseSetHash)
                 throw new ReducerFailureException(EvaluationReducerErrorCode.ExpectedCaseSetMismatch);

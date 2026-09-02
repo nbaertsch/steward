@@ -511,6 +511,401 @@ if (args is
 
 if (args is
     [
+        "--install-endpoint-intrinsic",
+        var intrinsicEndpointText,
+        var intrinsicProjectName,
+        var intrinsicBoxName,
+        var intrinsicReleaseUrl,
+        var intrinsicBootstrapPublic,
+        var intrinsicControlPublic,
+        var intrinsicControlIdentity,
+        var intrinsicNodeAccount,
+        var intrinsicNodeSid
+    ])
+{
+    var endpoint = new Uri(intrinsicEndpointText, UriKind.Absolute);
+    var identity = new DevBoxIdentityService(new DevBoxIdentityStore());
+    var sdk = new DevBoxesClient(
+        endpoint,
+        new DevBoxSilentTokenCredential(identity));
+    var customizations = new DevBoxCustomizationClient(
+        endpoint,
+        new AzurePipelineDevBoxCustomizationTransport(sdk.Pipeline));
+    var installerPath = Path.GetFullPath(
+        Path.Combine(
+            AppContext.BaseDirectory,
+            "..",
+            "..",
+            "..",
+            "..",
+            "catalog",
+            "devbox",
+            "steward-endpoint",
+            "Install-Steward.ps1"));
+    if (!File.Exists(installerPath))
+        installerPath = Path.GetFullPath(
+            Path.Combine(
+                Environment.CurrentDirectory,
+                "catalog",
+                "devbox",
+                "steward-endpoint",
+                "Install-Steward.ps1"));
+    var installer = File.ReadAllText(installerPath, Encoding.UTF8)
+        .Replace(
+            "__STEWARD_APPROVED_SOURCE_REPOSITORY__",
+            "nbaertsch/steward",
+            StringComparison.Ordinal)
+        .Replace(
+            "__STEWARD_APPROVED_SIGNER_WORKFLOW__",
+            "nbaertsch/steward/.github/workflows/release-endpoint.yml",
+            StringComparison.Ordinal)
+        ;
+    static string Utf8Base64(string value) =>
+        Convert.ToBase64String(Encoding.UTF8.GetBytes(value));
+
+    var installerBase64 = Utf8Base64(installer);
+    var releaseBase64 = Utf8Base64(intrinsicReleaseUrl);
+    var bootstrapBase64 = Utf8Base64(intrinsicBootstrapPublic);
+    var controlBase64 = Utf8Base64(intrinsicControlPublic);
+    var controlIdentityBase64 = Utf8Base64(intrinsicControlIdentity);
+    var nodeAccountBase64 = Utf8Base64(intrinsicNodeAccount);
+    var nodeSidBase64 = Utf8Base64(intrinsicNodeSid);
+    var command =
+        "$ErrorActionPreference='Stop';" +
+        "$u=[Text.Encoding]::UTF8;" +
+        $"$script=$u.GetString([Convert]::FromBase64String('{installerBase64}'));" +
+        $"$release=$u.GetString([Convert]::FromBase64String('{releaseBase64}'));" +
+        $"$bootstrap=$u.GetString([Convert]::FromBase64String('{bootstrapBase64}'));" +
+        $"$control=$u.GetString([Convert]::FromBase64String('{controlBase64}'));" +
+        $"$controlId=$u.GetString([Convert]::FromBase64String('{controlIdentityBase64}'));" +
+        $"$nodeAccount=$u.GetString([Convert]::FromBase64String('{nodeAccountBase64}'));" +
+        $"$nodeSid=$u.GetString([Convert]::FromBase64String('{nodeSidBase64}'));" +
+        "$scratch=Join-Path $env:ProgramData 'Steward\\install';" +
+        "New-Item -ItemType Directory -Path $scratch -Force|Out-Null;" +
+        "$path=Join-Path $scratch ('Install-Steward-'+[guid]::NewGuid().ToString('N')+'.ps1');" +
+        "Set-Content -LiteralPath $path -Value $script -Encoding utf8;" +
+        "try{& $path -ReleaseAssetUrl ([uri]$release) -BootstrapEncryptionPublicKeyBase64 $bootstrap -ControlSigningPublicKeyBase64 $control -ControlIdentity $controlId -NodeUserAccount $nodeAccount -NodeUserSid $nodeSid}" +
+        "finally{Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue}";
+    var groupName =
+        "steward-endpoint-intrinsic-" + Guid.NewGuid().ToString("N");
+    var group = await customizations.ApplyAsync(
+        intrinsicProjectName,
+        "me",
+        intrinsicBoxName,
+        groupName,
+        [
+            new(
+                "~/powershell",
+                "Install signed Steward endpoint via bootstrap recovery",
+                new Dictionary<string, string>
+                {
+                    ["command"] = command
+                },
+                DevBoxCustomizationExecutionAccount.System,
+                1_800)
+        ],
+        CancellationToken.None);
+    var deadline = DateTimeOffset.UtcNow.AddMinutes(20);
+    while (!Terminal(group.Status))
+    {
+        if (DateTimeOffset.UtcNow >= deadline)
+            throw new TimeoutException(
+                "Endpoint intrinsic installation did not reach terminal status.");
+        await Task.Delay(TimeSpan.FromSeconds(10));
+        group = await customizations.GetAsync(
+            intrinsicProjectName,
+            "me",
+            intrinsicBoxName,
+            groupName,
+            CancellationToken.None);
+    }
+    if (!Succeeded(group.Status))
+    {
+        foreach (var task in group.Tasks.Where(task =>
+                     !Succeeded(task.Status)))
+        {
+            var taskLog = await customizations.GetTaskLogAsync(
+                task.LogUri,
+                CancellationToken.None);
+            Console.Error.WriteLine(
+                $"{task.DisplayName ?? task.Name}: {task.Status}; " +
+                SafeBootstrapLogDiagnostic(taskLog));
+        }
+        throw new InvalidOperationException(
+            $"Endpoint intrinsic installation ended in {group.Status}.");
+    }
+    Console.WriteLine($"INSTALLED_INTRINSIC {intrinsicBoxName}: {group.Name}");
+    return 0;
+}
+if (args is
+    [
+        "--run-diagnostic-powershell",
+        var runEndpointText,
+        var runProjectName,
+        var runBoxName,
+        var runCommandBase64
+    ])
+{
+    var endpoint = new Uri(runEndpointText, UriKind.Absolute);
+    var identity = new DevBoxIdentityService(new DevBoxIdentityStore());
+    var sdk = new DevBoxesClient(
+        endpoint,
+        new DevBoxSilentTokenCredential(identity));
+    var customizations = new DevBoxCustomizationClient(
+        endpoint,
+        new AzurePipelineDevBoxCustomizationTransport(sdk.Pipeline));
+    var groupName = "steward-diag-run-" + Guid.NewGuid().ToString("N")[..8];
+    var command = Encoding.UTF8.GetString(Convert.FromBase64String(runCommandBase64));
+    if (command.Length > 16_000)
+        throw new ArgumentException("Diagnostic command exceeds its bound.");
+    var group = await customizations.ApplyAsync(
+        runProjectName,
+        "me",
+        runBoxName,
+        groupName,
+        [
+            new(
+                "~/powershell",
+                "Run bounded Steward diagnostic command",
+                new Dictionary<string, string> { ["command"] = command },
+                DevBoxCustomizationExecutionAccount.System,
+                300)
+        ],
+        CancellationToken.None);
+    var deadline = DateTimeOffset.UtcNow.AddMinutes(10);
+    while (!Terminal(group.Status))
+    {
+        if (DateTimeOffset.UtcNow >= deadline)
+            throw new TimeoutException("Diagnostic command did not complete.");
+        await Task.Delay(TimeSpan.FromSeconds(5));
+        group = await customizations.GetAsync(
+            runProjectName,
+            "me",
+            runBoxName,
+            groupName,
+            CancellationToken.None);
+    }
+    var log = await customizations.GetTaskLogAsync(
+        group.Tasks.Single().LogUri,
+        CancellationToken.None);
+    Console.WriteLine(log);
+    return Succeeded(group.Status) ? 0 : 1;
+}
+
+if (args is
+    [
+        "--resolve-node-user",
+        var userEndpointText,
+        var userProjectName,
+        var userBoxName
+    ])
+{
+    var endpoint = new Uri(userEndpointText, UriKind.Absolute);
+    var identity = new DevBoxIdentityService(new DevBoxIdentityStore());
+    var sdk = new DevBoxesClient(
+        endpoint,
+        new DevBoxSilentTokenCredential(identity));
+    var customizations = new DevBoxCustomizationClient(
+        endpoint,
+        new AzurePipelineDevBoxCustomizationTransport(sdk.Pipeline));
+    var groupName = "steward-user-" + Guid.NewGuid().ToString("N")[..8];
+    var command =
+        "$ErrorActionPreference='Stop';" +
+        "$p=@(Get-CimInstance Win32_UserProfile|?{!$_.Special-and$_.Loaded-and($_.SID-like'S-1-12-1-*'-or$_.SID-like'S-1-5-21-*')});" +
+        "Write-Output ('PROFILE_COUNT='+$p.Count);" +
+        "foreach($x in $p){$a='';try{$a=(New-Object Security.Principal.SecurityIdentifier($x.SID)).Translate([Security.Principal.NTAccount]).Value}catch{$a=('ERR:'+ $PSItem.Exception.Message)};[pscustomobject]@{account=$a;sid=$x.SID;localPath=$x.LocalPath;loaded=$x.Loaded}|ConvertTo-Json -Compress}";
+    var group = await customizations.ApplyAsync(
+        userProjectName,
+        "me",
+        userBoxName,
+        groupName,
+        [
+            new(
+                "~/powershell",
+                "Resolve Steward endpoint user",
+                new Dictionary<string, string> { ["command"] = command },
+                DevBoxCustomizationExecutionAccount.System,
+                300)
+        ],
+        CancellationToken.None);
+    var deadline = DateTimeOffset.UtcNow.AddMinutes(10);
+    while (!Terminal(group.Status))
+    {
+        if (DateTimeOffset.UtcNow >= deadline)
+            throw new TimeoutException("User resolution did not complete.");
+        await Task.Delay(TimeSpan.FromSeconds(5));
+        group = await customizations.GetAsync(
+            userProjectName,
+            "me",
+            userBoxName,
+            groupName,
+            CancellationToken.None);
+    }
+    var log = await customizations.GetTaskLogAsync(
+        group.Tasks.Single().LogUri,
+        CancellationToken.None);
+    Console.WriteLine(log);
+    return Succeeded(group.Status) ? 0 : 1;
+}
+
+if (args is
+    [
+        "--endpoint-msi-summary",
+        var summaryEndpointText,
+        var summaryProjectName,
+        var summaryBoxName
+    ])
+{
+    var endpoint = new Uri(summaryEndpointText, UriKind.Absolute);
+    var identity = new DevBoxIdentityService(new DevBoxIdentityStore());
+    var sdk = new DevBoxesClient(
+        endpoint,
+        new DevBoxSilentTokenCredential(identity));
+    var customizations = new DevBoxCustomizationClient(
+        endpoint,
+        new AzurePipelineDevBoxCustomizationTransport(sdk.Pipeline));
+    var groupName =
+        "steward-msi-summary-" + Guid.NewGuid().ToString("N")[..8];
+    var command =
+        "$ErrorActionPreference='Stop';" +
+        "$p='C:\\ProgramData\\Steward\\install\\steward-endpoint-msi.log';" +
+        "Write-Output ('WHOAMI='+[Security.Principal.WindowsIdentity]::GetCurrent().Name);" +
+        "Write-Output ('LOG_EXISTS='+(Test-Path -LiteralPath $p));" +
+        "if(Test-Path -LiteralPath $p){" +
+        "$patterns='Action start|Action ended|Return value 3|CustomAction|Error 1722|failed|Exception|error code|Product: Steward Endpoint';" +
+        "Select-String -LiteralPath $p -Pattern $patterns|Select-Object -Last 160|ForEach-Object{$_.Line}" +
+        "};" +
+        "$i=New-Object -ComObject WindowsInstaller.Installer;" +
+        "$u='{37C34E0A-E245-48A4-B07C-78E2955A7E65}';" +
+        "foreach($r in @($i.RelatedProducts($u))){try{Write-Output ('RELATED='+$r+' STATE='+$i.ProductState($r)+' VERSION='+$i.ProductInfo($r,'VersionString'))}catch{Write-Output ('RELATED='+$r+' ERR='+$_.Exception.Message)}};" +
+        "$failures=@(Get-ChildItem -LiteralPath 'C:\\ProgramData\\Steward' -Recurse -Force -ErrorAction SilentlyContinue -Filter '*failure*'|Select-Object -First 20);" +
+        "foreach($f in $failures){Write-Output ('FAILURE_FILE='+$f.FullName);Get-Content -LiteralPath $f.FullName -TotalCount 80 -ErrorAction SilentlyContinue}";
+    var group = await customizations.ApplyAsync(
+        summaryProjectName,
+        "me",
+        summaryBoxName,
+        groupName,
+        [
+            new(
+                "~/powershell",
+                "Summarize Steward endpoint MSI state",
+                new Dictionary<string, string>
+                {
+                    ["command"] = command
+                },
+                DevBoxCustomizationExecutionAccount.System,
+                300)
+        ],
+        CancellationToken.None);
+    var deadline = DateTimeOffset.UtcNow.AddMinutes(10);
+    while (!Terminal(group.Status))
+    {
+        if (DateTimeOffset.UtcNow >= deadline)
+            throw new TimeoutException("MSI summary did not complete.");
+        await Task.Delay(TimeSpan.FromSeconds(5));
+        group = await customizations.GetAsync(
+            summaryProjectName,
+            "me",
+            summaryBoxName,
+            groupName,
+            CancellationToken.None);
+    }
+    var log = await customizations.GetTaskLogAsync(
+        group.Tasks.Single().LogUri,
+        CancellationToken.None);
+    Console.WriteLine(log);
+    return Succeeded(group.Status) ? 0 : 1;
+}
+
+if (args is
+    [
+        "--collect-endpoint-diagnostics",
+        var diagEndpointText,
+        var diagProjectName,
+        var diagBoxName,
+        var diagOutputPath
+    ])
+{
+    var endpoint = new Uri(diagEndpointText, UriKind.Absolute);
+    var identity = new DevBoxIdentityService(new DevBoxIdentityStore());
+    var sdk = new DevBoxesClient(
+        endpoint,
+        new DevBoxSilentTokenCredential(identity));
+    var customizations = new DevBoxCustomizationClient(
+        endpoint,
+        new AzurePipelineDevBoxCustomizationTransport(sdk.Pipeline));
+    var groupName =
+        "steward-diag-" +
+        diagBoxName[^Math.Min(12, diagBoxName.Length)..] +
+        "-" + Guid.NewGuid().ToString("N")[..8];
+    var command =
+        "$ErrorActionPreference='Stop';" +
+        "$root='C:\\ProgramData\\Steward';" +
+        "$out=Join-Path $env:ProgramData ('Steward\\install\\diag-'+[guid]::NewGuid().ToString('N')+'.txt');" +
+        "New-Item -ItemType Directory -Path (Split-Path -Parent $out) -Force|Out-Null;" +
+        "'STEWARD_DIAG_BEGIN'|Set-Content -LiteralPath $out;" +
+        "'WHOAMI='+([Security.Principal.WindowsIdentity]::GetCurrent().Name)|Add-Content $out;" +
+        "$paths=@('C:\\ProgramData\\Steward\\install\\steward-endpoint-msi.log','C:\\ProgramData\\Steward\\Endpoint\\bootstrap-receipt.json');" +
+        "foreach($p in $paths){'PATH='+$p+' EXISTS='+(Test-Path -LiteralPath $p)|Add-Content $out;if(Test-Path -LiteralPath $p){'--- '+$p+' ---'|Add-Content $out;$lines=@(Get-Content -LiteralPath $p -ErrorAction SilentlyContinue);$hits=@();for($i=0;$i -lt $lines.Count;$i++){if($lines[$i] -match 'Return value 3|failed|Exception|Fatal|error'){ $hits+=$i }};foreach($h in ($hits|Select-Object -First 6)){$start=[Math]::Max(0,$h-80);$end=[Math]::Min($lines.Count-1,$h+30);$lines[$start..$end]|Add-Content $out;'---'|Add-Content $out};Get-Content -LiteralPath $p -Tail 80 -ErrorAction SilentlyContinue|Add-Content $out}};" +
+        "'--- FAILURE FILES ---'|Add-Content $out;Get-ChildItem -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue|Where-Object{$_.Name -match 'fail|diag|receipt|config|attestation|log'}|Select-Object -First 40 FullName,Length,LastWriteTime|Format-List|Out-String -Width 4096|Add-Content $out;" +
+        "$bytes=[IO.File]::ReadAllBytes($out);Write-Output ('STEWARD_ENDPOINT_DIAG_RAW:'+[Convert]::ToBase64String($bytes));[Array]::Clear($bytes,0,$bytes.Length);Remove-Item -LiteralPath $out -Force -ErrorAction SilentlyContinue";
+    var group = await customizations.ApplyAsync(
+        diagProjectName,
+        "me",
+        diagBoxName,
+        groupName,
+        [
+            new(
+                "~/powershell",
+                "Collect Steward endpoint diagnostics",
+                new Dictionary<string, string>
+                {
+                    ["command"] = command
+                },
+                DevBoxCustomizationExecutionAccount.System,
+                300)
+        ],
+        CancellationToken.None);
+    var deadline = DateTimeOffset.UtcNow.AddMinutes(10);
+    while (!Terminal(group.Status))
+    {
+        if (DateTimeOffset.UtcNow >= deadline)
+            throw new TimeoutException(
+                "Endpoint diagnostics did not complete.");
+        await Task.Delay(TimeSpan.FromSeconds(5));
+        group = await customizations.GetAsync(
+            diagProjectName,
+            "me",
+            diagBoxName,
+            groupName,
+            CancellationToken.None);
+    }
+    if (!Succeeded(group.Status))
+        throw new InvalidOperationException(
+            "Endpoint diagnostics collection failed.");
+    var log = await customizations.GetTaskLogAsync(
+        group.Tasks.Single().LogUri,
+        CancellationToken.None);
+    const string marker = "STEWARD_ENDPOINT_DIAG_RAW:";
+    var markerIndex = log.LastIndexOf(marker, StringComparison.Ordinal);
+    if (markerIndex < 0)
+        throw new InvalidDataException(
+            "Endpoint diagnostics marker is missing.");
+    var encoded = log[(markerIndex + marker.Length)..];
+    var lineEnd = encoded.IndexOfAny(['\r', '\n']);
+    if (lineEnd >= 0)
+        encoded = encoded[..lineEnd];
+    var bytes = Convert.FromBase64String(encoded.Trim());
+    WritePrivateFile(
+        Path.GetFullPath(diagOutputPath),
+        bytes);
+    CryptographicOperations.ZeroMemory(bytes);
+    Console.WriteLine($"WROTE_ENDPOINT_DIAGNOSTICS {diagOutputPath}");
+    return 0;
+}
+
+if (args is
+    [
         "--retrieve-msi-receipt",
         var retrieveEndpointText,
         var retrieveProjectName,
@@ -2686,3 +3081,4 @@ internal sealed record StatusQueryIntent(
         File.Move(pending, path);
     }
 }
+

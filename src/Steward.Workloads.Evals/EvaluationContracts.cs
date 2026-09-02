@@ -334,7 +334,9 @@ public sealed record CompletedEvaluationResult(EvaluationCaseResult Result, stri
         if (!Result.HasValidReceipt()) throw new ArgumentException("Completed result receipt hash is invalid.");
         if (Result.AttemptGeneration < 0) throw new ArgumentException("Completed result generation cannot be negative.");
         if (Result.HarnessVersion != expected.HarnessVersion || Result.Commit != expected.Commit ||
-            Result.DatasetHash != expected.DatasetHash || Result.ModelProfile != expected.ModelProfile)
+            Result.DatasetHash != expected.DatasetHash || Result.ModelProfile != expected.ModelProfile ||
+            Result.ReplicaCount != expected.ReplicaCount || Result.ReplicaIndex < 0 ||
+            Result.ReplicaIndex >= expected.ReplicaCount)
             throw new ArgumentException("Completed result immutable context does not match the workload.");
         if (Result.FailureClassification == EvaluationFailureClassification.InferenceThrottle)
             throw new ArgumentException("Inference-throttled attempts are not completed case results.");
@@ -368,6 +370,7 @@ internal interface IEvaluationHarnessAdapter
     void Validate(EvaluationWorkloadInput input);
     EvaluationCommand CreateCommand(EvaluationWorkloadInput input, EvaluationCase evaluationCase, int generation);
     EvaluationCommand CreateCommandTemplate(EvaluationWorkloadInput input, EvaluationCase evaluationCase);
+    EvaluationCommand CreateCommandTemplate(EvaluationWorkloadInput input, EvaluationCase evaluationCase, int replicaIndex);
     IEvaluationResultParser ResultParser { get; }
 }
 
