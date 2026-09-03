@@ -47,7 +47,8 @@ public static class RdpDvcEmbeddingConfigurationStore
         string path,
         string brokerPipeName,
         string evidencePipeName,
-        string evidenceKeyFile)
+        string evidenceKeyFile,
+        Action<string>? diagnosticSink = null)
     {
         Validate(brokerPipeName, evidencePipeName, evidenceKeyFile);
         if (!Path.IsPathFullyQualified(path))
@@ -56,11 +57,13 @@ public static class RdpDvcEmbeddingConfigurationStore
         path = Path.GetFullPath(path);
         var directory = Path.GetDirectoryName(path)!;
         PreparePrivateDirectory(directory);
+        diagnosticSink?.Invoke("dvc-route-directory-ready");
         var temporary = path + "." +
             Guid.NewGuid().ToString("N") + ".tmp";
-        var diagnosticLog = Path.ChangeExtension(path, ".log");
-        if (File.Exists(diagnosticLog))
-            DeletePrivateFile(diagnosticLog);
+        var diagnosticLog = Path.ChangeExtension(
+            path,
+            Guid.NewGuid().ToString("N") + ".log");
+        diagnosticSink?.Invoke("dvc-route-log-allocated");
         try
         {
             File.WriteAllBytes(
@@ -72,9 +75,13 @@ public static class RdpDvcEmbeddingConfigurationStore
                         evidencePipeName,
                         Path.GetFullPath(evidenceKeyFile),
                         diagnosticLog)));
+            diagnosticSink?.Invoke("dvc-route-temporary-written");
             RestrictFile(temporary);
+            diagnosticSink?.Invoke("dvc-route-temporary-restricted");
             File.Move(temporary, path, overwrite: true);
+            diagnosticSink?.Invoke("dvc-route-published");
             RestrictFile(path);
+            diagnosticSink?.Invoke("dvc-route-published-restricted");
         }
         finally
         {
@@ -164,11 +171,31 @@ public static class RdpDvcEmbeddingConfigurationStore
     private static void PreparePrivateDirectory(string directory)
     {
         EnsureNoReparseSegments(directory);
-        Directory.CreateDirectory(directory);
+        if (Directory.Exists(directory))
+        {
+            var initialCurrent = CurrentUser();
+            var initialSecurity =
+                new DirectoryInfo(directory).GetAccessControl();
+            if (IsPrivate(initialSecurity, initialCurrent))
+                return;
+            if (!initialCurrent.Equals(
+                    initialSecurity.GetOwner(
+                        typeof(SecurityIdentifier))))
+                throw new UnauthorizedAccessException(
+                    "The DVC embedding configuration directory owner is invalid.");
+        }
+        else
+        {
+            Directory.CreateDirectory(directory);
+        }
         EnsureNoReparseSegments(directory);
         var current = CurrentUser();
+        var existing = new DirectoryInfo(directory).GetAccessControl();
+        if (!current.Equals(
+                existing.GetOwner(typeof(SecurityIdentifier))))
+            throw new UnauthorizedAccessException(
+                "The DVC embedding configuration directory owner is invalid.");
         var security = new DirectorySecurity();
-        security.SetOwner(current);
         security.SetAccessRuleProtection(true, false);
         security.AddAccessRule(new(
             current,
@@ -185,12 +212,9 @@ public static class RdpDvcEmbeddingConfigurationStore
         EnsureNoReparseSegments(directory);
         var current = CurrentUser();
         var security = new DirectoryInfo(directory).GetAccessControl();
-        if (!security.AreAccessRulesProtected ||
-            !current.Equals(
-                security.GetOwner(typeof(SecurityIdentifier))))
+        if (!IsPrivate(security, current))
             throw new UnauthorizedAccessException(
                 "The DVC embedding configuration directory is not private.");
-        EnsureOnlyCurrentUserAllows(security, current);
     }
 
     private static void RestrictFile(string path)
@@ -238,6 +262,25 @@ public static class RdpDvcEmbeddingConfigurationStore
                 !current.Equals(rule.IdentityReference))
                 throw new UnauthorizedAccessException(
                     "The DVC embedding configuration grants unintended access.");
+    }
+
+    private static bool IsPrivate(
+        FileSystemSecurity security,
+        SecurityIdentifier current)
+    {
+        if (!security.AreAccessRulesProtected ||
+            !current.Equals(
+                security.GetOwner(typeof(SecurityIdentifier))))
+            return false;
+        var rules = security.GetAccessRules(
+            true,
+            true,
+            typeof(SecurityIdentifier));
+        foreach (FileSystemAccessRule rule in rules)
+            if (rule.AccessControlType == AccessControlType.Allow &&
+                !current.Equals(rule.IdentityReference))
+                return false;
+        return true;
     }
 
     private static SecurityIdentifier CurrentUser() =>

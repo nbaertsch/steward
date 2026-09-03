@@ -177,12 +177,14 @@ try
                 new Windows365EndUserResourceCatalog(
                     http,
                     artifacts.PackageVersion.ToString(),
-                    devBoxName),
+                    devBoxName,
+                    options.DiagnosticSink),
                 new(
                     root,
                     dvcBrokerPipeName,
                     evidencePipeName,
-                    evidenceKeyFile)),
+                    evidenceKeyFile),
+                options.DiagnosticSink),
             productionEvidenceSource,
             TimeSpan.FromMinutes(5),
             new ProtectedFileRdpDvcLocalCarrier(

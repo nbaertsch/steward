@@ -10,17 +10,22 @@ public sealed record RdpDvcPerConnectionConfiguration(
     string EvidencePipeName,
     string EvidenceKeyFile)
 {
-    public RdpDvcPerConnectionRoute Create(string connectionId)
+    public RdpDvcPerConnectionRoute Create(
+        string connectionId,
+        Action<string>? diagnosticSink = null)
     {
         var route = RdpDvcPerConnectionRoute.Create(
             Directory,
             BrokerNamespace,
             connectionId);
+        diagnosticSink?.Invoke("windows-app-route-derived");
         RdpDvcEmbeddingConfigurationStore.Write(
             route.ConfigurationPath,
             route.BrokerPipeName,
             EvidencePipeName,
-            EvidenceKeyFile);
+            EvidenceKeyFile,
+            diagnosticSink);
+        diagnosticSink?.Invoke("windows-app-route-written");
         return route;
     }
 }

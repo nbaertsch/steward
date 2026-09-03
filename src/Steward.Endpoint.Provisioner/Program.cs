@@ -1313,6 +1313,7 @@ internal enum EndpointAclAuthority
     Privileged,
     AssignedUserRoot,
     AssignedUserMutable,
+    AssignedUserWorkspaceRoot,
     AssignedUserSelfHardening,
     AssignedUserReadOnly
 }
@@ -1405,6 +1406,11 @@ internal sealed record EndpointAclPlan(
         if (string.Equals(first, "keys", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(first, "receipts", StringComparison.OrdinalIgnoreCase))
             return EndpointAclAuthority.AssignedUserReadOnly;
+        if (isDirectory &&
+            relative.Equals(
+                "workspaces",
+                StringComparison.OrdinalIgnoreCase))
+            return EndpointAclAuthority.AssignedUserWorkspaceRoot;
         var credentialVault = Path.Combine("credentials", "node");
         if (relative.Equals(
                 credentialVault,
@@ -1563,6 +1569,9 @@ internal sealed class IcaclsEndpointSecurity : IEndpointSecurity
                         FileSystemRights.Modify |
                         FileSystemRights.ChangePermissions |
                         FileSystemRights.TakeOwnership,
+                    EndpointAclAuthority.AssignedUserWorkspaceRoot =>
+                        FileSystemRights.Modify |
+                        FileSystemRights.ChangePermissions,
                     _ => FileSystemRights.Modify
                 });
         new FileInfo(item.Path).SetAccessControl(fileSecurity);
@@ -1641,6 +1650,9 @@ internal sealed class IcaclsEndpointSecurity : IEndpointSecurity
                     FileSystemRights.Modify |
                     FileSystemRights.ChangePermissions |
                     FileSystemRights.TakeOwnership,
+                EndpointAclAuthority.AssignedUserWorkspaceRoot =>
+                    FileSystemRights.Modify |
+                    FileSystemRights.ChangePermissions,
                 _ => FileSystemRights.Modify
             });
     }

@@ -11,7 +11,8 @@ namespace Steward.ConnectionHost.Windows;
 public sealed class WindowsAppIsolatedConnectionLeaseFactory(
     RdCoreCapabilityReport capability,
     IWindows365EndUserResourceCatalog resourceCatalog,
-    RdpDvcPerConnectionConfiguration? dvcConfiguration = null) :
+    RdpDvcPerConnectionConfiguration? dvcConfiguration = null,
+    Action<string>? diagnosticSink = null) :
     IRdCoreConnectionLeaseFactory
 {
     public async Task<IRdCoreConnectionLeaseHandle> CreateAsync(
@@ -51,17 +52,22 @@ public sealed class WindowsAppIsolatedConnectionLeaseFactory(
                 request.ProviderResourceUri,
                 cancellationToken)
             .ConfigureAwait(false);
+        diagnosticSink?.Invoke("windows-app-entity-resolved");
         if (!Guid.TryParse(entityId, out var parsedEntityId) ||
             parsedEntityId == Guid.Empty)
             throw new InvalidDataException(
                 "The Windows 365 entity ID must be a nonempty GUID.");
-        var route = dvcConfiguration?.Create(request.ConnectionId);
+        var route = dvcConfiguration?.Create(
+            request.ConnectionId,
+            diagnosticSink);
+        diagnosticSink?.Invoke("windows-app-route-created");
         try
         {
             return new WindowsAppIsolatedConnectionLease(
                 capability.Artifacts,
                 parsedEntityId,
-                route?.ConfigurationPath);
+                route?.ConfigurationPath,
+                diagnosticSink);
         }
         catch
         {
@@ -99,7 +105,8 @@ public sealed class WindowsAppIsolatedConnectionLeaseFactory(
 internal sealed class WindowsAppIsolatedConnectionLease(
     RdCorePackageArtifacts artifacts,
     Guid entityId,
-    string? embeddingConfigurationPath = null) :
+    string? embeddingConfigurationPath = null,
+    Action<string>? diagnosticSink = null) :
     IExternallyProvenRdCoreConnectionLeaseHandle,
     IRdCorePresentationLeaseHandle
 {
@@ -347,8 +354,10 @@ internal sealed class WindowsAppIsolatedConnectionLease(
 
     private void Start(CancellationToken cancellationToken)
     {
+        diagnosticSink?.Invoke("windows-app-launch-start");
         outOfProcOverride =
             WindowsAppOutOfProcOverride.Disable(cancellationToken);
+        diagnosticSink?.Invoke("windows-app-override-disabled");
         cancellationToken.ThrowIfCancellationRequested();
         var executable = Path.GetFullPath(
             Path.Combine(
@@ -375,7 +384,9 @@ internal sealed class WindowsAppIsolatedConnectionLease(
             0);
         if (desktop == 0)
             throw new Win32Exception(Marshal.GetLastWin32Error());
+        diagnosticSink?.Invoke("windows-app-desktop-created");
         job = Native.CreateRestrictedJob();
+        diagnosticSink?.Invoke("windows-app-job-created");
 
         var desktopPointer = Marshal.StringToHGlobalUni(
             @"winsta0\" + desktopName);
@@ -407,6 +418,7 @@ internal sealed class WindowsAppIsolatedConnectionLease(
 
             process = created.Process;
             processId = created.ProcessId;
+            diagnosticSink?.Invoke("windows-app-process-created");
             try
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -417,10 +429,13 @@ internal sealed class WindowsAppIsolatedConnectionLease(
                         StringComparison.Ordinal))
                     throw new InvalidDataException(
                         "The Windows App process package identity changed.");
+                diagnosticSink?.Invoke("windows-app-package-validated");
                 if (!Native.AssignProcessToJobObject(job, process))
                     throw new Win32Exception(Marshal.GetLastWin32Error());
+                diagnosticSink?.Invoke("windows-app-job-assigned");
                 if (Native.ResumeThread(created.Thread) == uint.MaxValue)
                     throw new Win32Exception(Marshal.GetLastWin32Error());
+                diagnosticSink?.Invoke("windows-app-thread-resumed");
                 if (!Native.IsProcessConfinedToDesktop(
                         processId,
                         desktopName,
@@ -428,6 +443,7 @@ internal sealed class WindowsAppIsolatedConnectionLease(
                     throw new InvalidDataException(
                         "The Windows App process escaped its isolated desktop: " +
                         Native.DescribeProcessDesktops(processId));
+                diagnosticSink?.Invoke("windows-app-desktop-confined");
                 Thread.Sleep(500);
                 if (Native.HasOtherPackageProcessInCurrentSession(
                         processId,
@@ -437,6 +453,7 @@ internal sealed class WindowsAppIsolatedConnectionLease(
                         artifacts.PackageRoot))
                     throw new InvalidDataException(
                         "A Windows App service process was not headless.");
+                diagnosticSink?.Invoke("windows-app-launch-validated");
             }
             catch
             {

@@ -31,23 +31,35 @@ public sealed class Windows365EndUserResourceCatalog(
         CancellationToken cancellationToken)
     {
         var target = ReadTarget(providerResource);
-        var response = await transport.GetAsync(
-                new(
-                    ResourcesUri,
-                    DevBoxConnectionAudience.Windows365EndUser,
-                    4 * 1024 * 1024,
-                    TimeSpan.FromMinutes(1),
-                    ["application/json"],
-                    AllowSetCookieResponse: true,
-                    RequestHeaders: new Dictionary<string, string>(
-                        StringComparer.OrdinalIgnoreCase)
-                    {
-                        ["source-client"] = "NxtClient",
-                        ["client-version"] = clientVersion,
-                        ["cpc-data-boundary"] = "commercial"
-                    }),
-                cancellationToken)
-            .ConfigureAwait(false);
+        diagnosticSink?.Invoke("entity-catalog-request-start");
+        DevBoxBrokerHttpResponse response;
+        try
+        {
+            response = await transport.GetAsync(
+                    new(
+                        ResourcesUri,
+                        DevBoxConnectionAudience.Windows365EndUser,
+                        4 * 1024 * 1024,
+                        TimeSpan.FromMinutes(1),
+                        ["application/json"],
+                        AllowSetCookieResponse: true,
+                        RequestHeaders: new Dictionary<string, string>(
+                            StringComparer.OrdinalIgnoreCase)
+                        {
+                            ["source-client"] = "NxtClient",
+                            ["client-version"] = clientVersion,
+                            ["cpc-data-boundary"] = "commercial"
+                        }),
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            diagnosticSink?.Invoke(
+                $"entity-catalog-request-failed-{exception.GetType().Name}");
+            throw;
+        }
+        diagnosticSink?.Invoke("entity-catalog-response-received");
         if ((int)response.StatusCode is < 200 or >= 300)
             throw new HttpRequestException(
                 "The Windows 365 End User resource catalog failed.",

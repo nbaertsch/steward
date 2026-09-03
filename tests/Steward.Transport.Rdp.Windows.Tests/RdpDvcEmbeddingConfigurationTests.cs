@@ -63,6 +63,42 @@ public sealed class RdpDvcEmbeddingConfigurationTests : IDisposable
             StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void Rewriting_configuration_allocates_a_new_diagnostic_log()
+    {
+        Directory.CreateDirectory(root);
+        var key = Path.Combine(root, "evidence.key");
+        File.WriteAllBytes(key, new byte[32]);
+        var configuration = Path.Combine(
+            root,
+            "node-b1",
+            "embedding.json");
+
+        RdpDvcEmbeddingConfigurationStore.Write(
+            configuration,
+            "Steward.Broker.b1",
+            "Steward.Evidence.b1",
+            key);
+        var first =
+            RdpDvcEmbeddingConfigurationStore.Load(configuration);
+        File.WriteAllText(first.DiagnosticLogFile, "active");
+
+        RdpDvcEmbeddingConfigurationStore.Write(
+            configuration,
+            "Steward.Broker.b1",
+            "Steward.Evidence.b1",
+            key);
+        var second =
+            RdpDvcEmbeddingConfigurationStore.Load(configuration);
+
+        Assert.NotEqual(
+            first.DiagnosticLogFile,
+            second.DiagnosticLogFile);
+        Assert.Equal(
+            "active",
+            File.ReadAllText(first.DiagnosticLogFile));
+    }
+
     public void Dispose()
     {
         Environment.SetEnvironmentVariable(

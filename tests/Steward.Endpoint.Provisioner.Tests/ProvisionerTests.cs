@@ -173,7 +173,9 @@ public sealed class ProvisionerTests : IDisposable
         var state = Path.Combine(root, "state");
         var credentials = Path.Combine(state, "credentials");
         var nodeVault = Path.Combine(credentials, "node");
+        var workspaces = Path.Combine(state, "workspaces");
         Directory.CreateDirectory(nodeVault);
+        Directory.CreateDirectory(workspaces);
         var currentSid = WindowsIdentity.GetCurrent().User ??
             throw new InvalidOperationException();
 
@@ -193,6 +195,12 @@ public sealed class ProvisionerTests : IDisposable
             plan.Paths.Single(item =>
                 item.Path.Equals(
                     nodeVault,
+                    StringComparison.OrdinalIgnoreCase)).Authority);
+        Assert.Equal(
+            EndpointAclAuthority.AssignedUserWorkspaceRoot,
+            plan.Paths.Single(item =>
+                item.Path.Equals(
+                    workspaces,
                     StringComparison.OrdinalIgnoreCase)).Authority);
 
         new IcaclsEndpointSecurity().PrepareStateRoot(
@@ -214,6 +222,15 @@ public sealed class ProvisionerTests : IDisposable
             FileSystemRights.TakeOwnership));
         Assert.True(nodeVaultRule.FileSystemRights.HasFlag(
             FileSystemRights.ChangePermissions));
+        var workspacesRule = Assert.Single(RulesFor(
+            new DirectoryInfo(workspaces).GetAccessControl(),
+            currentSid));
+        Assert.True(workspacesRule.FileSystemRights.HasFlag(
+            FileSystemRights.Modify));
+        Assert.True(workspacesRule.FileSystemRights.HasFlag(
+            FileSystemRights.ChangePermissions));
+        Assert.False(workspacesRule.FileSystemRights.HasFlag(
+            FileSystemRights.TakeOwnership));
 
         static FileSystemAccessRule[] RulesFor(
             FileSystemSecurity security,
