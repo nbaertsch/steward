@@ -1,5 +1,8 @@
 using System.IO.Pipes;
+using System.Net;
+using System.Net.Http.Headers;
 using System.Security.AccessControl;
+using System.Security.Cryptography;
 using System.Security.Principal;
 using Steward.Maintenance.Windows;
 
@@ -184,13 +187,86 @@ public sealed class MaintenanceSecurityTests : IDisposable
             exception.Message);
     }
 
+    [Fact]
+    public async Task Approved_artifact_download_resumes_a_verified_partial_file()
+    {
+        var stateRoot = Path.Combine(root, "resume");
+        Directory.CreateDirectory(Path.Combine(stateRoot, "staging"));
+        var content = System.Text.Encoding.UTF8.GetBytes(
+            "signed-endpoint-release");
+        const int partialLength = 7;
+        const string name = "endpoint.msi";
+        await File.WriteAllBytesAsync(
+            Path.Combine(stateRoot, "staging", name + ".partial"),
+            content[..partialLength]);
+        var handler = new RangeHandler(content, partialLength);
+        using var client = new HttpClient(handler);
+        var executor = new WindowsMaintenanceOperationExecutor(
+            stateRoot,
+            new MaintenanceServiceConfiguration(
+                1,
+                "pipe",
+                WindowsIdentity.GetCurrent().User!.Value,
+                "account",
+                "control",
+                "keeper",
+                Guid.NewGuid(),
+                "1.0.0",
+                "owner/repository",
+                "owner/repository/.github/workflows/release-endpoint.yml",
+                Path.Combine(root, "endpoint"),
+                Path.Combine(root, "install"),
+                Path.Combine(root, "versions"),
+                Guid.NewGuid().ToString("D")),
+            client,
+            RandomNumberGenerator.GetBytes(32));
+        var artifact = new ApprovedArtifact(
+            1,
+            ApprovedArtifactKind.EndpointMsi,
+            new Uri(
+                "https://github.com/owner/repository/releases/download/v1/endpoint.msi"),
+            Convert.ToHexString(SHA256.HashData(content)),
+            content.Length);
+
+        var path = await executor.DownloadAsync(artifact, name, default);
+
+        Assert.Equal(content, await File.ReadAllBytesAsync(path));
+        Assert.Equal(partialLength, handler.ObservedOffset);
+        Assert.False(File.Exists(path + ".partial"));
+    }
+
+    private sealed class RangeHandler(byte[] content, int expectedOffset)
+        : HttpMessageHandler
+    {
+        internal long? ObservedOffset { get; private set; }
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            ObservedOffset = request.Headers.Range?.Ranges.Single().From;
+            var responseContent = new ByteArrayContent(
+                content[expectedOffset..]);
+            responseContent.Headers.ContentRange = new ContentRangeHeaderValue(
+                expectedOffset,
+                content.Length - 1,
+                content.Length);
+            return Task.FromResult(new HttpResponseMessage(
+                HttpStatusCode.PartialContent)
+            {
+                RequestMessage = request,
+                Content = responseContent
+            });
+        }
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(root))
             Directory.Delete(root, recursive: true);
     }
 }
-
 
 
 

@@ -40,6 +40,13 @@ public sealed class WorkloadIsolationException(
 
 public static class WindowsWorkloadIsolation
 {
+    public static class DockerTransportCapability
+    {
+        public const string Sid =
+            "S-1-15-3-1024-2998326250-2988858485-1442624992-3960250298-" +
+            "982467102-3587974224-2518029134-186276071";
+    }
+
     private static readonly SecurityIdentifier SystemSid = new(
         WellKnownSidType.LocalSystemSid,
         null);
@@ -270,13 +277,47 @@ public static class WindowsWorkloadIsolation
     {
         ValidateProfile(profile);
         var name = AppContainerName(profile);
-        var result = NativeMethods.CreateAppContainerProfile(
-            name,
-            name,
-            "Isolated Steward task authority",
-            IntPtr.Zero,
-            0,
-            out var sid);
+        IntPtr capabilitySid = IntPtr.Zero;
+        IntPtr capabilityArray = IntPtr.Zero;
+        int result;
+        IntPtr sid;
+        try
+        {
+            if (profile.Capability == ProcessIsolationCapability.Compose)
+            {
+                var dockerSid = new SecurityIdentifier(
+                    DockerTransportCapability.Sid);
+                var bytes = new byte[dockerSid.BinaryLength];
+                dockerSid.GetBinaryForm(bytes, 0);
+                capabilitySid = Marshal.AllocHGlobal(bytes.Length);
+                Marshal.Copy(bytes, 0, capabilitySid, bytes.Length);
+                capabilityArray = Marshal.AllocHGlobal(
+                    Marshal.SizeOf<NativeMethods.SidAndAttributes>());
+                Marshal.StructureToPtr(
+                    new NativeMethods.SidAndAttributes
+                    {
+                        Sid = capabilitySid,
+                        Attributes = NativeMethods.SecurityGroupEnabled
+                    },
+                    capabilityArray,
+                    fDeleteOld: false);
+                CryptographicOperations.ZeroMemory(bytes);
+            }
+            result = NativeMethods.CreateAppContainerProfile(
+                name,
+                name,
+                "Isolated Steward task authority",
+                capabilityArray,
+                capabilityArray == IntPtr.Zero ? 0u : 1u,
+                out sid);
+        }
+        finally
+        {
+            if (capabilityArray != IntPtr.Zero)
+                Marshal.FreeHGlobal(capabilityArray);
+            if (capabilitySid != IntPtr.Zero)
+                Marshal.FreeHGlobal(capabilitySid);
+        }
         if (result == NativeMethods.HResultAlreadyExists)
         {
             result = NativeMethods.DeriveAppContainerSidFromAppContainerName(
@@ -287,7 +328,7 @@ public static class WindowsWorkloadIsolation
             throw new Win32Exception(
                 result,
                 $"AppContainer authority creation failed with HRESULT 0x{result:X8}.");
-        return new SecurityCapabilitiesLease(sid);
+        return new SecurityCapabilitiesLease(sid, profile.Capability);
     }
 
     private static string AppContainerName(ProcessIsolationProfile profile) =>
@@ -568,15 +609,39 @@ public static class WindowsWorkloadIsolation
     internal sealed class SecurityCapabilitiesLease : IDisposable
     {
         private IntPtr structure;
+        private IntPtr capabilitySid;
+        private IntPtr capabilityArray;
 
-        internal SecurityCapabilitiesLease(IntPtr appContainerSid)
+        internal SecurityCapabilitiesLease(
+            IntPtr appContainerSid,
+            ProcessIsolationCapability capability)
         {
             AppContainerSid = appContainerSid;
+            if (capability == ProcessIsolationCapability.Compose)
+            {
+                var sid = new SecurityIdentifier(
+                    DockerTransportCapability.Sid);
+                var bytes = new byte[sid.BinaryLength];
+                sid.GetBinaryForm(bytes, 0);
+                capabilitySid = Marshal.AllocHGlobal(bytes.Length);
+                Marshal.Copy(bytes, 0, capabilitySid, bytes.Length);
+                capabilityArray = Marshal.AllocHGlobal(
+                    Marshal.SizeOf<NativeMethods.SidAndAttributes>());
+                Marshal.StructureToPtr(
+                    new NativeMethods.SidAndAttributes
+                    {
+                        Sid = capabilitySid,
+                        Attributes = NativeMethods.SecurityGroupEnabled
+                    },
+                    capabilityArray,
+                    fDeleteOld: false);
+                CryptographicOperations.ZeroMemory(bytes);
+            }
             var value = new NativeMethods.SecurityCapabilities
             {
                 AppContainerSid = appContainerSid,
-                Capabilities = IntPtr.Zero,
-                CapabilityCount = 0,
+                Capabilities = capabilityArray,
+                CapabilityCount = capabilityArray == IntPtr.Zero ? 0u : 1u,
                 Reserved = 0
             };
             structure = Marshal.AllocHGlobal(
@@ -593,9 +658,15 @@ public static class WindowsWorkloadIsolation
         {
             if (structure != IntPtr.Zero)
                 Marshal.FreeHGlobal(structure);
+            if (capabilityArray != IntPtr.Zero)
+                Marshal.FreeHGlobal(capabilityArray);
+            if (capabilitySid != IntPtr.Zero)
+                Marshal.FreeHGlobal(capabilitySid);
             if (AppContainerSid != IntPtr.Zero)
                 _ = NativeMethods.FreeSid(AppContainerSid);
             structure = IntPtr.Zero;
+            capabilityArray = IntPtr.Zero;
+            capabilitySid = IntPtr.Zero;
             AppContainerSid = IntPtr.Zero;
         }
     }
@@ -647,6 +718,7 @@ public static class WindowsWorkloadIsolation
 #pragma warning disable SYSLIB1054
     private static class NativeMethods
     {
+        internal const uint SecurityGroupEnabled = 0x00000004;
         internal const uint DaclSecurityInformation = 0x00000004;
         internal const int ReadControl = 0x00020000;
         internal const int WindowStationReadAttributes = 0x00000002;
@@ -663,6 +735,13 @@ public static class WindowsWorkloadIsolation
             internal IntPtr Capabilities;
             internal uint CapabilityCount;
             internal uint Reserved;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct SidAndAttributes
+        {
+            internal IntPtr Sid;
+            internal uint Attributes;
         }
 
         [StructLayout(LayoutKind.Sequential)]

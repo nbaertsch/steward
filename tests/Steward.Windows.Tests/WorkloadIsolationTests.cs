@@ -1,5 +1,6 @@
 using System.Security.AccessControl;
 using System.Security.Principal;
+using System.Runtime.InteropServices;
 using Steward.Domain;
 using Steward.Runtime.Windows;
 using Steward.Tasks.Abstractions;
@@ -53,6 +54,64 @@ public sealed class WorkloadIsolationTests : IDisposable
             first.Workspace,
             environment.Variables.Single(variable =>
                 variable.Name == "USERPROFILE").Value);
+    }
+
+    [Fact]
+    public void Docker_transport_capability_is_a_narrow_capability_sid()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+        var sid = new SecurityIdentifier(
+            WindowsWorkloadIsolation.DockerTransportCapability.Sid);
+
+        Assert.StartsWith("S-1-15-3-1024-", sid.Value);
+        Assert.NotEqual("S-1-15-2-1", sid.Value);
+    }
+
+    [Fact]
+    public void Compose_authority_receives_only_the_Docker_transport_capability()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+        var profile = Profile("compose-capability", ProcessIsolationCapability.Compose);
+        Directory.CreateDirectory(profile.Workspace);
+        try
+        {
+            using var lease =
+                WindowsWorkloadIsolation.CreateSecurityCapabilities(profile);
+            var capabilities = Marshal.PtrToStructure<TestSecurityCapabilities>(
+                lease.Pointer);
+            var capability = Marshal.PtrToStructure<TestSidAndAttributes>(
+                capabilities.Capabilities);
+
+            Assert.Equal(1u, capabilities.CapabilityCount);
+            Assert.Equal(
+                WindowsWorkloadIsolation.DockerTransportCapability.Sid,
+                new SecurityIdentifier(capability.Sid).Value);
+            Assert.Equal(0x00000004u, capability.Attributes);
+        }
+        finally
+        {
+            WindowsWorkloadIsolation.Release(
+                profile.AttemptId,
+                profile.Generation);
+        }
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct TestSecurityCapabilities
+    {
+        public IntPtr AppContainerSid;
+        public IntPtr Capabilities;
+        public uint CapabilityCount;
+        public uint Reserved;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct TestSidAndAttributes
+    {
+        public IntPtr Sid;
+        public uint Attributes;
     }
 
     [Fact]

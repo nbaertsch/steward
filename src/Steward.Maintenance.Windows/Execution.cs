@@ -633,7 +633,7 @@ internal sealed partial class WindowsMaintenanceOperationExecutor(
         return MaintenanceExecutionResult.AwaitingReboot(identity);
     }
 
-    private async Task<string> DownloadAsync(
+    internal async Task<string> DownloadAsync(
         ApprovedArtifact artifact,
         string name,
         CancellationToken cancellationToken)
@@ -644,36 +644,75 @@ internal sealed partial class WindowsMaintenanceOperationExecutor(
         var destination = Path.Combine(directory, name);
         if (File.Exists(destination) && ArtifactMatches(destination, artifact))
             return destination;
-        var pending = destination + ".new";
+        var pending = destination + ".partial";
+        var resumeOffset = File.Exists(pending)
+            ? new FileInfo(pending).Length
+            : 0;
+        if (resumeOffset == artifact.Length)
+        {
+            if (ArtifactMatches(pending, artifact))
+            {
+                File.Move(pending, destination, overwrite: true);
+                return destination;
+            }
+            File.Delete(pending);
+            resumeOffset = 0;
+        }
+        if (resumeOffset > artifact.Length)
+        {
+            File.Delete(pending);
+            resumeOffset = 0;
+        }
         using var request = new HttpRequestMessage(HttpMethod.Get, artifact.Uri);
+        if (resumeOffset > 0)
+            request.Headers.Range =
+                new System.Net.Http.Headers.RangeHeaderValue(
+                    resumeOffset,
+                    null);
         using var response = await httpClient.SendAsync(
                 request,
                 HttpCompletionOption.ResponseHeadersRead,
                 cancellationToken)
             .ConfigureAwait(false);
+        var append = resumeOffset > 0 &&
+            response.StatusCode == System.Net.HttpStatusCode.PartialContent &&
+            response.Content.Headers.ContentRange is
+            {
+                From: not null,
+                Length: not null
+            } range &&
+            range.From == resumeOffset &&
+            range.Length == artifact.Length;
+        if (resumeOffset > 0 &&
+            response.StatusCode == System.Net.HttpStatusCode.OK)
+        {
+            resumeOffset = 0;
+            append = false;
+        }
+        var expectedResponseLength = artifact.Length - resumeOffset;
         if (!response.IsSuccessStatusCode ||
             !ApprovedDownloadDestination(
                 artifact.Uri,
                 response.RequestMessage?.RequestUri) ||
             response.Content.Headers.ContentLength is long contentLength &&
-            contentLength != artifact.Length)
+            contentLength != expectedResponseLength ||
+            resumeOffset > 0 && !append)
             throw new MaintenanceProtocolException(
                 "artifact_download_failed",
                 "Approved maintenance artifact download failed.");
-        try
+        long total = resumeOffset;
         {
             await using var input = await response.Content.ReadAsStreamAsync(
                     cancellationToken)
                 .ConfigureAwait(false);
             await using var output = new FileStream(
                 pending,
-                FileMode.Create,
+                append ? FileMode.Append : FileMode.Create,
                 FileAccess.Write,
                 FileShare.None,
                 64 * 1024,
                 FileOptions.Asynchronous | FileOptions.WriteThrough);
             var buffer = new byte[64 * 1024];
-            long total = 0;
             while (true)
             {
                 var read = await input.ReadAsync(buffer, cancellationToken)
@@ -690,24 +729,23 @@ internal sealed partial class WindowsMaintenanceOperationExecutor(
                         cancellationToken)
                     .ConfigureAwait(false);
             }
-            await output.FlushAsync(cancellationToken).ConfigureAwait(false);
+            await output.FlushAsync(cancellationToken)
+                .ConfigureAwait(false);
             output.Flush(flushToDisk: true);
-            if (total != artifact.Length)
-                throw new MaintenanceProtocolException(
-                    "artifact_size_mismatch",
-                    "Approved maintenance artifact size mismatched.");
-            File.Move(pending, destination, overwrite: true);
-            if (!ArtifactMatches(destination, artifact))
-                throw new MaintenanceProtocolException(
-                    "hash_mismatch",
-                    "Approved maintenance artifact hash mismatched.");
-            return destination;
         }
-        finally
+        if (total != artifact.Length)
+            throw new MaintenanceProtocolException(
+                "artifact_size_mismatch",
+                "Approved maintenance artifact size mismatched.");
+        if (!ArtifactMatches(pending, artifact))
         {
-            if (File.Exists(pending))
-                File.Delete(pending);
+            File.Delete(pending);
+            throw new MaintenanceProtocolException(
+                "hash_mismatch",
+                "Approved maintenance artifact hash mismatched.");
         }
+        File.Move(pending, destination, overwrite: true);
+        return destination;
     }
 
     private static bool ApprovedDownloadDestination(
@@ -805,6 +843,9 @@ internal sealed partial class WindowsMaintenanceOperationExecutor(
     {
         cancellationToken.ThrowIfCancellationRequested();
         EnsureLocalGroup("StewardDockerTasks");
+        AddLocalGroupMember(
+            "StewardDockerTasks",
+            WindowsWorkloadIsolation.DockerTransportCapability.Sid);
         foreach (var identity in identities.DistinctBy(value => value.Sid))
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -922,6 +963,14 @@ internal sealed partial class WindowsMaintenanceOperationExecutor(
                 InheritanceFlags.ObjectInherit,
                 PropagationFlags.None,
                 AccessControlType.Allow));
+        security.AddAccessRule(new FileSystemAccessRule(
+            new SecurityIdentifier(
+                WindowsWorkloadIsolation.DockerTransportCapability.Sid),
+            FileSystemRights.ReadAndExecute,
+            InheritanceFlags.ContainerInherit |
+            InheritanceFlags.ObjectInherit,
+            PropagationFlags.None,
+            AccessControlType.Allow));
         foreach (var identity in identities.DistinctBy(value => value.Sid))
             security.AddAccessRule(new FileSystemAccessRule(
                 new SecurityIdentifier(identity.Sid),
@@ -950,6 +999,11 @@ internal sealed partial class WindowsMaintenanceOperationExecutor(
                 AccessControlType.Allow));
             fileSecurity.AddAccessRule(new FileSystemAccessRule(
                 administrators, FileSystemRights.FullControl,
+                AccessControlType.Allow));
+            fileSecurity.AddAccessRule(new FileSystemAccessRule(
+                new SecurityIdentifier(
+                    WindowsWorkloadIsolation.DockerTransportCapability.Sid),
+                FileSystemRights.ReadAndExecute,
                 AccessControlType.Allow));
             foreach (var identity in identities.DistinctBy(value => value.Sid))
                 fileSecurity.AddAccessRule(new FileSystemAccessRule(

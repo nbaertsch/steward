@@ -69,6 +69,33 @@ public sealed class TaskTypeLifecycleTests : IDisposable
     }
 
     [Fact]
+    public async Task Compose_materializes_declared_content_and_rejects_mismatch()
+    {
+        var docker = Path.Combine(workspace, "docker.exe");
+        await File.WriteAllBytesAsync(docker, []);
+        const string content = "services:\n  canary:\n    image: steward/canary\n";
+        var type = new ComposeTaskType(new FakeExecutor());
+        var context = Context(new ComposeTaskDefinition(
+            docker,
+            "nested/compose.yml",
+            "materialized",
+            ComposeContent: content));
+
+        var setup = await type.SetupAsync(context, default);
+
+        Assert.False(setup.Changed);
+        Assert.Equal(
+            content,
+            await File.ReadAllTextAsync(
+                Path.Combine(workspace, "nested", "compose.yml")));
+        await File.WriteAllTextAsync(
+            Path.Combine(workspace, "nested", "compose.yml"),
+            "services: {}");
+        await Assert.ThrowsAsync<InvalidDataException>(
+            () => type.SetupAsync(context, default).AsTask());
+    }
+
+    [Fact]
     public async Task Recovered_compose_context_can_issue_down_after_original_cli_exit()
     {
         var docker = Path.Combine(workspace, "docker.exe");

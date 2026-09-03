@@ -13,7 +13,8 @@ internal sealed record ComposeTaskDefinition(
     IReadOnlyList<string>? Profiles = null,
     long MaxOutputBytes = 64 * 1024 * 1024,
     long RequiredDiskReserveBytes = 256 * 1024 * 1024,
-    bool RemoveVolumesOnCleanup = false);
+    bool RemoveVolumesOnCleanup = false,
+    string? ComposeContent = null);
 
 /// <summary>
 /// Supervises the Docker CLI process. Containers remain owned and isolated by
@@ -24,6 +25,7 @@ internal sealed class ComposeTaskType(IProcessExecutor executor) : TaskTypeBase,
     private const string DockerEnginePipe =
         "npipe:////./pipe/docker_engine";
     private const int MaximumOutputReadBytes = 64 * 1024;
+    private const int MaximumComposeContentBytes = 1024 * 1024;
     private const long CursorMask = 0x7fff_ffff;
     private readonly ConcurrentDictionary<(TaskAttemptId AttemptId, int Generation), TaskExecutionContext> managed = new();
     private static readonly JsonSerializerOptions JsonOptions =
@@ -50,6 +52,15 @@ internal sealed class ComposeTaskType(IProcessExecutor executor) : TaskTypeBase,
             errors.Add("ProjectName must contain only letters, digits, '-' or '_'.");
         if (string.IsNullOrWhiteSpace(definition.ComposeFile)) errors.Add("ComposeFile is required.");
         else if (!WorkspacePaths.IsSafeRelative(definition.ComposeFile)) errors.Add("ComposeFile must be a workspace-relative path without '..'.");
+        if (definition.ComposeContent is { } composeContent)
+        {
+            if (composeContent.IndexOf('\0') >= 0)
+                errors.Add("ComposeContent cannot contain NUL characters.");
+            if (System.Text.Encoding.UTF8.GetByteCount(composeContent) >
+                MaximumComposeContentBytes)
+                errors.Add(
+                    $"ComposeContent cannot exceed {MaximumComposeContentBytes} UTF-8 bytes.");
+        }
         if (definition.WorkingDirectory is not null && !WorkspacePaths.IsSafeRelative(definition.WorkingDirectory))
             errors.Add("WorkingDirectory must be a workspace-relative path without '..'.");
         if (definition.Profiles?.Any(profile => string.IsNullOrWhiteSpace(profile) ||
@@ -77,6 +88,32 @@ internal sealed class ComposeTaskType(IProcessExecutor executor) : TaskTypeBase,
         cancellationToken.ThrowIfCancellationRequested();
         var definition = Get(context);
         var composePath = WorkspacePaths.Resolve(context.Workspace, definition.ComposeFile);
+        if (definition.ComposeContent is { } composeContent)
+        {
+            Directory.CreateDirectory(
+                Path.GetDirectoryName(composePath) ??
+                throw new InvalidDataException(
+                    "Compose file has no parent directory."));
+            var bytes = System.Text.Encoding.UTF8.GetBytes(composeContent);
+            if (File.Exists(composePath))
+            {
+                if (!File.ReadAllBytes(composePath).AsSpan().SequenceEqual(bytes))
+                    throw new InvalidDataException(
+                        "Existing Compose file does not match the declared content.");
+            }
+            else
+            {
+                using var stream = new FileStream(
+                    composePath,
+                    FileMode.CreateNew,
+                    FileAccess.Write,
+                    FileShare.None,
+                    4096,
+                    FileOptions.WriteThrough);
+                stream.Write(bytes);
+                stream.Flush(flushToDisk: true);
+            }
+        }
         if (!File.Exists(composePath)) throw new FileNotFoundException("Compose file not found.", composePath);
         var fingerprint = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(composePath)));
         return ValueTask.FromResult(new SetupResult(false, fingerprint));
