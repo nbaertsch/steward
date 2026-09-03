@@ -657,7 +657,11 @@ internal static class LocalIdentityStorageSecurity
         var identity = WindowsIdentity.GetCurrent().User
             ?? throw new InvalidOperationException("The current Windows identity has no SID.");
         var security = new DirectorySecurity();
-        security.SetOwner(identity);
+        var currentOwner = new DirectoryInfo(path)
+            .GetAccessControl(AccessControlSections.Owner)
+            .GetOwner(typeof(SecurityIdentifier));
+        if (!identity.Equals(currentOwner))
+            security.SetOwner(identity);
         security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
         security.AddAccessRule(new(
             identity,
@@ -691,7 +695,11 @@ internal static class LocalIdentityStorageSecurity
         var identity = WindowsIdentity.GetCurrent().User
             ?? throw new InvalidOperationException("The current Windows identity has no SID.");
         var security = new FileSecurity();
-        security.SetOwner(identity);
+        var currentOwner = new FileInfo(path)
+            .GetAccessControl(AccessControlSections.Owner)
+            .GetOwner(typeof(SecurityIdentifier));
+        if (!identity.Equals(currentOwner))
+            security.SetOwner(identity);
         security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
         security.AddAccessRule(new(
             identity,

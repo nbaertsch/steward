@@ -1,4 +1,6 @@
 using System.Security.Cryptography;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using System.Text;
 using Microsoft.Data.Sqlite;
 using Steward.Contracts;
@@ -11,6 +13,61 @@ namespace Steward.Orchestration.Tests;
 
 public sealed class IdentityDeliveryTests
 {
+    [Fact]
+    public void Node_vault_hardens_an_existing_same_owner_directory_without_write_owner()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            "steward-node-vault-acl-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var identity = WindowsIdentity.GetCurrent().User
+                ?? throw new InvalidOperationException(
+                    "The current Windows identity has no SID.");
+            var security = new DirectorySecurity();
+            security.SetOwner(identity);
+            security.SetAccessRuleProtection(
+                isProtected: true,
+                preserveInheritance: false);
+            security.AddAccessRule(new FileSystemAccessRule(
+                identity,
+                FileSystemRights.Modify,
+                InheritanceFlags.ContainerInherit |
+                InheritanceFlags.ObjectInherit,
+                PropagationFlags.None,
+                AccessControlType.Allow));
+            new DirectoryInfo(root).SetAccessControl(security);
+
+            _ = new DpapiProtectedIdentityVault(root);
+
+            var hardened = new DirectoryInfo(root).GetAccessControl();
+            Assert.Equal(
+                identity,
+                hardened.GetOwner(typeof(SecurityIdentifier)));
+            var rules = hardened.GetAccessRules(
+                includeExplicit: true,
+                includeInherited: true,
+                typeof(SecurityIdentifier))
+                .Cast<FileSystemAccessRule>()
+                .ToArray();
+            var rule = Assert.Single(rules);
+            Assert.Equal(identity, rule.IdentityReference);
+            Assert.Equal(AccessControlType.Allow, rule.AccessControlType);
+            Assert.True(
+                (rule.FileSystemRights & FileSystemRights.FullControl) ==
+                FileSystemRights.FullControl);
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+                Directory.Delete(root, recursive: true);
+        }
+    }
+
     [Fact]
     public async Task Direct_delivery_enforces_every_binding_and_removes_node_handle_after_attempt()
     {

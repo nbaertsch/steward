@@ -4,6 +4,7 @@ using System.Security.AccessControl;
 using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 using Azure;
 using Azure.Developer.DevCenter;
@@ -301,9 +302,12 @@ if (args is
         receipt.GetProperty("signature").GetString()
         ?? throw new InvalidDataException(
             "The endpoint receipt has no signature."));
+    var typedBody = body.Deserialize<EndpointReceiptBody>(
+            new JsonSerializerOptions(JsonSerializerDefaults.Web))
+        ?? throw new InvalidDataException(
+            "The endpoint receipt body is invalid.");
     var canonical = JsonSerializer.SerializeToUtf8Bytes(
-        body,
-        new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        typedBody);
     try
     {
         using var nodeVerifier = ECDsa.Create();
@@ -765,8 +769,11 @@ if (args is
     {
         foreach (var task in group.Tasks)
         {
-            var log = await customizations.GetTaskLogAsync(
+            var log = await GetTaskLogAsync(
+                customizations,
                 task.LogUri,
+                expectedMarker: null,
+                TimeSpan.FromSeconds(30),
                 CancellationToken.None);
             Console.WriteLine(log);
         }
@@ -833,8 +840,11 @@ if (args.Length == 5 &&
     }
     foreach (var task in group.Tasks)
     {
-        var log = await customizations.GetTaskLogAsync(
+        var log = await GetTaskLogAsync(
+            customizations,
             task.LogUri,
+            expectedMarker: null,
+            TimeSpan.FromSeconds(30),
             CancellationToken.None);
         Console.WriteLine(log);
     }
@@ -1098,9 +1108,12 @@ if (args is
         "throw 'Endpoint receipt missing or ambiguous'};" +
         "$path=$matches[0].FullName};" +
         "$bytes=[IO.File]::ReadAllBytes($path);" +
-        "Write-Output ('STEWARD_ENDPOINT_RECEIPT_RAW:'+" +
-        "[Convert]::ToBase64String($bytes));" +
-        "[Array]::Clear($bytes,0,$bytes.Length)";
+        "$encoded=[Convert]::ToBase64String($bytes);" +
+        "[Array]::Clear($bytes,0,$bytes.Length);" +
+        "$chunks=@(for($i=0;$i-lt$encoded.Length;$i+=32){" +
+        "'STEWARD_ENDPOINT_RECEIPT_CHUNK:{0:D4}:{1}'-f" +
+        "($i/32),$encoded.Substring($i,[Math]::Min(32,$encoded.Length-$i))});" +
+        "throw ($chunks-join[Environment]::NewLine)";
     var group = await customizations.ApplyAsync(
         retrieveProjectName,
         "me",
@@ -1139,32 +1152,23 @@ if (args is
         {
         }
     }
-    if (!Succeeded(group.Status))
-    {
-        foreach (var task in group.Tasks)
-        {
-            var taskLog = await customizations.GetTaskLogAsync(
-                task.LogUri,
-                CancellationToken.None);
-            Console.Error.WriteLine(
-                SafeBootstrapLogDiagnostic(taskLog));
-        }
-        throw new InvalidOperationException(
-            "Endpoint receipt retrieval failed.");
-    }
-    var log = await customizations.GetTaskLogAsync(
+    const string marker = "STEWARD_ENDPOINT_RECEIPT_CHUNK:";
+    var log = await GetTaskLogAsync(
+        customizations,
         group.Tasks.Single().LogUri,
+        marker,
+        TimeSpan.FromSeconds(30),
         CancellationToken.None);
-    const string marker = "STEWARD_ENDPOINT_RECEIPT_RAW:";
-    var markerIndex = log.LastIndexOf(marker, StringComparison.Ordinal);
-    if (markerIndex < 0)
+    if (!log.Contains(marker, StringComparison.Ordinal))
+    {
+        if (!Succeeded(group.Status))
+            Console.Error.WriteLine(
+                SafeBootstrapLogDiagnostic(log));
         throw new InvalidDataException(
             "Raw endpoint receipt marker is missing.");
-    var encoded = log[(markerIndex + marker.Length)..];
-    var lineEnd = encoded.IndexOfAny(['\r', '\n']);
-    if (lineEnd >= 0)
-        encoded = encoded[..lineEnd];
-    var receiptBytes = Convert.FromBase64String(encoded.Trim());
+    }
+    var encoded = ReadIndexedBase64Payload(log);
+    var receiptBytes = Convert.FromBase64String(encoded);
     try
     {
         WritePrivateFile(
@@ -2694,6 +2698,69 @@ static string SafeBootstrapLogDiagnostic(string log)
     return $"{diagnostic} (bytes={bytes.Length}; sha256={hash})";
 }
 
+static async Task<string> GetTaskLogAsync(
+    DevBoxCustomizationClient customizations,
+    Uri logUri,
+    string? expectedMarker,
+    TimeSpan timeout,
+    CancellationToken cancellationToken)
+{
+    var deadline = DateTimeOffset.UtcNow + timeout;
+    var log = string.Empty;
+    do
+    {
+        try
+        {
+            log = await customizations.GetTaskLogAsync(
+                    logUri,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (expectedMarker is null
+                    ? !string.IsNullOrWhiteSpace(log)
+                    : log.Contains(expectedMarker, StringComparison.Ordinal))
+                return log;
+        }
+        catch (RequestFailedException exception)
+            when (exception.Status is 404 or 409)
+        {
+        }
+        await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken)
+            .ConfigureAwait(false);
+    } while (DateTimeOffset.UtcNow < deadline);
+    return log;
+}
+
+static string ReadIndexedBase64Payload(string log)
+{
+    var matches = Regex.Matches(
+        log,
+        @"STEWARD_ENDPOINT_RECEIPT_CHUNK:(\d{4}):([A-Za-z0-9+/]{1,32}={0,2})",
+        RegexOptions.CultureInvariant);
+    var chunks = new SortedDictionary<int, string>();
+    foreach (Match match in matches)
+    {
+        var index = int.Parse(
+            match.Groups[1].Value,
+            System.Globalization.CultureInfo.InvariantCulture);
+        var value = match.Groups[2].Value;
+        if (chunks.TryGetValue(index, out var existing) &&
+            !string.Equals(existing, value, StringComparison.Ordinal))
+            throw new InvalidDataException(
+                "Raw endpoint receipt contains conflicting chunks.");
+        chunks[index] = value;
+    }
+    if (chunks.Count == 0 ||
+        chunks.Count > 2048 ||
+        chunks.Keys.Where((value, index) => value != index).Any())
+        throw new InvalidDataException(
+            "Raw endpoint receipt payload is invalid.");
+    var encoded = string.Concat(chunks.Values);
+    if (encoded.Length > 64 * 1024)
+        throw new InvalidDataException(
+            "Raw endpoint receipt payload exceeds its bound.");
+    return encoded;
+}
+
 static bool Terminal(string status) =>
     Succeeded(status) ||
     status.Equals("Failed", StringComparison.OrdinalIgnoreCase) ||
@@ -2902,6 +2969,50 @@ static void Zero(byte[]? value)
     if (value is not null)
         CryptographicOperations.ZeroMemory(value);
 }
+
+internal sealed record EndpointReceiptReconnectLedger(
+    int Version,
+    string LedgerFile,
+    string HealthFile);
+
+internal sealed record EndpointReceiptV1Migration(
+    int Version,
+    string RetainedEndpointVersion,
+    int NonceCount,
+    int NextIndex,
+    string InventorySha256,
+    string AuthorizationFile,
+    string AuthorizationSha256);
+
+internal sealed record EndpointReceiptBody(
+    int Version,
+    string ProductVersion,
+    string MsiSha256,
+    string SourceRepository,
+    string SourceCommit,
+    string SourceRef,
+    string SignerWorkflow,
+    string SourceRunId,
+    string ProductCode,
+    string ConfigSha256,
+    string BootstrapEncryptionPublicKeySha256,
+    string ControlSigningPublicKeySha256,
+    string ControlIdentity,
+    Guid BootstrapOperationId,
+    Guid SessionId,
+    Guid HostId,
+    Guid IncarnationId,
+    string NodeIdentity,
+    string Ciphertext,
+    string NodeSigningPublicKey,
+    [property: JsonPropertyName("connectionNonces")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    IReadOnlyList<Guid>? LegacyConnectionNonces,
+    DateTimeOffset ProvisionedAtUtc,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    EndpointReceiptReconnectLedger? ReconnectLedger,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    EndpointReceiptV1Migration? V1Migration = null);
 
 internal sealed record Options(
     Uri Endpoint,

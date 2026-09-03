@@ -155,7 +155,7 @@ public sealed class PackagingPolicyTests
                  })
             Assert.Contains(excluded, script, StringComparison.Ordinal);
         Assert.Contains("GITHUB_ACTIONS", script, StringComparison.Ordinal);
-        Assert.Contains("$Version -ne '1.0.38'", script, StringComparison.Ordinal);
+        Assert.Contains("$Version -ne '1.0.39'", script, StringComparison.Ordinal);
         Assert.Contains("SourceRepository", script, StringComparison.Ordinal);
         Assert.Contains("SourceCommit", script, StringComparison.Ordinal);
         Assert.Contains("SignerWorkflow", script, StringComparison.Ordinal);
@@ -217,7 +217,7 @@ public sealed class PackagingPolicyTests
         Assert.Contains("--source-digest '${{ github.sha }}'", workflow, StringComparison.Ordinal);
         Assert.Contains("refs/heads/main", workflow, StringComparison.Ordinal);
         Assert.Contains(
-            "must be exactly Steward endpoint 1.0.38",
+            "must be exactly Steward endpoint 1.0.39",
             workflow,
             StringComparison.Ordinal);
         Assert.Contains(
@@ -607,6 +607,59 @@ public sealed class PackagingPolicyTests
             StringComparison.Ordinal);
         Assert.Contains(
             "CompressionMode]::Decompress",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "STEWARD_ENDPOINT_RECEIPT_CHUNK:{0:D4}:{1}",
+            source,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "Write-Output ('STEWARD_ENDPOINT_RECEIPT_RAW:'",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "TimeSpan.FromSeconds(30)",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "expectedMarker is null",
+            source,
+            StringComparison.Ordinal);
+        var diagnosticStart = source.IndexOf(
+            "--run-diagnostic-powershell",
+            StringComparison.Ordinal);
+        var diagnosticEnd = source.IndexOf(
+            "--resolve-node-user",
+            diagnosticStart,
+            StringComparison.Ordinal);
+        Assert.True(diagnosticStart >= 0 && diagnosticEnd > diagnosticStart);
+        var diagnosticPath = source[diagnosticStart..diagnosticEnd];
+        Assert.Contains(
+            "GetTaskLogAsync(",
+            diagnosticPath,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "customizations.GetTaskLogAsync(",
+            diagnosticPath,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "ReadIndexedBase64Payload(log)",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "chunks.Keys.Where((value, index) => value != index).Any()",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "body.Deserialize<EndpointReceiptBody>",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "var canonical = JsonSerializer.SerializeToUtf8Bytes(",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "typedBody);",
             source,
             StringComparison.Ordinal);
         Assert.Contains(
