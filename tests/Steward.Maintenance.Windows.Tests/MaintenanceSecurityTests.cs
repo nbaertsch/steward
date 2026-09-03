@@ -139,13 +139,26 @@ public sealed class MaintenanceSecurityTests : IDisposable
 
     }
 
+    [Fact]
+    public void Docker_task_capability_rejects_an_invalid_sid_as_a_protocol_failure()
+    {
+        var exception = Assert.Throws<MaintenanceProtocolException>(() =>
+            WindowsMaintenanceOperationExecutor.AddLocalGroupMember(
+                "StewardDockerTasks",
+                "not-a-sid"));
+
+        Assert.Equal("docker_capability_failed", exception.Code);
+        Assert.Equal(
+            "A declared Docker task identity SID is invalid.",
+            exception.Message);
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(root))
             Directory.Delete(root, recursive: true);
     }
 }
-
 
 
 

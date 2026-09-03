@@ -794,33 +794,12 @@ internal sealed partial class WindowsMaintenanceOperationExecutor(
         string compose,
         CancellationToken cancellationToken)
     {
-        var group = await RunAsync(
-                MaintenanceTool.LocalGroup,
-                ["localgroup", "StewardDockerTasks", "/add"],
-                cancellationToken)
-            .ConfigureAwait(false);
-        if (group.ExitCode != 0 &&
-            !group.Output.Contains("already exists",
-                StringComparison.OrdinalIgnoreCase))
-            throw new MaintenanceProtocolException(
-                "docker_capability_failed",
-                "The narrow Docker transport group could not be created.");
+        cancellationToken.ThrowIfCancellationRequested();
+        EnsureLocalGroup("StewardDockerTasks");
         foreach (var identity in identities.DistinctBy(value => value.Sid))
         {
-            var member = await RunAsync(
-                    MaintenanceTool.LocalGroup,
-                    [
-                        "localgroup", "StewardDockerTasks",
-                        "*" + identity.Sid, "/add"
-                    ],
-                    cancellationToken)
-                .ConfigureAwait(false);
-            if (member.ExitCode != 0 &&
-                !member.Output.Contains("already",
-                    StringComparison.OrdinalIgnoreCase))
-                throw new MaintenanceProtocolException(
-                    "docker_capability_failed",
-                    "A declared Docker task identity could not receive transport capability.");
+            cancellationToken.ThrowIfCancellationRequested();
+            AddLocalGroupMember("StewardDockerTasks", identity.Sid);
         }
         var clientRoot = Path.Combine(
             Path.GetDirectoryName(stateRoot) ??
@@ -838,6 +817,71 @@ internal sealed partial class WindowsMaintenanceOperationExecutor(
         File.SetAttributes(client, FileAttributes.ReadOnly);
         File.SetAttributes(clientCompose, FileAttributes.ReadOnly);
         ProtectDockerClientCapability(clientRoot, identities);
+    }
+
+    internal static void EnsureLocalGroup(string groupName)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(groupName);
+        var info = new NativeMethods.LocalGroupInfo
+        {
+            Name = groupName,
+            Comment = "Steward Docker transport capability"
+        };
+        var result = NativeMethods.NetLocalGroupAdd(
+            null,
+            1,
+            ref info,
+            out _);
+        if (result is NativeMethods.Success or NativeMethods.GroupExists)
+            return;
+        throw new MaintenanceProtocolException(
+            "docker_capability_failed",
+            $"The narrow Docker transport group could not be created (NetAPI {result}).");
+    }
+
+    internal static void AddLocalGroupMember(
+        string groupName,
+        string sidValue)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(groupName);
+        SecurityIdentifier sid;
+        try
+        {
+            sid = new SecurityIdentifier(sidValue);
+        }
+        catch (ArgumentException)
+        {
+            throw new MaintenanceProtocolException(
+                "docker_capability_failed",
+                "A declared Docker task identity SID is invalid.");
+        }
+        var bytes = new byte[sid.BinaryLength];
+        sid.GetBinaryForm(bytes, 0);
+        var handle = GCHandle.Alloc(bytes, GCHandleType.Pinned);
+        try
+        {
+            var member = new NativeMethods.LocalGroupMemberInfo
+            {
+                Sid = handle.AddrOfPinnedObject()
+            };
+            var result = NativeMethods.NetLocalGroupAddMembers(
+                null,
+                groupName,
+                0,
+                ref member,
+                1);
+            if (result is NativeMethods.Success or
+                NativeMethods.MemberInAlias)
+                return;
+            throw new MaintenanceProtocolException(
+                "docker_capability_failed",
+                $"A declared Docker task identity could not receive transport capability (NetAPI {result}).");
+        }
+        finally
+        {
+            handle.Free();
+            CryptographicOperations.ZeroMemory(bytes);
+        }
     }
 
     internal static void ProtectDockerClientCapability(
@@ -999,8 +1043,6 @@ internal sealed partial class WindowsMaintenanceOperationExecutor(
                 Environment.SystemDirectory, "schtasks.exe"),
             MaintenanceTool.Shutdown => Path.Combine(
                 Environment.SystemDirectory, "shutdown.exe"),
-            MaintenanceTool.LocalGroup => Path.Combine(
-                Environment.SystemDirectory, "net.exe"),
             MaintenanceTool.PowerShellSignatureVerifier => Path.Combine(
                 Environment.SystemDirectory,
                 "WindowsPowerShell", "v1.0", "powershell.exe"),
@@ -1301,14 +1343,55 @@ internal sealed partial class WindowsMaintenanceOperationExecutor(
         ServiceControl,
         TaskScheduler,
         Shutdown,
-        LocalGroup,
         PowerShellSignatureVerifier
     }
+
+    private static class NativeMethods
+    {
+        internal const uint Success = 0;
+        internal const uint MemberInAlias = 1378;
+        internal const uint GroupExists = 2223;
+
+        [StructLayout(
+            LayoutKind.Sequential,
+            CharSet = CharSet.Unicode)]
+        internal struct LocalGroupInfo
+        {
+            [MarshalAs(UnmanagedType.LPWStr)]
+            internal string Name;
+
+            [MarshalAs(UnmanagedType.LPWStr)]
+            internal string Comment;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct LocalGroupMemberInfo
+        {
+            internal IntPtr Sid;
+        }
+
+        [DllImport(
+            "Netapi32.dll",
+            EntryPoint = "NetLocalGroupAdd",
+            CharSet = CharSet.Unicode)]
+        internal static extern uint NetLocalGroupAdd(
+            string? serverName,
+            uint level,
+            ref LocalGroupInfo buffer,
+            out uint parameterError);
+
+        [DllImport(
+            "Netapi32.dll",
+            EntryPoint = "NetLocalGroupAddMembers",
+            CharSet = CharSet.Unicode)]
+        internal static extern uint NetLocalGroupAddMembers(
+            string? serverName,
+            string groupName,
+            uint level,
+            ref LocalGroupMemberInfo buffer,
+            uint totalEntries);
+    }
 }
-
-
-
-
 
 
 
