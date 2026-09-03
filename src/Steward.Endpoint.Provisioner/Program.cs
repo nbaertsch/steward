@@ -1464,7 +1464,16 @@ internal sealed class IcaclsEndpointSecurity : IEndpointSecurity
             rootAttributes.HasFlag(FileAttributes.ReparsePoint))
             throw new InvalidDataException(
                 "Endpoint state root must be a plain directory.");
-        ValidateNoReparsePoints(root);
+        try
+        {
+            ValidateNoReparsePoints(root);
+        }
+        catch (UnauthorizedAccessException) when (
+            repairExistingChildren && sid is not null)
+        {
+            RestoreSelfHardenedVaultAccess(root, new SecurityIdentifier(sid));
+            ValidateNoReparsePoints(root);
+        }
         var plan = EndpointAclPlan.Create(
             root,
             sid,
@@ -1535,6 +1544,44 @@ internal sealed class IcaclsEndpointSecurity : IEndpointSecurity
                     _ => FileSystemRights.Modify
                 });
         new FileInfo(item.Path).SetAccessControl(fileSecurity);
+    }
+
+    private static void RestoreSelfHardenedVaultAccess(
+        string root,
+        SecurityIdentifier assignedUser)
+    {
+        var vault = Path.Combine(root, "credentials", "node");
+        if (!Directory.Exists(vault))
+            return;
+        var pending = new Stack<string>();
+        pending.Push(vault);
+        while (pending.Count > 0)
+        {
+            var path = pending.Pop();
+            var attributes = File.GetAttributes(path);
+            if (attributes.HasFlag(FileAttributes.ReparsePoint))
+                throw new InvalidDataException(
+                    "Endpoint state cannot contain reparse points.");
+            var isDirectory = attributes.HasFlag(FileAttributes.Directory);
+            EndpointProvisioner.Run(
+                "takeown.exe",
+                "/A",
+                "/F",
+                path);
+            Apply(
+                new EndpointAclPathPlan(
+                    path,
+                    EndpointAclAuthority.AssignedUserSelfHardening,
+                    isDirectory),
+                assignedUser);
+            if (!isDirectory)
+                continue;
+            foreach (var child in Directory.EnumerateFileSystemEntries(
+                         path,
+                         "*",
+                         SearchOption.TopDirectoryOnly))
+                pending.Push(child);
+        }
     }
 
     private static void AddAssignedUserDirectoryRules(
