@@ -155,7 +155,7 @@ public sealed class PackagingPolicyTests
                  })
             Assert.Contains(excluded, script, StringComparison.Ordinal);
         Assert.Contains("GITHUB_ACTIONS", script, StringComparison.Ordinal);
-        Assert.Contains("$Version -ne '1.0.40'", script, StringComparison.Ordinal);
+        Assert.Contains("$Version -ne '1.0.41'", script, StringComparison.Ordinal);
         Assert.Contains("SourceRepository", script, StringComparison.Ordinal);
         Assert.Contains("SourceCommit", script, StringComparison.Ordinal);
         Assert.Contains("SignerWorkflow", script, StringComparison.Ordinal);
@@ -217,7 +217,7 @@ public sealed class PackagingPolicyTests
         Assert.Contains("--source-digest '${{ github.sha }}'", workflow, StringComparison.Ordinal);
         Assert.Contains("refs/heads/main", workflow, StringComparison.Ordinal);
         Assert.Contains(
-            "must be exactly Steward endpoint 1.0.40",
+            "must be exactly Steward endpoint 1.0.41",
             workflow,
             StringComparison.Ordinal);
         Assert.Contains(

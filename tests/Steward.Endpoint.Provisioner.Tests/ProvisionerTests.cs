@@ -166,7 +166,7 @@ public sealed class ProvisionerTests : IDisposable
     }
 
     [Fact]
-    public void Endpoint_acl_plan_assigns_the_credential_vault_to_the_endpoint_user()
+    public void Endpoint_acl_plan_allows_only_the_node_vault_to_self_harden()
     {
         if (!OperatingSystem.IsWindows())
             return;
@@ -182,33 +182,50 @@ public sealed class ProvisionerTests : IDisposable
             currentSid.Value,
             includeChildren: true);
 
-        var credentialPaths = plan.Paths
-            .Where(item => Path.GetRelativePath(state, item.Path)
-                .Split(Path.DirectorySeparatorChar)[0]
-                .Equals(
-                    "credentials",
-                    StringComparison.OrdinalIgnoreCase))
-            .ToArray();
-        Assert.Equal(2, credentialPaths.Length);
-        Assert.All(credentialPaths, item => Assert.Equal(
-            EndpointAclAuthority.AssignedUserOwnedMutable,
-            item.Authority));
+        Assert.Equal(
+            EndpointAclAuthority.AssignedUserMutable,
+            plan.Paths.Single(item =>
+                item.Path.Equals(
+                    credentials,
+                    StringComparison.OrdinalIgnoreCase)).Authority);
+        Assert.Equal(
+            EndpointAclAuthority.AssignedUserSelfHardening,
+            plan.Paths.Single(item =>
+                item.Path.Equals(
+                    nodeVault,
+                    StringComparison.OrdinalIgnoreCase)).Authority);
 
         new IcaclsEndpointSecurity().PrepareStateRoot(
             state,
             currentSid.Value,
             repairExistingChildren: true);
 
-        Assert.Equal(
-            currentSid,
-            new DirectoryInfo(credentials)
-                .GetAccessControl(AccessControlSections.Owner)
-                .GetOwner(typeof(SecurityIdentifier)));
-        Assert.Equal(
-            currentSid,
-            new DirectoryInfo(nodeVault)
-                .GetAccessControl(AccessControlSections.Owner)
-                .GetOwner(typeof(SecurityIdentifier)));
+        var credentialsRule = Assert.Single(RulesFor(
+            new DirectoryInfo(credentials).GetAccessControl(),
+            currentSid));
+        Assert.False(credentialsRule.FileSystemRights.HasFlag(
+            FileSystemRights.TakeOwnership));
+        Assert.False(credentialsRule.FileSystemRights.HasFlag(
+            FileSystemRights.ChangePermissions));
+        var nodeVaultRule = Assert.Single(RulesFor(
+            new DirectoryInfo(nodeVault).GetAccessControl(),
+            currentSid));
+        Assert.True(nodeVaultRule.FileSystemRights.HasFlag(
+            FileSystemRights.TakeOwnership));
+        Assert.True(nodeVaultRule.FileSystemRights.HasFlag(
+            FileSystemRights.ChangePermissions));
+
+        static FileSystemAccessRule[] RulesFor(
+            FileSystemSecurity security,
+            SecurityIdentifier sid) => security.GetAccessRules(
+                includeExplicit: true,
+                includeInherited: true,
+                typeof(SecurityIdentifier))
+            .Cast<FileSystemAccessRule>()
+            .Where(rule =>
+                rule.AccessControlType == AccessControlType.Allow &&
+                rule.IdentityReference == sid)
+            .ToArray();
     }
 
     [Fact]
