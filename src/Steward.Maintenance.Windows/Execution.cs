@@ -403,10 +403,14 @@ internal sealed partial class WindowsMaintenanceOperationExecutor(
         ExtractApprovedDockerArchive(engine, runtime);
         var plugins = Path.Combine(runtime, "cli-plugins");
         Directory.CreateDirectory(plugins);
+        PrepareForOverwrite(
+            Path.Combine(plugins, "docker-compose.exe"));
         File.Copy(
             compose,
             Path.Combine(plugins, "docker-compose.exe"),
             overwrite: true);
+        PrepareForOverwrite(
+            Path.Combine(runtime, "docker-compose.exe"));
         File.Copy(
             compose,
             Path.Combine(runtime, "docker-compose.exe"),
@@ -422,15 +426,12 @@ internal sealed partial class WindowsMaintenanceOperationExecutor(
             .ConfigureAwait(false);
         var dockerd = Path.Combine(runtime, "dockerd.exe");
         var docker = Path.Combine(runtime, "docker.exe");
-        foreach (var binary in new[] { dockerd, docker })
-        {
-            var signature = await RunAsync(
-                    MaintenanceTool.PowerShellSignatureVerifier,
-                    [binary],
-                    cancellationToken)
-                .ConfigureAwait(false);
-            RequireSuccess(signature, "signature_mismatch");
-        }
+        RequireSha256(
+            dockerd,
+            MaintenanceArtifactCatalog.DockerDaemonSha256);
+        RequireSha256(
+            docker,
+            MaintenanceArtifactCatalog.DockerClientSha256);
         await ConfigureDockerTaskCapabilityAsync(
                 operation.TaskIdentities,
                 docker,
@@ -830,6 +831,8 @@ internal sealed partial class WindowsMaintenanceOperationExecutor(
         Directory.CreateDirectory(pluginRoot);
         var client = Path.Combine(clientRoot, "docker.exe");
         var clientCompose = Path.Combine(pluginRoot, "docker-compose.exe");
+        PrepareForOverwrite(client);
+        PrepareForOverwrite(clientCompose);
         File.Copy(docker, client, overwrite: true);
         File.Copy(compose, clientCompose, overwrite: true);
         File.SetAttributes(client, FileAttributes.ReadOnly);
@@ -922,6 +925,7 @@ internal sealed partial class WindowsMaintenanceOperationExecutor(
                 continue;
             var name = Path.GetFileName(normalized);
             var target = Path.Combine(destination, name);
+            PrepareForOverwrite(target);
             using var input = entry.Open();
             using var output = new FileStream(
                 target,
@@ -937,6 +941,25 @@ internal sealed partial class WindowsMaintenanceOperationExecutor(
             !File.Exists(Path.Combine(destination, "docker.exe")))
             throw new InvalidDataException(
                 "Approved Docker archive contains no allowlisted binary.");
+    }
+
+    private static void PrepareForOverwrite(string path)
+    {
+        if (File.Exists(path))
+            File.SetAttributes(
+                path,
+                File.GetAttributes(path) & ~FileAttributes.ReadOnly);
+    }
+
+    private static void RequireSha256(string path, string expected)
+    {
+        if (!string.Equals(
+                FileSha256(path),
+                expected,
+                StringComparison.Ordinal))
+            throw new MaintenanceProtocolException(
+                "hash_mismatch",
+                "Approved Docker binary hash mismatched.");
     }
 
     private static Task WriteAtomicAsync(
@@ -1282,7 +1305,6 @@ internal sealed partial class WindowsMaintenanceOperationExecutor(
         PowerShellSignatureVerifier
     }
 }
-
 
 
 

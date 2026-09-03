@@ -125,6 +125,12 @@ public sealed class MaintenanceContractTests
 
         MaintenanceContract.ValidateOperation(wsl);
         MaintenanceContract.ValidateOperation(docker);
+        Assert.Equal(
+            "03C3337F2FD1048FFA8B971A6F81EFD73AA06DD729A3B459EF1A85CEEF5401D0",
+            MaintenanceArtifactCatalog.DockerClientSha256);
+        Assert.Equal(
+            "3D90A17386321BD5F3BC098480F8D5D2C16EC24EC098CD60C5F3C0020DF0E8AA",
+            MaintenanceArtifactCatalog.DockerDaemonSha256);
         Assert.Throws<MaintenanceProtocolException>(() =>
             MaintenanceContract.ValidateOperation(wsl with
             {
@@ -306,7 +312,6 @@ public sealed class MaintenanceContractTests
                 operation),
             signature);
 }
-
 
 
 

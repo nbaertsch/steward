@@ -151,6 +151,10 @@ public static class MaintenanceArtifactCatalog
     public const string WslVersion = "2.7.12";
     public const string DockerEngineVersion = "28.3.1";
     public const string DockerComposeVersion = "5.4.0";
+    public const string DockerClientSha256 =
+        "03C3337F2FD1048FFA8B971A6F81EFD73AA06DD729A3B459EF1A85CEEF5401D0";
+    public const string DockerDaemonSha256 =
+        "3D90A17386321BD5F3BC098480F8D5D2C16EC24EC098CD60C5F3C0020DF0E8AA";
 
     public static ApprovedArtifact Wsl2712 { get; } = new(
         1,
