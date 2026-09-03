@@ -136,8 +136,8 @@ jobs:
           if ($env:VERSION -notmatch '^\d+\.\d+\.\d+$') {
             throw 'Release version must be a three-part numeric version.'
           }
-          if ($env:VERSION -ne '1.0.41') {
-            throw 'This replacement release must be exactly Steward endpoint 1.0.41.'
+          if ($env:VERSION -ne '1.0.42') {
+            throw 'This replacement release must be exactly Steward endpoint 1.0.42.'
           }
           if ('${{ github.ref }}' -ne 'refs/heads/main') {
             throw 'Endpoint releases must be built from main.'

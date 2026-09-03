@@ -41,6 +41,15 @@ public sealed class RdpDvcControlSessionWorkerTests : IDisposable
         AssertRejected(await fixture.RunAttemptAsync(fixture.Attachment(2)));
     }
 
+    [Fact]
+    public async Task Rdp_dvc_registration_uses_its_configured_session()
+    {
+        await using var fixture =
+            await WorkerFixture.CreateAsync(root, useRdpDvc: true);
+
+        await fixture.RunAcceptedAsync(fixture.Attachment(1));
+    }
+
     private static void AssertRejected(
         IReadOnlyList<ReconnectCarrierControlMessage> responses)
     {
@@ -72,11 +81,13 @@ public sealed class RdpDvcControlSessionWorkerTests : IDisposable
         private readonly SqliteControlStore store;
         private readonly string pipeName;
         private readonly NodeEndpointRegistration endpoint;
+        private readonly Guid sessionId;
 
         private WorkerFixture(ECDsa controlKey, ECDsa nodeKey,
             RdpDvcControlSessionWorker worker, ControlOrchestrator orchestrator,
             SqliteControlStore store, string pipeName,
-            NodeEndpointRegistration endpoint)
+            NodeEndpointRegistration endpoint,
+            Guid sessionId)
         {
             this.controlKey = controlKey;
             this.nodeKey = nodeKey;
@@ -85,9 +96,12 @@ public sealed class RdpDvcControlSessionWorkerTests : IDisposable
             this.store = store;
             this.pipeName = pipeName;
             this.endpoint = endpoint;
+            this.sessionId = sessionId;
         }
 
-        public static async Task<WorkerFixture> CreateAsync(string root)
+        public static async Task<WorkerFixture> CreateAsync(
+            string root,
+            bool useRdpDvc = false)
         {
             Directory.CreateDirectory(root);
             var controlKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
@@ -106,11 +120,24 @@ public sealed class RdpDvcControlSessionWorkerTests : IDisposable
                     1024 * 1024, 4)));
             await orchestrator.InitializeAsync();
             var sessionId = Guid.NewGuid();
+            var transport = useRdpDvc
+                ? ExtensionMetadataDto.Create(
+                    "rdp-dvc-control-carrier",
+                    "2.0",
+                    new
+                    {
+                        version = 2,
+                        sessionId
+                    },
+                    StewardJson.Options)
+                : LocalStackOptions.TransportBinding(
+                    new LocalDirectTransportBinding(
+                        LocalDirectDialDirection.ControlDialsNode,
+                        new Uri("ws://127.0.0.1:45123/steward/"),
+                        sessionId));
             var endpoint = new NodeEndpointRegistration(HostId.New(),
                 NodeIncarnationId.New(), PoolId.New(),
-                LocalStackOptions.TransportBinding(new LocalDirectTransportBinding(
-                    LocalDirectDialDirection.ControlDialsNode,
-                    new Uri("ws://127.0.0.1:45123/steward/"), sessionId)),
+                transport,
                 "node", nodePublic, new ResourceRequirements(1), [], [],
                 DateTimeOffset.UtcNow);
             var registrations = new ControlNodeRegistrationStore(store);
@@ -130,15 +157,13 @@ public sealed class RdpDvcControlSessionWorkerTests : IDisposable
                 NullLogger<RdpDvcControlSessionWorker>.Instance);
             await worker.StartAsync(CancellationToken.None);
             return new(controlKey, nodeKey, worker, orchestrator, store,
-                pipeName, endpoint);
+                pipeName, endpoint, sessionId);
         }
 
         public ReconnectCarrierAttachment Attachment(long generation,
             Guid? sessionId = null)
         {
-            var configured = endpoint.Transport
-                .DeserializeData<LocalDirectTransportBinding>()!.SessionId!.Value;
-            return new(sessionId ?? configured,
+            return new(sessionId ?? this.sessionId,
                 new(2, endpoint.HostId, endpoint.NodeIncarnationId, generation,
                     Guid.NewGuid(), 42,
                     Convert.ToHexString(RandomNumberGenerator.GetBytes(32)))

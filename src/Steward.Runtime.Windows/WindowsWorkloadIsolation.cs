@@ -413,9 +413,15 @@ public static class WindowsWorkloadIsolation
             throw new WorkloadIsolationException(
                 "isolation.identity-missing",
                 "Node process identity is unavailable.");
+        var owner = new DirectoryInfo(workspace)
+            .GetAccessControl(AccessControlSections.Owner)
+            .GetOwner(typeof(SecurityIdentifier)) as SecurityIdentifier;
+        if (owner != current)
+            throw new WorkloadIsolationException(
+                "isolation.owner-mismatch",
+                "Workload workspace is not owned by the Node process identity.");
         var security = new DirectorySecurity();
         security.SetAccessRuleProtection(true, false);
-        security.SetOwner(current);
         AddFullControl(security, current);
         AddFullControl(security, SystemSid);
         AddFullControl(security, AdministratorsSid);

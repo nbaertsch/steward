@@ -603,6 +603,7 @@ public sealed class ProtectedFileRdpDvcLocalCarrier : IRdpDvcLocalCarrier
                     key,
                     cancellationToken)
                 .ConfigureAwait(false);
+            diagnosticSink?.Invoke("carrier-hmac-accept-complete");
             var selected = carrier.Identity;
             RdpDvcEvidencePublisherSession? evidence = null;
             if (publishInitialEvidence)
@@ -622,13 +623,18 @@ public sealed class ProtectedFileRdpDvcLocalCarrier : IRdpDvcLocalCarrier
                     ProtocolVersion: 2);
                 evidence.BindAuthenticatedReconnectRoute(
                     authenticatedRoute);
+                diagnosticSink?.Invoke(
+                    "evidence-hmac-publish-start");
                 await evidence.PublishAsync(
                         RdpDvcEvidencePublicationEvent
                             .DvcHmacAuthenticated,
                         cancellationToken: cancellationToken)
                     .ConfigureAwait(false);
+                diagnosticSink?.Invoke(
+                    "evidence-hmac-publish-complete");
             }
 
+            diagnosticSink?.Invoke("control-attach-start");
             bridgeLease = await controlBridge.AttachAsync(
                     carrier.Stream,
                     new ReconnectCarrierAttachment(
@@ -639,6 +645,7 @@ public sealed class ProtectedFileRdpDvcLocalCarrier : IRdpDvcLocalCarrier
                         ticket.Identity.ConnectionGeneration),
                     cancellationToken)
                 .ConfigureAwait(false);
+            diagnosticSink?.Invoke("control-attach-complete");
             await reconnectHighWater.ObserveAsync(
                     ticket.Identity.ConnectionId,
                     selected,
@@ -649,11 +656,15 @@ public sealed class ProtectedFileRdpDvcLocalCarrier : IRdpDvcLocalCarrier
                     "The authenticated Control session closed during attachment.");
             if (evidence is not null)
             {
+                diagnosticSink?.Invoke(
+                    "evidence-secure-publish-start");
                 await evidence.PublishAsync(
                         RdpDvcEvidencePublicationEvent
                             .SecurePeerAuthenticated,
                         cancellationToken: cancellationToken)
                     .ConfigureAwait(false);
+                diagnosticSink?.Invoke(
+                    "evidence-secure-publish-complete");
                 diagnosticSink?.Invoke(
                     "control-secure-accept-complete");
             }

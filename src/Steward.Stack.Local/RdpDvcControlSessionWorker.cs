@@ -4,6 +4,7 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Steward.Contracts;
 using Steward.Domain;
 using Steward.Orchestration;
 using Steward.Persistence.Sqlite;
@@ -506,6 +507,18 @@ public sealed class RdpDvcControlSessionWorker(
     {
         if (string.Equals(
                 endpoint.Transport.Kind,
+                "rdp-dvc-control-carrier",
+                StringComparison.Ordinal))
+        {
+            var binding = endpoint.Transport
+                .DeserializeData<RdpDvcSessionBinding>(
+                    StewardJson.Options)
+                ?.Validate() ?? throw new InvalidDataException(
+                    "The registered RDP DVC transport binding is invalid.");
+            return binding.SessionId;
+        }
+        if (string.Equals(
+                endpoint.Transport.Kind,
                 LocalStackOptions.TransportKind,
                 StringComparison.Ordinal))
         {
@@ -521,5 +534,18 @@ public sealed class RdpDvcControlSessionWorker(
             $"steward-direct:{endpoint.HostId}:" +
             endpoint.NodeIncarnationId);
         return new Guid(SHA256.HashData(bytes).AsSpan(0, 16));
+    }
+
+    private sealed record RdpDvcSessionBinding(
+        int Version,
+        Guid SessionId)
+    {
+        public RdpDvcSessionBinding Validate()
+        {
+            if (Version != 2 || SessionId == Guid.Empty)
+                throw new InvalidDataException(
+                    "The RDP DVC transport session binding is invalid.");
+            return this;
+        }
     }
 }

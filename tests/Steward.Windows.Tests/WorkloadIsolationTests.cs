@@ -1,3 +1,4 @@
+using System.Security.AccessControl;
 using System.Security.Principal;
 using Steward.Domain;
 using Steward.Runtime.Windows;
@@ -52,6 +53,37 @@ public sealed class WorkloadIsolationTests : IDisposable
             first.Workspace,
             environment.Variables.Single(variable =>
                 variable.Name == "USERPROFILE").Value);
+    }
+
+    [Fact]
+    public void Prepare_does_not_require_workspace_owner_reassignment()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+        var current = WindowsIdentity.GetCurrent().User ??
+            throw new InvalidOperationException();
+        var profile = Profile("owner", ProcessIsolationCapability.Process);
+        var rootSecurity = new DirectorySecurity();
+        rootSecurity.SetAccessRuleProtection(
+            isProtected: true,
+            preserveInheritance: false);
+        rootSecurity.AddAccessRule(new FileSystemAccessRule(
+            current,
+            FileSystemRights.Modify | FileSystemRights.Synchronize,
+            InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+            PropagationFlags.None,
+            AccessControlType.Allow));
+        new DirectoryInfo(root).SetAccessControl(rootSecurity);
+        Directory.CreateDirectory(profile.Workspace);
+
+        WindowsWorkloadIsolation.Prepare(profile);
+
+        var workspaceSecurity = new DirectoryInfo(profile.Workspace)
+            .GetAccessControl();
+        Assert.True(workspaceSecurity.AreAccessRulesProtected);
+        Assert.Equal(
+            current,
+            workspaceSecurity.GetOwner(typeof(SecurityIdentifier)));
     }
 
     [Fact]

@@ -763,7 +763,10 @@ public sealed class HostBoundaryTests
             Assert.Equal(identity, store.ReadBound(reference));
             var bound = identity with
             {
-                Route = route.BindWtsSession(42)
+                Route = route.BindWtsSession(42) with
+                {
+                    ConnectionNonce = Guid.NewGuid()
+                }
             };
             store.BindWtsSession(bound);
             var restored = store.ReadBound(reference);

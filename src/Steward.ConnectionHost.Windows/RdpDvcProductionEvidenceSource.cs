@@ -159,7 +159,7 @@ public sealed class DpapiRdpDvcEvidenceTicketStore :
         _ = bound.Route.ValidateBound();
         var current = ReadBound(identity.EvidenceReference);
         if (!current.Route.IsWtsWildcard ||
-            !current.Route.HasSamePreauthorizedBase(bound.Route) ||
+            !current.Route.MatchesAuthenticatedRoute(bound.Route) ||
             current.ConnectionId != bound.ConnectionId ||
             current.RuntimeConnectionId != bound.RuntimeConnectionId ||
             current.ConnectionGeneration != bound.ConnectionGeneration)
@@ -251,6 +251,7 @@ public sealed class ProductionRdpDvcRuntimeEvidenceSource :
     private readonly IRdpDvcEvidenceTicketResolver resolver;
     private readonly string pipeName;
     private readonly byte[] key;
+    private readonly Action<string>? diagnosticSink;
     private readonly CancellationTokenSource lifetime = new();
     private readonly Task server;
     private readonly object gate = new();
@@ -264,7 +265,8 @@ public sealed class ProductionRdpDvcRuntimeEvidenceSource :
     public ProductionRdpDvcRuntimeEvidenceSource(
         IRdpDvcEvidenceTicketResolver resolver,
         string pipeName,
-        ReadOnlySpan<byte> authenticationKey)
+        ReadOnlySpan<byte> authenticationKey,
+        Action<string>? diagnosticSink = null)
     {
         this.resolver = resolver ??
             throw new ArgumentNullException(nameof(resolver));
@@ -282,6 +284,7 @@ public sealed class ProductionRdpDvcRuntimeEvidenceSource :
                 nameof(authenticationKey));
         this.pipeName = pipeName;
         key = authenticationKey.ToArray();
+        this.diagnosticSink = diagnosticSink;
         server = RunServerAsync();
     }
 
@@ -290,14 +293,15 @@ public sealed class ProductionRdpDvcRuntimeEvidenceSource :
     public static ProductionRdpDvcRuntimeEvidenceSource FromProtectedFile(
         IRdpDvcEvidenceTicketResolver resolver,
         string pipeName,
-        string keyFile)
+        string keyFile,
+        Action<string>? diagnosticSink = null)
     {
         var key = CurrentUserProtectedDataFile.Read(
             keyFile,
             AuthenticatedRdpDvcEvidencePublisher.KeyFilePurpose);
         try
         {
-            return new(resolver, pipeName, key);
+            return new(resolver, pipeName, key, diagnosticSink);
         }
         finally
         {
@@ -774,6 +778,9 @@ public sealed class ProductionRdpDvcRuntimeEvidenceSource :
                 var result = AcceptFrame(
                     frame,
                     DateTimeOffset.UtcNow);
+                if (!result.Accepted)
+                    diagnosticSink?.Invoke(
+                        $"evidence-publication-rejected-{result.Code}");
                 await pipe.WriteAsync(
                         new byte[] { result.Accepted ? (byte)1 : (byte)0 },
                         timeout.Token)
@@ -788,6 +795,8 @@ public sealed class ProductionRdpDvcRuntimeEvidenceSource :
                     OperationCanceledException or
                     UnauthorizedAccessException)
             {
+                diagnosticSink?.Invoke(
+                    $"evidence-pipe-error-{exception.GetType().Name}");
             }
         }
     }

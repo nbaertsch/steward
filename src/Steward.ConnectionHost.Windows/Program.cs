@@ -16,6 +16,11 @@ var options = new ConnectionHostOptions
     PipeName = Environment.GetEnvironmentVariable(
         "STEWARD_CONNECTION_HOST_PIPE_NAME") ??
         "Steward.ConnectionHost.v1",
+    CommandTimeout = TimeSpan.FromSeconds(
+        ParseBoundedSeconds(
+            "STEWARD_CONNECTION_HOST_COMMAND_TIMEOUT_SECONDS",
+            30,
+            300)),
     DiagnosticSink = string.Equals(
         Environment.GetEnvironmentVariable(
             "STEWARD_CONNECTION_HOST_DIAGNOSTICS"),
@@ -108,7 +113,8 @@ try
             ProductionRdpDvcRuntimeEvidenceSource.FromProtectedFile(
                 ticketStore,
                 evidencePipeName,
-                evidenceKeyFile);
+                evidenceKeyFile,
+                options.DiagnosticSink);
         var binding = await identity.GetBindingAsync(
                 CancellationToken.None)
             .ConfigureAwait(false);
@@ -161,7 +167,8 @@ try
                     RdpTimeout = rdCoreOptions.OperationTimeout,
                     MaximumResources = 1024,
                     AllowSetCookieResponse = true,
-                    UserAgent = brokerUserAgent
+                    UserAgent = brokerUserAgent,
+                    DiagnosticSink = rdCoreOptions.DiagnosticSink
                 }),
             new AzureDevBoxRemoteConnectionProvider(defaultIdentity));
         runtime = new ProductionRdCoreConnectionRuntime(
@@ -187,7 +194,8 @@ try
                     Path.Combine(
                         root,
                         "reconnect-high-water.v2.db")),
-                controlBridge),
+                controlBridge,
+                options.DiagnosticSink),
             generationStore: new SqliteConnectionGenerationStore(
                 Path.Combine(root, "connection-generations.v2.db")));
     }
