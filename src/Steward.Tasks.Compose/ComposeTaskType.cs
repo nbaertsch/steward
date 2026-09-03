@@ -21,6 +21,8 @@ internal sealed record ComposeTaskDefinition(
 /// </summary>
 internal sealed class ComposeTaskType(IProcessExecutor executor) : TaskTypeBase, IRecoverableTaskType, ITaskOutputSource
 {
+    private const string DockerEnginePipe =
+        "npipe:////./pipe/docker_engine";
     private const int MaximumOutputReadBytes = 64 * 1024;
     private const long CursorMask = 0x7fff_ffff;
     private readonly ConcurrentDictionary<(TaskAttemptId AttemptId, int Generation), TaskExecutionContext> managed = new();
@@ -212,7 +214,16 @@ internal sealed class ComposeTaskType(IProcessExecutor executor) : TaskTypeBase,
     {
         var definition = Get(context);
         var workspace = definition.WorkingDirectory is null ? context.Workspace : WorkspacePaths.Resolve(context.Workspace, definition.WorkingDirectory);
-        var arguments = new List<string> { "compose", "--project-name", definition.ProjectName, "--file", WorkspacePaths.Resolve(context.Workspace, definition.ComposeFile) };
+        var arguments = new List<string>
+        {
+            "--host",
+            DockerEnginePipe,
+            "compose",
+            "--project-name",
+            definition.ProjectName,
+            "--file",
+            WorkspacePaths.Resolve(context.Workspace, definition.ComposeFile)
+        };
         foreach (var profile in definition.Profiles ?? []) { arguments.Add("--profile"); arguments.Add(profile); }
         arguments.AddRange(command);
         var attemptId = operation is null ? context.AttemptId : TaskAttemptId.New();

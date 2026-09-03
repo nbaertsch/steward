@@ -53,6 +53,13 @@ public sealed class TaskTypeLifecycleTests : IDisposable
         Assert.True((await type.CleanupAsync(context, default)).Completed);
 
         Assert.All(fake.Requests, request => Assert.Equal(docker, request.ApplicationPath));
+        Assert.All(fake.Requests, request =>
+        {
+            Assert.Equal("--host", request.Arguments[0]);
+            Assert.Equal(
+                "npipe:////./pipe/docker_engine",
+                request.Arguments[1]);
+        });
         Assert.Contains(fake.Requests, request => request.Arguments.Contains("--project-name") && request.Arguments.Contains("project_1"));
         Assert.Contains(fake.Requests, request => request.Arguments.Contains("up") && request.Arguments.Contains("--abort-on-container-exit"));
         Assert.Contains(fake.Requests, request => request.Arguments.Contains("down") && request.Arguments.Contains("--volumes"));

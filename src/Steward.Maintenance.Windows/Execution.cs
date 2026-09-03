@@ -128,6 +128,9 @@ internal sealed partial class WindowsMaintenanceOperationExecutor(
     IMaintenanceOperationExecutor,
     IEndpointUpdatePlatform
 {
+    private const string DockerEnginePipe =
+        "npipe:////./pipe/docker_engine";
+
     private const int MaximumToolOutputCharacters = 8192;
     private const string StewardConfigProperty = "STEWARD_CONFIG";
     private const string StewardAttestationProperty = "STEWARD_ATTESTATION";
@@ -463,7 +466,13 @@ internal sealed partial class WindowsMaintenanceOperationExecutor(
                 "Approved Docker service start failed.");
         var engineVersion = await RunProcessAsync(
                 docker,
-                ["version", "--format", "{{.Server.Version}}"],
+                [
+                    "--host",
+                    DockerEnginePipe,
+                    "version",
+                    "--format",
+                    "{{.Server.Version}}"
+                ],
                 cancellationToken)
             .ConfigureAwait(false);
         var composeVersion = await RunProcessAsync(
@@ -488,7 +497,7 @@ internal sealed partial class WindowsMaintenanceOperationExecutor(
             MaintenanceArtifactCatalog.DockerComposeVersion,
             FileSha256(docker),
             FileSha256(Path.Combine(runtime, "docker-compose.exe")),
-            "npipe:////./pipe/docker_engine",
+            DockerEnginePipe,
             operation.TaskIdentities,
             true,
             DateTimeOffset.UtcNow);
@@ -1398,5 +1407,4 @@ internal sealed partial class WindowsMaintenanceOperationExecutor(
             uint totalEntries);
     }
 }
-
 
