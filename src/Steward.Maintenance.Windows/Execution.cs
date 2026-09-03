@@ -832,12 +832,17 @@ internal sealed partial class WindowsMaintenanceOperationExecutor(
             1,
             ref info,
             out _);
-        if (result is NativeMethods.Success or NativeMethods.GroupExists)
+        if (IsLocalGroupCreationSuccess(result))
             return;
         throw new MaintenanceProtocolException(
             "docker_capability_failed",
             $"The narrow Docker transport group could not be created (NetAPI {result}).");
     }
+
+    internal static bool IsLocalGroupCreationSuccess(uint result) =>
+        result is NativeMethods.Success or
+            NativeMethods.AliasExists or
+            NativeMethods.GroupExists;
 
     internal static void AddLocalGroupMember(
         string groupName,
@@ -1350,6 +1355,7 @@ internal sealed partial class WindowsMaintenanceOperationExecutor(
     {
         internal const uint Success = 0;
         internal const uint MemberInAlias = 1378;
+        internal const uint AliasExists = 1379;
         internal const uint GroupExists = 2223;
 
         [StructLayout(
@@ -1392,6 +1398,5 @@ internal sealed partial class WindowsMaintenanceOperationExecutor(
             uint totalEntries);
     }
 }
-
 
 

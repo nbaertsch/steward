@@ -12,6 +12,17 @@ public sealed class MaintenanceSecurityTests : IDisposable
         "steward-maintenance-security-tests",
         Guid.NewGuid().ToString("N"));
 
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1379)]
+    [InlineData(2223)]
+    public void Existing_local_group_results_are_idempotent_success(uint result)
+    {
+        Assert.True(
+            WindowsMaintenanceOperationExecutor
+                .IsLocalGroupCreationSuccess(result));
+    }
+
     [Fact]
     public void State_acl_is_protected_and_excludes_assigned_user_and_workloads()
     {
@@ -159,7 +170,6 @@ public sealed class MaintenanceSecurityTests : IDisposable
             Directory.Delete(root, recursive: true);
     }
 }
-
 
 
 
