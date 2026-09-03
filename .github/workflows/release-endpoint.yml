@@ -392,6 +392,7 @@ jobs:
           $tag = "steward-endpoint-v$version"
           gh release create $tag `
             $archive `
+            $releaseFiles `
             '${{ runner.temp }}\steward-endpoint\Steward.Endpoint.Bootstrap.${{ inputs.version }}.zip' `
             '${{ runner.temp }}\steward-endpoint\steward-endpoint.spdx.json' `
             --repo '${{ github.repository }}' `
