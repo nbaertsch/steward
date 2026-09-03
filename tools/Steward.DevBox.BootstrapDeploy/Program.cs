@@ -101,6 +101,34 @@ if (args is
 
 if (args is
     [
+        "--list-customization-groups",
+        var listEndpointText,
+        var listProjectName,
+        var listBoxName
+    ])
+{
+    var endpoint = new Uri(listEndpointText, UriKind.Absolute);
+    var identity = new DevBoxIdentityService(new DevBoxIdentityStore());
+    var sdk = new DevBoxesClient(
+        endpoint,
+        new DevBoxSilentTokenCredential(identity));
+    var customizations = new DevBoxCustomizationClient(
+        endpoint,
+        new AzurePipelineDevBoxCustomizationTransport(sdk.Pipeline));
+    var groups = await customizations.ListAsync(
+        listProjectName,
+        "me",
+        listBoxName,
+        CancellationToken.None);
+    foreach (var group in groups
+                 .OrderByDescending(value => value.StartTime)
+                 .Take(200))
+        Console.WriteLine(JsonSerializer.Serialize(group));
+    return 0;
+}
+
+if (args is
+    [
         "--get-group",
         var getEndpointText,
         var getProjectName,
@@ -126,8 +154,11 @@ if (args is
         $"GROUP {group.Name}: {group.Status}");
     foreach (var task in group.Tasks)
     {
-        var log = await customizations.GetTaskLogAsync(
+        var log = await GetTaskLogAsync(
+            customizations,
             task.LogUri,
+            expectedMarker: null,
+            TimeSpan.FromSeconds(30),
             CancellationToken.None);
         Console.WriteLine(
             $"TASK {task.DisplayName ?? task.Name}: {task.Status}");
@@ -222,8 +253,11 @@ if (args is
     var logs = new List<string>(group.Tasks.Count);
     foreach (var task in group.Tasks)
     {
-        var taskLog = await customizations.GetTaskLogAsync(
+        var taskLog = await GetTaskLogAsync(
+            customizations,
             task.LogUri,
+            expectedMarker: null,
+            TimeSpan.FromSeconds(30),
             CancellationToken.None);
         logs.Add(
             $"TASK {task.DisplayName ?? task.Name}: {task.Status}" +
@@ -556,8 +590,11 @@ if (args is
         foreach (var task in group.Tasks.Where(task =>
                      !Succeeded(task.Status)))
         {
-            var taskLog = await customizations.GetTaskLogAsync(
+            var taskLog = await GetTaskLogAsync(
+                customizations,
                 task.LogUri,
+                expectedMarker: null,
+                TimeSpan.FromSeconds(30),
                 CancellationToken.None);
             Console.Error.WriteLine(
                 $"{task.DisplayName ?? task.Name}: {task.Status}; " +
@@ -700,8 +737,11 @@ if (args is
         foreach (var task in group.Tasks.Where(task =>
                      !Succeeded(task.Status)))
         {
-            var taskLog = await customizations.GetTaskLogAsync(
+            var taskLog = await GetTaskLogAsync(
+                customizations,
                 task.LogUri,
+                expectedMarker: null,
+                TimeSpan.FromSeconds(30),
                 CancellationToken.None);
             Console.Error.WriteLine(
                 $"{task.DisplayName ?? task.Name}: {task.Status}; " +
@@ -819,6 +859,7 @@ if (args.Length == 5 &&
                 300)
         ],
         CancellationToken.None);
+    Console.WriteLine($"DIAGNOSTIC_GROUP {runBoxName}: {group.Name}");
     var deadline = DateTimeOffset.UtcNow.AddMinutes(10);
     while (!Terminal(group.Status))
     {
@@ -900,8 +941,11 @@ if (args is
             groupName,
             CancellationToken.None);
     }
-    var log = await customizations.GetTaskLogAsync(
+    var log = await GetTaskLogAsync(
+        customizations,
         group.Tasks.Single().LogUri,
+        expectedMarker: null,
+        TimeSpan.FromSeconds(30),
         CancellationToken.None);
     Console.WriteLine(log);
     return Succeeded(group.Status) ? 0 : 1;
@@ -969,8 +1013,11 @@ if (args is
             groupName,
             CancellationToken.None);
     }
-    var log = await customizations.GetTaskLogAsync(
+    var log = await GetTaskLogAsync(
+        customizations,
         group.Tasks.Single().LogUri,
+        expectedMarker: null,
+        TimeSpan.FromSeconds(30),
         CancellationToken.None);
     Console.WriteLine(log);
     return Succeeded(group.Status) ? 0 : 1;
@@ -1042,8 +1089,11 @@ if (args is
     if (!Succeeded(group.Status))
         throw new InvalidOperationException(
             "Endpoint diagnostics collection failed.");
-    var log = await customizations.GetTaskLogAsync(
+    var log = await GetTaskLogAsync(
+        customizations,
         group.Tasks.Single().LogUri,
+        expectedMarker: null,
+        TimeSpan.FromSeconds(30),
         CancellationToken.None);
     const string marker = "STEWARD_ENDPOINT_DIAG_RAW:";
     var markerIndex = log.LastIndexOf(marker, StringComparison.Ordinal);

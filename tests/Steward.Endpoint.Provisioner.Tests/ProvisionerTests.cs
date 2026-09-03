@@ -166,6 +166,52 @@ public sealed class ProvisionerTests : IDisposable
     }
 
     [Fact]
+    public void Endpoint_acl_plan_assigns_the_credential_vault_to_the_endpoint_user()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+        var state = Path.Combine(root, "state");
+        var credentials = Path.Combine(state, "credentials");
+        var nodeVault = Path.Combine(credentials, "node");
+        Directory.CreateDirectory(nodeVault);
+        var currentSid = WindowsIdentity.GetCurrent().User ??
+            throw new InvalidOperationException();
+
+        var plan = EndpointAclPlan.Create(
+            state,
+            currentSid.Value,
+            includeChildren: true);
+
+        var credentialPaths = plan.Paths
+            .Where(item => Path.GetRelativePath(state, item.Path)
+                .Split(Path.DirectorySeparatorChar)[0]
+                .Equals(
+                    "credentials",
+                    StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+        Assert.Equal(2, credentialPaths.Length);
+        Assert.All(credentialPaths, item => Assert.Equal(
+            EndpointAclAuthority.AssignedUserOwnedMutable,
+            item.Authority));
+
+        new IcaclsEndpointSecurity().PrepareStateRoot(
+            state,
+            currentSid.Value,
+            repairExistingChildren: true);
+
+        Assert.Equal(
+            currentSid,
+            new DirectoryInfo(credentials)
+                .GetAccessControl(AccessControlSections.Owner)
+                .GetOwner(typeof(SecurityIdentifier)));
+        Assert.Equal(
+            currentSid,
+            new DirectoryInfo(nodeVault)
+                .GetAccessControl(AccessControlSections.Owner)
+                .GetOwner(typeof(SecurityIdentifier)));
+    }
+
+    [Fact]
     public void Endpoint_acl_excludes_AppContainer_and_task_SIDs_without_blanket_denies()
     {
         if (!OperatingSystem.IsWindows())

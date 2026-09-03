@@ -1313,6 +1313,7 @@ internal enum EndpointAclAuthority
     Privileged,
     AssignedUserRoot,
     AssignedUserMutable,
+    AssignedUserOwnedMutable,
     AssignedUserReadOnly
 }
 
@@ -1382,6 +1383,11 @@ internal sealed record EndpointAclPlan(
         if (string.Equals(first, "keys", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(first, "receipts", StringComparison.OrdinalIgnoreCase))
             return EndpointAclAuthority.AssignedUserReadOnly;
+        if (string.Equals(
+                first,
+                "credentials",
+                StringComparison.OrdinalIgnoreCase))
+            return EndpointAclAuthority.AssignedUserOwnedMutable;
         if (!isDirectory && IsReadOnlyAuthorityFile(relative))
             return EndpointAclAuthority.AssignedUserReadOnly;
         return EndpointAclAuthority.AssignedUserMutable;
@@ -1481,6 +1487,18 @@ internal sealed class IcaclsEndpointSecurity : IEndpointSecurity
         if (item.IsDirectory)
         {
             var security = new DirectorySecurity();
+            if (item.Authority ==
+                EndpointAclAuthority.AssignedUserOwnedMutable)
+            {
+                var owner = assignedUser ??
+                    throw new InvalidOperationException(
+                        "Assigned-user-owned endpoint state requires an assigned user.");
+                var currentOwner = new DirectoryInfo(item.Path)
+                    .GetAccessControl(AccessControlSections.Owner)
+                    .GetOwner(typeof(SecurityIdentifier));
+                if (!owner.Equals(currentOwner))
+                    security.SetOwner(owner);
+            }
             security.SetAccessRuleProtection(
                 isProtected: true,
                 preserveInheritance: false);
@@ -1500,6 +1518,18 @@ internal sealed class IcaclsEndpointSecurity : IEndpointSecurity
             return;
         }
         var fileSecurity = new FileSecurity();
+        if (item.Authority ==
+            EndpointAclAuthority.AssignedUserOwnedMutable)
+        {
+            var owner = assignedUser ??
+                throw new InvalidOperationException(
+                    "Assigned-user-owned endpoint state requires an assigned user.");
+            var currentOwner = new FileInfo(item.Path)
+                .GetAccessControl(AccessControlSections.Owner)
+                .GetOwner(typeof(SecurityIdentifier));
+            if (!owner.Equals(currentOwner))
+                fileSecurity.SetOwner(owner);
+        }
         fileSecurity.SetAccessRuleProtection(
             isProtected: true,
             preserveInheritance: false);

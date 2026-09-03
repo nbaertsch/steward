@@ -155,7 +155,7 @@ public sealed class PackagingPolicyTests
                  })
             Assert.Contains(excluded, script, StringComparison.Ordinal);
         Assert.Contains("GITHUB_ACTIONS", script, StringComparison.Ordinal);
-        Assert.Contains("$Version -ne '1.0.39'", script, StringComparison.Ordinal);
+        Assert.Contains("$Version -ne '1.0.40'", script, StringComparison.Ordinal);
         Assert.Contains("SourceRepository", script, StringComparison.Ordinal);
         Assert.Contains("SourceCommit", script, StringComparison.Ordinal);
         Assert.Contains("SignerWorkflow", script, StringComparison.Ordinal);
@@ -217,7 +217,7 @@ public sealed class PackagingPolicyTests
         Assert.Contains("--source-digest '${{ github.sha }}'", workflow, StringComparison.Ordinal);
         Assert.Contains("refs/heads/main", workflow, StringComparison.Ordinal);
         Assert.Contains(
-            "must be exactly Steward endpoint 1.0.39",
+            "must be exactly Steward endpoint 1.0.40",
             workflow,
             StringComparison.Ordinal);
         Assert.Contains(
@@ -485,6 +485,30 @@ public sealed class PackagingPolicyTests
         var installer = File.ReadAllText(Path.Combine(
             Repository, "catalog", "devbox", "steward-endpoint",
             "Install-Steward.ps1"));
+        Assert.Contains(
+            "-Filter 'TBD????.tmp'",
+            installer,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "'^TBD[0-9A-Fa-f]{4}\\.tmp$'",
+            installer,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "FileAttributes]::ReparsePoint",
+            installer,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "$rollbackOrphans.Count -gt 16",
+            installer,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "'^Steward\\..+\\.(dll|exe)$'",
+            installer,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "'^\\d+\\.\\d+\\.\\d+\\+[0-9A-Fa-f]{40}$'",
+            installer,
+            StringComparison.Ordinal);
         var dsc = File.ReadAllText(Path.Combine(
             Repository, "catalog", "devbox", "steward-endpoint",
             "steward-endpoint.dsc.yaml"));

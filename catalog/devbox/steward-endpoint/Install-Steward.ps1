@@ -366,6 +366,28 @@ foreach ($related in $relatedProducts) {
 $provisionAttestation = Join-Path $downloadRoot `
     'steward-endpoint.attestation.json'
 Write-ArtifactAttestation $provisionAttestation
+$installedRoot = Join-Path $env:ProgramFiles 'Steward'
+$rollbackOrphans = @(
+    Get-ChildItem -LiteralPath $installedRoot -Filter 'TBD????.tmp' `
+        -File -ErrorAction SilentlyContinue)
+if ($rollbackOrphans.Count -gt 16) {
+    throw 'Too many Steward MSI rollback orphans were found.'
+}
+foreach ($orphan in $rollbackOrphans) {
+    if ($orphan.Name -notmatch '^TBD[0-9A-Fa-f]{4}\.tmp$' -or
+        $orphan.Attributes.HasFlag([IO.FileAttributes]::ReparsePoint)) {
+        throw 'A Steward MSI rollback orphan is unsafe.'
+    }
+    $fileVersion = [Diagnostics.FileVersionInfo]::GetVersionInfo(
+        $orphan.FullName)
+    if ($fileVersion.ProductName -notlike 'Steward.*' -or
+        $fileVersion.OriginalFilename -notmatch '^Steward\..+\.(dll|exe)$' -or
+        $fileVersion.ProductVersion -notmatch
+            '^\d+\.\d+\.\d+\+[0-9A-Fa-f]{40}$') {
+        throw 'A Steward MSI rollback orphan has invalid provenance.'
+    }
+    Remove-Item -LiteralPath $orphan.FullName -Force
+}
 $msiexec = Join-Path $env:SystemRoot 'System32\msiexec.exe'
 $log = Join-Path $env:ProgramData `
     'Steward\install\steward-endpoint-msi.log'
