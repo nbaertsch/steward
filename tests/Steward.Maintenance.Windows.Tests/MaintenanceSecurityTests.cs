@@ -24,6 +24,26 @@ public sealed class MaintenanceSecurityTests : IDisposable
     }
 
     [Fact]
+    public void Matching_Docker_runtime_binary_is_preserved_for_idempotent_replay()
+    {
+        Directory.CreateDirectory(root);
+        var path = Path.Combine(root, "dockerd.exe");
+        File.WriteAllText(path, "approved-runtime");
+        var expected = Convert.ToHexString(
+            System.Security.Cryptography.SHA256.HashData(
+                File.ReadAllBytes(path)));
+
+        Assert.True(
+            WindowsMaintenanceOperationExecutor.HasSha256(
+                path,
+                expected));
+        Assert.False(
+            WindowsMaintenanceOperationExecutor.HasSha256(
+                path,
+                new string('0', 64)));
+    }
+
+    [Fact]
     public void State_acl_is_protected_and_excludes_assigned_user_and_workloads()
     {
         if (!OperatingSystem.IsWindows())
@@ -170,7 +190,6 @@ public sealed class MaintenanceSecurityTests : IDisposable
             Directory.Delete(root, recursive: true);
     }
 }
-
 
 
 

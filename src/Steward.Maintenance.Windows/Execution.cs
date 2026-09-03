@@ -983,6 +983,17 @@ internal sealed partial class WindowsMaintenanceOperationExecutor(
                 continue;
             var name = Path.GetFileName(normalized);
             var target = Path.Combine(destination, name);
+            var expectedSha256 = string.Equals(
+                    name,
+                    "dockerd.exe",
+                    StringComparison.OrdinalIgnoreCase)
+                ? MaintenanceArtifactCatalog.DockerDaemonSha256
+                : MaintenanceArtifactCatalog.DockerClientSha256;
+            if (HasSha256(target, expectedSha256))
+            {
+                extracted = true;
+                continue;
+            }
             PrepareForOverwrite(target);
             using var input = entry.Open();
             using var output = new FileStream(
@@ -1008,6 +1019,13 @@ internal sealed partial class WindowsMaintenanceOperationExecutor(
                 path,
                 File.GetAttributes(path) & ~FileAttributes.ReadOnly);
     }
+
+    internal static bool HasSha256(string path, string expected) =>
+        File.Exists(path) &&
+        string.Equals(
+            FileSha256(path),
+            expected,
+            StringComparison.Ordinal);
 
     private static void RequireSha256(string path, string expected)
     {
@@ -1407,4 +1425,3 @@ internal sealed partial class WindowsMaintenanceOperationExecutor(
             uint totalEntries);
     }
 }
-
