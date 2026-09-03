@@ -229,6 +229,16 @@ public sealed class ProvisionerTests : IDisposable
     }
 
     [Fact]
+    public void Endpoint_acl_scan_tolerates_an_entry_removed_after_enumeration()
+    {
+        var removed = Path.Combine(root, "removed.db-shm");
+
+        Assert.False(EndpointAclPlan.TryGetAttributes(
+            removed,
+            out _));
+    }
+
+    [Fact]
     public void Endpoint_acl_excludes_AppContainer_and_task_SIDs_without_blanket_denies()
     {
         if (!OperatingSystem.IsWindows())

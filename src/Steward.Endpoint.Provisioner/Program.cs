@@ -1355,7 +1355,8 @@ internal sealed record EndpointAclPlan(
                      character == Path.DirectorySeparatorChar))
                  .ThenBy(value => value, StringComparer.OrdinalIgnoreCase))
         {
-            var attributes = File.GetAttributes(path);
+            if (!TryGetAttributes(path, out var attributes))
+                continue;
             if (attributes.HasFlag(FileAttributes.ReparsePoint))
                 throw new InvalidDataException(
                     "Endpoint state cannot contain reparse points.");
@@ -1366,6 +1367,27 @@ internal sealed record EndpointAclPlan(
                 isDirectory));
         }
         return new EndpointAclPlan(root, assignedUser, paths);
+    }
+
+    internal static bool TryGetAttributes(
+        string path,
+        out FileAttributes attributes)
+    {
+        try
+        {
+            attributes = File.GetAttributes(path);
+            return true;
+        }
+        catch (FileNotFoundException)
+        {
+            attributes = default;
+            return false;
+        }
+        catch (DirectoryNotFoundException)
+        {
+            attributes = default;
+            return false;
+        }
     }
 
     private static EndpointAclAuthority Classify(
@@ -1650,9 +1672,13 @@ internal sealed class IcaclsEndpointSecurity : IEndpointSecurity
                      root,
                      "*",
                      SearchOption.AllDirectories))
-            if (File.GetAttributes(path).HasFlag(FileAttributes.ReparsePoint))
+        {
+            if (!EndpointAclPlan.TryGetAttributes(path, out var attributes))
+                continue;
+            if (attributes.HasFlag(FileAttributes.ReparsePoint))
                 throw new InvalidDataException(
                     "Endpoint state cannot contain reparse points.");
+        }
     }
 }
 internal interface IEndpointReadyHealthVerifier
