@@ -385,6 +385,13 @@ public sealed class ControlProviderBootstrapCompositionTests
         Assert.Equal(
             resource.ProviderResourceId,
             binding.ProviderResourceId);
+        var providerBinding =
+            ControlRdpDvcProviderBinding.TryResolve(endpoint);
+        Assert.NotNull(providerBinding);
+        Assert.Equal("box", providerBinding.ResourceName);
+        Assert.Equal(
+            resource.ProviderResourceId,
+            providerBinding.ProviderResourceId);
         Assert.True(File.Exists(
             binding.AuthenticationKeyReference));
         Assert.Equal(

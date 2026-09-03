@@ -1012,6 +1012,78 @@ public sealed class OrchestrationTests
     }
 
     [Fact]
+    public async Task Node_registration_binds_existing_pool_member_to_provider_resource()
+    {
+        var root = Path.Combine(
+            AppContext.BaseDirectory,
+            "node-provider-binding",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var controlStore = new SqliteControlStore(
+                Path.Combine(root, "control.db"));
+            await using var schedulerStore =
+                new InMemorySchedulerStateStore();
+            var orchestrator = new ControlOrchestrator(
+                controlStore,
+                new CompositeScheduler(schedulerStore),
+                schedulerStore,
+                new(new(
+                    10,
+                    TimeSpan.FromHours(1),
+                    TimeSpan.FromMinutes(5),
+                    1024 * 1024,
+                    2)));
+            await orchestrator.InitializeAsync();
+            var poolStore = new SqlitePoolStateStore(
+                Path.Combine(root, "pools.db"));
+            var coordinator = new PoolCoordinator(poolStore);
+            var nodeStore = new ControlNodeRegistrationStore(controlStore);
+            var service = new HostPoolApplicationService(
+                controlStore,
+                poolStore,
+                coordinator,
+                new HostProviderRegistry([]),
+                nodeStore);
+            var pool = PoolId.New();
+            await service.RegisterPoolAsync(new(
+                new(pool, 0, 1, TimeSpan.FromMinutes(1)),
+                new("fake", "project", "pool")));
+            var hostId = HostId.New();
+            var incarnationId = NodeIncarnationId.New();
+            var registration = new NodeEndpointRegistration(
+                hostId,
+                incarnationId,
+                pool,
+                DirectTransport(46010),
+                "node",
+                "node.pem",
+                new ResourceRequirements(1),
+                [],
+                [],
+                DateTimeOffset.UtcNow);
+
+            await service.RegisterNodeAsync(
+                registration,
+                "box",
+                "project/me/box");
+
+            var host = Assert.Single(await service.ListHostsAsync());
+            Assert.Equal(hostId, host.HostId);
+            Assert.Equal(incarnationId, host.NodeIncarnationId);
+            Assert.Equal("box", host.ProviderResourceName);
+            Assert.Equal("project/me/box", host.ProviderResourceId);
+            Assert.Single(await nodeStore.ListAsync());
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            try { Directory.Delete(root, true); } catch (IOException) { }
+        }
+    }
+
+    [Fact]
     public async Task Pool_provider_handles_resume_after_control_restart_without_duplicate_create()
     {
         var root = Path.Combine(

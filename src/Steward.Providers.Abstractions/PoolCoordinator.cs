@@ -226,6 +226,96 @@ public sealed class PoolCoordinator(IPoolStateStore store)
         }
     }
 
+    public async Task AdoptProviderResourceAsync(
+        PoolPolicy policy,
+        Host host,
+        string resourceName,
+        string providerResourceId,
+        DateTimeOffset now,
+        CancellationToken cancellationToken = default)
+    {
+        policy.Validate();
+        if (host.PoolId != policy.PoolId)
+            throw new ArgumentException(
+                "Host Pool identity does not match the adoption policy.",
+                nameof(host));
+        ArgumentException.ThrowIfNullOrWhiteSpace(resourceName);
+        ArgumentException.ThrowIfNullOrWhiteSpace(providerResourceId);
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var current = await store.LoadAsync(
+                policy.PoolId,
+                cancellationToken).ConfigureAwait(false);
+            var members = current.Members.ToList();
+            var index = members.FindIndex(
+                value => value.HostId == host.Id);
+            if (members.Any(value =>
+                    value.HostId != host.Id &&
+                    (value.IncarnationId == host.NodeIncarnationId ||
+                     string.Equals(
+                         value.ProviderResourceId,
+                         providerResourceId,
+                         StringComparison.Ordinal) ||
+                     string.Equals(
+                         value.ProviderResourceName,
+                         resourceName,
+                         StringComparison.Ordinal))))
+                throw new InvalidDataException(
+                    "Provider resource identity is already assigned to another Pool member.");
+            if (index < 0)
+            {
+                if (members.Count(value =>
+                        value.State != PoolMemberState.Deleted) >=
+                    policy.HardMaximum)
+                    throw new InvalidOperationException(
+                        "Pool hard maximum prevents provider resource adoption.");
+                members.Add(new PoolMember(
+                    host.Id,
+                    host.PoolId,
+                    host.NodeIncarnationId,
+                    resourceName,
+                    PoolMemberState.Warm,
+                    now,
+                    ProviderResourceId: providerResourceId));
+            }
+            else
+            {
+                var member = members[index];
+                if (member.IncarnationId != host.NodeIncarnationId)
+                    throw new InvalidDataException(
+                        "Pool member incarnation does not match provider resource adoption.");
+                if (member.ProviderResourceId is not null &&
+                    (!string.Equals(
+                        member.ProviderResourceId,
+                        providerResourceId,
+                        StringComparison.Ordinal) ||
+                     !string.Equals(
+                        member.ProviderResourceName,
+                        resourceName,
+                        StringComparison.Ordinal)))
+                    throw new InvalidDataException(
+                        "Pool member is already bound to another provider resource.");
+                members[index] = member with
+                {
+                    ProviderResourceName = resourceName,
+                    ProviderResourceId = providerResourceId,
+                    LastActiveAt = now
+                };
+            }
+            var next = current with
+            {
+                Revision = current.Revision + 1,
+                Members = members
+            };
+            if (await store.TrySaveAsync(
+                    next,
+                    current.Revision,
+                    cancellationToken).ConfigureAwait(false))
+                return;
+        }
+    }
+
     public Task ConfirmDemandAsync(
         PoolId poolId,
         string demandId,

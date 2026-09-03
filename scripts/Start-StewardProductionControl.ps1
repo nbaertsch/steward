@@ -1,7 +1,9 @@
 param(
     [string]$InstallRoot = (Join-Path $env:LOCALAPPDATA "Programs\Steward"),
     [string]$DataRoot = (Join-Path $env:LOCALAPPDATA "Steward\control"),
-    [int]$ControlPort = 5112
+    [int]$ControlPort = 5112,
+    [string]$DevCenterEndpoint =
+        "https://72f988bf-86f1-41af-91ab-2d7cd011db47-devcenter-rt3pumrdz6yc6-dc.westus3.devcenter.azure.com/"
 )
 
 $ErrorActionPreference = "Stop"
@@ -11,6 +13,16 @@ $control = Join-Path $controlRoot "Steward.Control.exe"
 $authority = Join-Path $env:LOCALAPPDATA "Steward\keys\devbox-operation-hmac.key"
 $pidPath = Join-Path $DataRoot "control.pid"
 $healthUri = "http://127.0.0.1:$ControlPort/health"
+$databasePath = Join-Path $DataRoot "control.db"
+$sessionTokenPath = Join-Path $DataRoot "control.session"
+$schedulerDatabasePath = Join-Path $DataRoot "scheduler.db"
+$rateDatabasePath = Join-Path $DataRoot "rates.db"
+$portableStateRoot = Join-Path $DataRoot "objects"
+$credentialVaultRoot = Join-Path $DataRoot "credentials"
+$controlPrivateKeyPath = Join-Path $env:LOCALAPPDATA `
+    "Steward\keys\control-private.pem"
+$operationKeyEnvironmentVariable =
+    "STEWARD_DEVBOX_OPERATION_HMAC_KEY"
 
 try {
     $health = Invoke-RestMethod -Uri $healthUri -TimeoutSec 2
@@ -21,7 +33,8 @@ try {
 }
 
 if (-not (Test-Path -LiteralPath $control) -or
-    -not (Test-Path -LiteralPath $authority)) {
+    -not (Test-Path -LiteralPath $authority) -or
+    -not (Test-Path -LiteralPath $controlPrivateKeyPath)) {
     throw "The Steward Control installation or provider authority is unavailable."
 }
 
@@ -35,7 +48,31 @@ try {
         [Convert]::ToBase64String($authorityBytes)
     $process = Start-Process `
         -FilePath $control `
-        -ArgumentList @("--urls", "http://127.0.0.1:$ControlPort") `
+        -ArgumentList @(
+            "--urls", "http://127.0.0.1:$ControlPort",
+            "--Control:DatabasePath", $databasePath,
+            "--Control:LocalSessionTokenPath", $sessionTokenPath,
+            "--Control:Orchestration:SchedulerDatabasePath",
+                $schedulerDatabasePath,
+            "--Control:Orchestration:GlobalRateDatabasePath",
+                $rateDatabasePath,
+            "--Steward:LocalStack:DataRoot", $DataRoot,
+            "--Steward:LocalStack:PortableStateRoot",
+                $portableStateRoot,
+            "--Steward:LocalStack:CredentialVaultRoot",
+                $credentialVaultRoot,
+            "--Steward:LocalStack:TransportEnabled", "true",
+            "--Steward:LocalStack:TransportIdentity", "control",
+            "--Steward:LocalStack:TransportPrivateKeyPemPath",
+                $controlPrivateKeyPath,
+            "--Steward:LocalStack:RdpDvcControlCarrierEnabled", "true",
+            "--Steward:LocalStack:RdpDvcControlCarrierPipeName",
+                "Steward.Control.RdpDvc.v2",
+            "--Steward:LocalStack:DevBox:Enabled", "true",
+            "--Steward:LocalStack:DevBox:Endpoint", $DevCenterEndpoint,
+            "--Steward:LocalStack:DevBox:OperationHandleHmacKeyEnvironmentVariable",
+                $operationKeyEnvironmentVariable
+        ) `
         -WorkingDirectory $controlRoot `
         -WindowStyle Hidden `
         -RedirectStandardOutput (Join-Path $DataRoot "control.out.log") `

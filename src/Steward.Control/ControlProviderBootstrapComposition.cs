@@ -2052,6 +2052,35 @@ public sealed record ControlRdpDvcEndpointBinding(
     }
 }
 
+internal sealed record ControlRdpDvcProviderBinding(
+    string ResourceName,
+    string ProviderResourceId)
+{
+    private static readonly JsonSerializerOptions BindingJsonOptions =
+        new(StewardJson.Options)
+        {
+            PropertyNameCaseInsensitive = true
+        };
+
+    internal static ControlRdpDvcProviderBinding? TryResolve(
+        NodeEndpointRegistration registration)
+    {
+        if (registration.Transport.Kind !=
+                ControlRdpDvcNodeEndpointIssuer.TransportKind ||
+            registration.Transport.Version !=
+                ControlRdpDvcNodeEndpointIssuer.TransportVersion)
+            return null;
+        var binding = registration.Transport.DeserializeData<
+                ControlRdpDvcEndpointBinding>(BindingJsonOptions)
+            ?.Validate()
+            ?? throw new InvalidDataException(
+                "Control RDP DVC endpoint binding is unavailable.");
+        var identity = DevBoxProviderResourceIdentity.Parse(
+            binding.ProviderResourceId);
+        return new(identity.DevBox, binding.ProviderResourceId);
+    }
+}
+
 [SupportedOSPlatform("windows")]
 internal sealed class ControlRdpDvcNodeEndpointIssuer(
     ValidatedControlProviderBootstrapOptions options,

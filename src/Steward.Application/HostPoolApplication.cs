@@ -151,6 +151,56 @@ public sealed class HostPoolApplicationService(
             }).ToArray();
     }
 
+    public async Task RegisterNodeAsync(
+        NodeEndpointRegistration registration,
+        string? providerResourceName = null,
+        string? providerResourceId = null,
+        CancellationToken cancellationToken = default)
+    {
+        registration.Validate();
+        if ((providerResourceName is null) != (providerResourceId is null))
+            throw new ArgumentException(
+                "Provider resource name and identity must be supplied together.");
+        if (providerResourceName is null)
+        {
+            await nodes.RegisterAsync(registration, cancellationToken);
+            return;
+        }
+        var pool = (await ListPoolsAsync(cancellationToken))
+            .SingleOrDefault(value =>
+                value.Policy.PoolId == registration.PoolId)
+            ?? throw new InvalidOperationException(
+                "Node registration Pool is not registered.");
+        var conflicting = (await nodes.ListAsync(cancellationToken))
+            .FirstOrDefault(value =>
+                (value.HostId == registration.HostId ||
+                 value.NodeIncarnationId ==
+                    registration.NodeIncarnationId) &&
+                (value.HostId != registration.HostId ||
+                 value.NodeIncarnationId !=
+                    registration.NodeIncarnationId ||
+                 value.Transport.Kind != registration.Transport.Kind ||
+                 value.Transport.Version !=
+                    registration.Transport.Version ||
+                 value.PeerIdentity != registration.PeerIdentity ||
+                 value.PeerPublicKeyReference !=
+                    registration.PeerPublicKeyReference));
+        if (conflicting is not null)
+            throw new InvalidOperationException(
+                "Host or Node direct endpoint conflicts with durable identity.");
+        await coordinator.AdoptProviderResourceAsync(
+            pool.Policy,
+            new Host(
+                registration.HostId,
+                registration.PoolId,
+                registration.NodeIncarnationId),
+            providerResourceName,
+            providerResourceId!,
+            registration.ObservedAt,
+            cancellationToken);
+        await nodes.RegisterAsync(registration, cancellationToken);
+    }
+
     public async Task<PoolReconcileResult> ReconcileAsync(
         PoolId poolId,
         IReadOnlyList<PoolDemand> demands,

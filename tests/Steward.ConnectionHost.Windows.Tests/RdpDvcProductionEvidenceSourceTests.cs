@@ -60,6 +60,105 @@ public sealed class RdpDvcProductionEvidenceSourceTests
     }
 
     [Fact]
+    public async Task Persistent_plugin_reporter_can_publish_channels_after_ticket_completion()
+    {
+        var key = Key();
+        var firstRoute = PreauthorizedRoute() with
+        {
+            ProtocolVersion = 2
+        };
+        var secondRoute = firstRoute with
+        {
+            ConnectionNonce = Guid.NewGuid()
+        };
+        var thirdRoute = firstRoute with
+        {
+            ConnectionNonce = Guid.NewGuid()
+        };
+        var firstBound = firstRoute.BindWtsSession(41);
+        var secondBound = secondRoute.BindWtsSession(41);
+        var thirdBound = thirdRoute.BindWtsSession(41);
+        await using var source = Source(
+            key,
+            out _,
+            ("first-reference", firstRoute));
+        var first = await source.RegisterExpectedAsync(
+            "first-reference",
+            "connection",
+            "runtime-first",
+            1,
+            CancellationToken.None);
+        var reporter = Guid.NewGuid();
+
+        Assert.True(Accept(
+            source,
+            key,
+            Lifecycle(
+                reporter,
+                1,
+                RdpDvcEvidencePublicationEvent
+                    .StewardComClassActivated)));
+        Assert.True(Accept(
+            source,
+            key,
+            Lifecycle(
+                reporter,
+                2,
+                RdpDvcEvidencePublicationEvent
+                    .StewardPluginInitialized)));
+        Assert.True(Accept(
+            source,
+            key,
+            Lifecycle(
+                reporter,
+                3,
+                RdpDvcEvidencePublicationEvent
+                    .StewardChannelOpened,
+                firstBound)));
+        Assert.True(Accept(
+            source,
+            key,
+            Transport(
+                reporter,
+                4,
+                RdpDvcEvidencePublicationEvent
+                    .DvcHmacAuthenticated,
+                first.Identity with { Route = firstBound })));
+        Assert.True(Accept(
+            source,
+            key,
+            Transport(
+                reporter,
+                5,
+                RdpDvcEvidencePublicationEvent
+                    .SecurePeerAuthenticated,
+                first.Identity with { Route = firstBound })));
+        _ = await source.WaitForEvidenceAsync(
+            first,
+            CancellationToken.None);
+        await source.CancelAsync(first);
+
+        var channel = Lifecycle(
+            reporter,
+            6,
+            RdpDvcEvidencePublicationEvent.StewardChannelOpened,
+            secondBound);
+        var accepted = source.AcceptFrame(
+            Encode(channel, key),
+            DateTimeOffset.UtcNow);
+        Assert.True(accepted.Accepted, accepted.Code);
+        Assert.False(Accept(source, key, channel));
+        Assert.True(Accept(
+            source,
+            key,
+            Lifecycle(
+                reporter,
+                7,
+                RdpDvcEvidencePublicationEvent.StewardChannelOpened,
+                thirdBound)));
+    }
+
+    [Fact]
     public async Task Wrong_route_and_generation_are_rejected()
     {
         var key = Key();

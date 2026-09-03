@@ -38,11 +38,6 @@
       CopyToOutputDirectory="PreserveNewest"
       CopyToPublishDirectory="PreserveNewest" />
     <Content
-      Include="..\Steward.RdpDvc.Client.Windows\bin\$(Configuration)\net10.0-windows\Steward.RdpDvc.Client.Windows.dll"
-      Link="Steward.RdpDvc.Client.Windows.dll"
-      CopyToOutputDirectory="PreserveNewest"
-      CopyToPublishDirectory="PreserveNewest" />
-    <Content
       Include="$(NuGetPackageRoot)system.security.cryptography.protecteddata\10.0.0\lib\net10.0\System.Security.Cryptography.ProtectedData.dll"
       Link="System.Security.Cryptography.ProtectedData.dll"
       CopyToOutputDirectory="PreserveNewest"

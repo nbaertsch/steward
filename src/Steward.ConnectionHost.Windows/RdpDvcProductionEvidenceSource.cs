@@ -394,13 +394,25 @@ public sealed class ProductionRdpDvcRuntimeEvidenceSource :
                 routes.Remove(
                     state.Ticket.Identity.Route.AsPreauthorized());
                 state.Completion.TrySetCanceled();
-                foreach (var reporter in reporters
+                foreach (var pair in reporters
                              .Where(value =>
                                  value.Value.TicketId ==
                                  ticket.TicketId)
-                             .Select(value => value.Key)
                              .ToArray())
-                    reporters.Remove(reporter);
+                {
+                    if (!pair.Value.ReusableLifecycle)
+                    {
+                        reporters.Remove(pair.Key);
+                        continue;
+                    }
+                    pair.Value.TicketId = null;
+                    pair.Value.ReusableRoute =
+                        state.BoundIdentity?.Route ??
+                        state.Ticket.Identity.Route;
+                    pair.Value.Pending.Clear();
+                    pair.Value.Pending.Add(RequiredOrder[0]);
+                    pair.Value.Pending.Add(RequiredOrder[1]);
+                }
             }
         }
         if (removed &&
@@ -520,12 +532,13 @@ public sealed class ProductionRdpDvcRuntimeEvidenceSource :
             publication.CandidateRoute is not { } route ||
             reporter.TicketId is not null ||
             !reporter.Pending.SequenceEqual(RequiredOrder[..2]) ||
-            route.WtsSessionId <= 0 ||
-            !TryFindTicketForCandidate(
+            route.WtsSessionId <= 0)
+            return new(false, "DVC_EVIDENCE_ROUTE_REJECTED");
+        if (!TryFindTicketForCandidate(
                 route,
                 out var ticketId,
                 out var ticket))
-            return new(false, "DVC_EVIDENCE_ROUTE_REJECTED");
+            return AcceptReusableChannel(route, reporter);
         if (route.ProtocolVersion == 1 &&
             ticket.Ticket.Identity.Route.RetainedV1Endpoint is
             { } retained)
@@ -543,6 +556,19 @@ public sealed class ProductionRdpDvcRuntimeEvidenceSource :
             return new(false, "DVC_EVIDENCE_ORDER_REJECTED");
         reporter.Pending.Clear();
         reporter.TicketId = ticketId;
+        reporter.ReusableLifecycle = true;
+        return new(true, "DVC_EVIDENCE_ACCEPTED");
+    }
+
+    private static RdpDvcEvidencePublicationResult AcceptReusableChannel(
+        RdpDvcEvidenceRoute route,
+        ReporterState reporter)
+    {
+        if (reporter.ReusableRoute is not { } reusable ||
+            (route.ProtocolVersion == 2
+                ? !reusable.MatchesAuthenticatedRoute(route)
+                : !reusable.HasSamePreauthorizedBase(route)))
+            return new(false, "DVC_EVIDENCE_ROUTE_REJECTED");
         return new(true, "DVC_EVIDENCE_ACCEPTED");
     }
 
@@ -859,5 +885,7 @@ public sealed class ProductionRdpDvcRuntimeEvidenceSource :
         internal long LastSequence { get; set; }
         internal List<RdpDvcEvidencePublicationEvent> Pending { get; } = [];
         internal Guid? TicketId { get; set; }
+        internal bool ReusableLifecycle { get; set; }
+        internal RdpDvcEvidenceRoute? ReusableRoute { get; set; }
     }
 }

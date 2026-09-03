@@ -143,6 +143,69 @@ public sealed class RecreateAndPoolTests
     }
 
     [Fact]
+    public async Task ProviderResourceAdoptionHonorsHardMaximum()
+    {
+        var store = new InMemoryPoolStateStore();
+        var coordinator = new PoolCoordinator(store);
+        var poolId = PoolId.New();
+        var policy = new PoolPolicy(
+            poolId,
+            0,
+            1,
+            TimeSpan.FromMinutes(10));
+        var first = NewHost(poolId);
+        var second = NewHost(poolId);
+
+        await coordinator.AdoptProviderResourceAsync(
+            policy,
+            first,
+            "box-one",
+            "project/me/box-one",
+            DateTimeOffset.UtcNow);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => coordinator.AdoptProviderResourceAsync(
+                policy,
+                second,
+                "box-two",
+                "project/me/box-two",
+                DateTimeOffset.UtcNow));
+        Assert.Contains("hard maximum", exception.Message);
+        Assert.Single((await store.LoadAsync(poolId)).Members);
+    }
+
+    [Fact]
+    public async Task ProviderResourceAdoptionRejectsDuplicateIdentity()
+    {
+        var store = new InMemoryPoolStateStore();
+        var coordinator = new PoolCoordinator(store);
+        var poolId = PoolId.New();
+        var policy = new PoolPolicy(
+            poolId,
+            0,
+            2,
+            TimeSpan.FromMinutes(10));
+        var first = NewHost(poolId);
+        var second = NewHost(poolId);
+
+        await coordinator.AdoptProviderResourceAsync(
+            policy,
+            first,
+            "box",
+            "project/me/box",
+            DateTimeOffset.UtcNow);
+
+        await Assert.ThrowsAsync<InvalidDataException>(
+            () => coordinator.AdoptProviderResourceAsync(
+                policy,
+                second,
+                "box",
+                "project/me/box",
+                DateTimeOffset.UtcNow));
+        Assert.Single((await store.LoadAsync(poolId)).Members);
+    }
+
+    [Fact]
     public async Task WarmMinimumIdleScaleAndAffinityAreExplicit()
     {
         var store = new InMemoryPoolStateStore();

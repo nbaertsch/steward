@@ -378,11 +378,17 @@ app.MapGet("/nodes", async (
     CancellationToken token) => Results.Ok(await registrations.ListAsync(token)));
 app.MapPost("/nodes", async (
     Steward.Orchestration.RegisterNodeRequest request,
-    Steward.Orchestration.ControlNodeRegistrationStore registrations,
+    Steward.Application.HostPoolApplicationService service,
     CancellationToken token) =>
 {
     var registration = request.ToRegistration();
-    await registrations.RegisterAsync(registration, token);
+    var provider = Steward.Control.ControlRdpDvcProviderBinding.TryResolve(
+        registration);
+    await service.RegisterNodeAsync(
+        registration,
+        provider?.ResourceName,
+        provider?.ProviderResourceId,
+        token);
     return Results.Created($"/nodes/{registration.NodeIncarnationId}", registration);
 });
 app.MapPost("/nodes/{id}/rotate-peer", async (
