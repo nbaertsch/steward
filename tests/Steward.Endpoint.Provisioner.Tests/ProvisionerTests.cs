@@ -417,6 +417,8 @@ public sealed class ProvisionerTests : IDisposable
         var receiptPath = provisioner.Provision(options);
         _ = provisioner.Provision(options);
 
+        Assert.True(Directory.Exists(
+            Path.Combine(state, "workspaces")));
         Assert.False(File.Exists(Path.Combine(state, "nonce-sequence.json")));
         var receipt = File.ReadAllText(receiptPath);
         Assert.DoesNotContain("connectionNonces", receipt, StringComparison.Ordinal);

@@ -2057,6 +2057,8 @@ internal sealed class EndpointProvisioner(
                     node,
                     nodePublic,
                     migrationReceipt);
+                files.CreateDirectory(
+                    Path.Combine(workingRoot, "workspaces"));
                 security.PrepareStateRoot(
                     workingRoot,
                     user.Sid,
